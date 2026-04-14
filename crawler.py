@@ -26,7 +26,14 @@ PORTAL_URL = "https://thongtin.tdtu.edu.vn/"
 # Selector hints – adjust if the portal markup changes
 SELECTOR_USERNAME = "input[name='username'], input[id='username'], input[placeholder*='MSSV'], input[type='text']"
 SELECTOR_PASSWORD = "input[name='password'], input[id='password'], input[type='password']"
-SELECTOR_SUBMIT = "button[type='submit'], input[type='submit']"
+SELECTOR_SUBMIT = (
+    "button[type='submit'], input[type='submit'], "
+    "button.btn-login, "
+    "input[type='button'][value*='Login'], input[type='button'][value*='login'], "
+    "input[type='button'][value*='Đăng'], "
+    "button.btn[type!='button']:has-text('Login'), "
+    "button:has-text('Đăng nhập'), button:has-text('Login')"
+)
 
 # The schedule table typically lives inside an element with this text / URL
 SCHEDULE_MENU_TEXT = re.compile(r"thời khóa biểu|TKB|lịch học", re.IGNORECASE)
@@ -117,13 +124,30 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             logger.info("Filling in login credentials for student %s", sid)
             page.fill(SELECTOR_USERNAME, sid)
             page.fill(SELECTOR_PASSWORD, pwd)
-            page.click(SELECTOR_SUBMIT)
+
+            # Record the login page URL *after* any redirect so we can
+            # detect a failed login (i.e., we were returned to this URL).
+            login_page_url = page.url
+
+            # Try clicking the submit button; fall back to pressing Enter when
+            # the button cannot be located (e.g. portal markup changes).
+            try:
+                page.locator(SELECTOR_SUBMIT).first.click(timeout=5_000)
+            except Exception:
+                logger.warning(
+                    "Submit button not found via selector %r; pressing Enter to submit.",
+                    SELECTOR_SUBMIT,
+                )
+                page.locator(SELECTOR_PASSWORD).press("Enter")
 
             # Wait until navigation is complete after login
             page.wait_for_load_state("networkidle", timeout=60_000)
 
-            # Basic check – if we're still on the login page, fail loudly
-            if page.url == PORTAL_URL or "login" in page.url.lower():
+            # Basic check – if we're still on the login page, fail loudly.
+            # We compare against the login_page_url captured after redirect
+            # so that the check works regardless of whether the portal uses
+            # its canonical URL or an old-portal redirect.
+            if page.url == login_page_url or "login" in page.url.lower():
                 # Try to grab an error message from the page for better diagnostics
                 error_text = page.text_content("body") or ""
                 raise RuntimeError(
