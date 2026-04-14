@@ -14,6 +14,8 @@ import os
 import re
 from typing import Any
 
+from time_utils import local_today
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gemini-2.5-flash-lite"
@@ -34,7 +36,7 @@ def parse_appointment_with_gemini(text: str, *, reference_date: dt.date | None =
         logger.warning("Gemini SDK is not available: %s", exc)
         return None
 
-    ref_date = reference_date or dt.date.today()
+    ref_date = reference_date or local_today()
     genai.configure(api_key=api_key)
 
     prompt = f"""

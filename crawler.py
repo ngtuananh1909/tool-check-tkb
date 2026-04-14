@@ -21,6 +21,8 @@ from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
+from time_utils import local_today
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -391,7 +393,7 @@ def _pick_target_semester(
         logger.warning("TARGET_SEMESTER=%s not found in dropdown options.", preferred_semester)
 
     # 2) Date-based default: Jan-Jul -> HK2/(year-1)-year, Aug-Dec -> HK1/year-(year+1)
-    today = datetime.date.today()
+    today = local_today()
     if today.month <= 7:
         hk_num = 2
         start_year = today.year - 1

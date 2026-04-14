@@ -15,6 +15,8 @@ import time
 
 import requests
 
+from time_utils import local_today
+
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API_BASE = "https://api.telegram.org/bot{token}/{method}"
@@ -131,9 +133,7 @@ def send_error_alert(error: str) -> None:
 
 def _build_message(classes: list[dict]) -> str:
     """Return a MarkdownV2-formatted string for *classes*."""
-    import datetime
-
-    today = datetime.date.today()
+    today = local_today()
     weekday_name = today.strftime("%A")
     date_str = today.strftime("%d/%m/%Y")
 
@@ -166,9 +166,7 @@ def _build_message(classes: list[dict]) -> str:
 
 def _build_combined_message(classes: list[dict], appointments: list[dict]) -> str:
     """Return a MarkdownV2 summary containing both classes and appointments."""
-    import datetime
-
-    today = datetime.date.today()
+    today = local_today()
     weekday_name = today.strftime("%A")
     date_str = today.strftime("%d/%m/%Y")
 

@@ -30,6 +30,8 @@ import httpx
 from postgrest.exceptions import APIError
 from supabase import create_client, Client
 
+from time_utils import local_today
+
 logger = logging.getLogger(__name__)
 
 TABLE_NAME = "schedules"
@@ -192,21 +194,19 @@ def get_today_schedule(student_id: str | None = None, day_of_week: str | None = 
         Overrides the STUDENT_ID environment variable.
     day_of_week : str, optional
         English weekday name (e.g. "Monday"). Defaults to today's weekday
-        derived from ``datetime.date.today()``.
+        in the configured application timezone.
 
     Returns
     -------
     list[dict]
         Rows from the ``schedules`` table, sorted by start_period ascending.
     """
-    import datetime
-
     sid = student_id or os.environ.get("STUDENT_ID")
     if not sid:
         raise ValueError("student_id is required; set STUDENT_ID env var.")
 
     if day_of_week is None:
-        day_of_week = datetime.date.today().strftime("%A")  # e.g. "Monday"
+        day_of_week = local_today().strftime("%A")  # e.g. "Monday"
 
     logger.info("Querying schedule for student_id=%s, day=%s", sid, day_of_week)
 
@@ -298,7 +298,7 @@ def get_today_appointments(
     if not sid:
         raise ValueError("student_id is required; set STUDENT_ID env var.")
 
-    date_value = (target_date or datetime.date.today()).isoformat()
+    date_value = (target_date or local_today()).isoformat()
     logger.info("Querying appointments for student_id=%s, date=%s", sid, date_value)
 
     client = _get_client(for_write=False)
