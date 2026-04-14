@@ -53,6 +53,15 @@ def _escape(text: str) -> str:
     return _MARKDOWN_V2_SPECIAL.sub(r"\\\1", str(text))
 
 
+def _escape_code_span(text: str) -> str:
+    """Escape text for use inside a MarkdownV2 inline code span (backticks).
+
+    Inside a code span only the backtick itself and the backslash need escaping;
+    all other characters are treated as literals by Telegram.
+    """
+    return str(text).replace("\\", "\\\\").replace("`", "\\`")
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -95,11 +104,9 @@ def send_error_alert(error: str) -> None:
         logger.error("Telegram credentials missing; cannot send error alert.")
         return
 
-    # In MarkdownV2 inline code spans only the backtick itself needs escaping.
-    safe_error = error.replace("\\", "\\\\").replace("`", "\\`")
     text = (
         "⚠️ *Schedule Bot Error*\n\n"
-        f"`{safe_error}`"
+        f"`{_escape_code_span(error)}`"
     )
     try:
         _send_message(token, chat_id, text)

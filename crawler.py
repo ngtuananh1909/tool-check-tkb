@@ -28,6 +28,8 @@ SCHEDULE_URL = "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx"
 SELECTOR_USERNAME = "input[name='username'], input[id='username'], input[placeholder*='MSSV'], input[type='text']"
 SELECTOR_PASSWORD = "input[name='password'], input[id='password'], input[type='password']"
 SELECTOR_SUBMIT = "button[type='submit'], input[type='submit']"
+# Maximum time (ms) to wait for the submit button before falling back to Enter
+SUBMIT_BUTTON_TIMEOUT_MS = 10_000
 
 # The schedule table typically lives inside an element with this text / URL
 SCHEDULE_MENU_TEXT = re.compile(r"thời khóa biểu|TKB|lịch học", re.IGNORECASE)
@@ -122,7 +124,7 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             # Try clicking a submit button; fall back to pressing Enter on the
             # password field in case the portal uses a non-standard button type.
             try:
-                page.click(SELECTOR_SUBMIT, timeout=10_000)
+                page.click(SELECTOR_SUBMIT, timeout=SUBMIT_BUTTON_TIMEOUT_MS)
             except PlaywrightTimeoutError:
                 logger.warning(
                     "Submit button not found via selector '%s'; pressing Enter to submit.",
