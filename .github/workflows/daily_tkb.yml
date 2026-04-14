@@ -11,7 +11,7 @@ on:
   schedule:
     # Cron syntax: minute hour day-of-month month day-of-week
     # 23:00 UTC = 06:00 ICT (UTC+7)
-    - cron: "0 23 * * *"
+    - cron: "30 23 * * *"
 
   # Allow manual triggers from the GitHub Actions UI
   workflow_dispatch:
