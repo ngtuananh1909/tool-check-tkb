@@ -28,6 +28,8 @@ SCHEDULE_URL = "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx"
 SELECTOR_USERNAME = "input[name='username'], input[id='username'], input[placeholder*='MSSV'], input[type='text']"
 SELECTOR_PASSWORD = "input[name='password'], input[id='password'], input[type='password']"
 SELECTOR_SUBMIT = "button[type='submit'], input[type='submit']"
+# Maximum time (ms) to wait for the submit button before falling back to Enter
+SUBMIT_BUTTON_TIMEOUT_MS = 10_000
 
 # The schedule table typically lives inside an element with this text / URL
 SCHEDULE_MENU_TEXT = re.compile(r"thời khóa biểu|TKB|lịch học", re.IGNORECASE)
@@ -118,7 +120,17 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             logger.info("Filling in login credentials for student %s", sid)
             page.fill(SELECTOR_USERNAME, sid)
             page.fill(SELECTOR_PASSWORD, pwd)
-            page.click(SELECTOR_SUBMIT)
+
+            # Try clicking a submit button; fall back to pressing Enter on the
+            # password field in case the portal uses a non-standard button type.
+            try:
+                page.click(SELECTOR_SUBMIT, timeout=SUBMIT_BUTTON_TIMEOUT_MS)
+            except PlaywrightTimeoutError:
+                logger.warning(
+                    "Submit button not found via selector '%s'; pressing Enter to submit.",
+                    SELECTOR_SUBMIT,
+                )
+                page.press(SELECTOR_PASSWORD, "Enter")
 
             # Wait until navigation is complete after login
             page.wait_for_load_state("networkidle", timeout=60_000)
