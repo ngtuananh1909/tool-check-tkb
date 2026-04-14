@@ -42,6 +42,73 @@ Nếu không set `TARGET_SEMESTER`, bot tự chọn theo rule:
 /home/tuananh/Documents/tool-check-tkb/.venv/bin/python main.py
 ```
 
+### 4. Bật bảng lịch hẹn cá nhân trên Supabase (mới)
+
+Để dùng tính năng lịch hẹn cá nhân và bản tin tổng hợp, chạy SQL trong file sau bằng Supabase SQL Editor:
+
+- [supabase/init_tables.sql](supabase/init_tables.sql)
+
+Sau khi chạy script này, bot sẽ có thêm bảng:
+
+- `appointments`
+- `notification_log`
+
+Nếu chưa chạy SQL, bot vẫn gửi lịch học bình thường nhưng phần lịch hẹn sẽ rỗng.
+
+### 5. Chạy bot Telegram tạo lịch hẹn (MVP)
+
+Chạy listener Telegram (long polling):
+
+```bash
+/home/tuananh/Documents/tool-check-tkb/.venv/bin/python telegram_mvp_bot.py
+```
+
+Bot sẽ ưu tiên dùng Gemini để đọc tin nhắn và tạo JSON trước, rồi mới fallback sang parser rule-based nếu Gemini chưa có hoặc trả kết quả không rõ.
+
+### 6. Chạy webhook Telegram
+
+Webhook là cách phù hợp nếu bạn muốn bot chạy khi tắt máy. Chạy local bằng FastAPI + uvicorn:
+
+```bash
+/home/tuananh/Documents/tool-check-tkb/.venv/bin/python -m uvicorn webhook_app:app --host 0.0.0.0 --port 8000
+```
+
+Muốn Telegram gọi được webhook, bạn cần:
+
+- Một URL public HTTPS trỏ tới `/telegram/webhook`
+- Điền `TELEGRAM_WEBHOOK_URL` và `TELEGRAM_WEBHOOK_SECRET` trong `.env`
+- Khi app khởi động, nó sẽ tự đăng ký webhook nếu thấy `TELEGRAM_WEBHOOK_URL`
+
+Để auto-run 24/7 trên VPS, dùng file service mẫu:
+
+- [deploy/telegram-webhook.service](deploy/telegram-webhook.service)
+
+Format tin nhắn để tạo lịch hẹn:
+
+```text
+tieude-thoigian-diadiem(optional)
+```
+
+Ví dụ hợp lệ:
+
+- `hop nhom-15/04 14:00-B402`
+- `di kham-2026-04-16 09:30`
+- `gym-18:00`
+
+Rule parse thời gian MVP:
+
+- `YYYY-MM-DD HH:MM`
+- `DD/MM/YYYY HH:MM`
+- `DD/MM HH:MM` (tự dùng năm hiện tại)
+- `HH:MM` (tự dùng ngày hôm nay)
+
+Lệnh hỗ trợ nhanh:
+
+- `/help`: xem hướng dẫn format
+- `/today`: xem lịch hẹn hôm nay
+
+Nếu có `GEMINI_API_KEY` trong `.env`, bot sẽ cố gắng hiểu câu tự nhiên và lưu vào database theo JSON. Nếu không có key, bot vẫn chạy bằng format cứng ở trên.
+
 ## Bot làm gì
 
 Luồng chạy của bot:

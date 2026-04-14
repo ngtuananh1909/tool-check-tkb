@@ -11,6 +11,7 @@ The message is formatted using Telegram's MarkdownV2 specification.
 import logging
 import os
 import re
+import time
 
 import requests
 
@@ -88,6 +89,15 @@ def send_today_schedule(classes: list[dict]) -> None:
     _send_message(token, chat_id, message)
 
 
+def send_daily_summary(classes: list[dict], appointments: list[dict]) -> None:
+    """Send one combined message for today's classes and personal appointments."""
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    chat_id = os.environ["TELEGRAM_CHAT_ID"]
+
+    message = _build_combined_message(classes, appointments)
+    _send_message(token, chat_id, message)
+
+
 def send_error_alert(error: str) -> None:
     """
     Send a brief error alert to Telegram so failures are visible immediately.
@@ -154,6 +164,72 @@ def _build_message(classes: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _build_combined_message(classes: list[dict], appointments: list[dict]) -> str:
+    """Return a MarkdownV2 summary containing both classes and appointments."""
+    import datetime
+
+    today = datetime.date.today()
+    weekday_name = today.strftime("%A")
+    date_str = today.strftime("%d/%m/%Y")
+
+    lines: list[str] = [
+        f"📅 *Kế hoạch hôm nay \\- {_escape(weekday_name)}, {_escape(date_str)}*",
+        "",
+        "🎓 *Lịch học*",
+    ]
+
+    if not classes:
+        lines += ["Không có lớp học\\.", ""]
+    else:
+        for idx, cls in enumerate(classes, start=1):
+            subject = _escape(cls.get("subject_name", "N/A"))
+            room = _escape(cls.get("room", "N/A"))
+            start = cls.get("start_period", 0)
+            end = cls.get("end_period", 0)
+            start_time = _escape(PERIOD_TIME.get(start, str(start)))
+            end_time = _escape(PERIOD_TIME.get(end, str(end)))
+
+            lines += [
+                f"{_escape(str(idx))}\\. {subject}",
+                f"   📍 `{room}`",
+                f"   ⏰ Tiết {_escape(str(start))}→{_escape(str(end))} \\({start_time}\\-{end_time}\\)",
+            ]
+        lines.append("")
+
+    lines.append("🗓️ *Lịch hẹn cá nhân*")
+    if not appointments:
+        lines += ["Không có lịch hẹn\\.", ""]
+    else:
+        for idx, appt in enumerate(appointments, start=1):
+            title = _escape(appt.get("title", "N/A"))
+            start = _escape(_display_time(appt.get("start_time")))
+            end = _escape(_display_time(appt.get("end_time")))
+            location = _escape(appt.get("location") or "")
+            note = _escape(appt.get("note") or "")
+
+            time_range = f"{start} \\- {end}" if start and end else (start or "all day")
+            lines.append(f"{_escape(str(idx))}\\. {title}")
+            lines.append(f"   ⏰ {time_range}")
+            if location:
+                lines.append(f"   📍 {location}")
+            if note:
+                lines.append(f"   📝 {note}")
+        lines.append("")
+
+    lines.append("_Chúc bạn một ngày hiệu quả\\!_")
+    return "\n".join(lines)
+
+
+def _display_time(value: str | None) -> str:
+    """Format DB time strings like HH:MM:SS into HH:MM for display."""
+    if not value:
+        return ""
+    text = str(value).strip()
+    if len(text) >= 5 and text[2] == ":":
+        return text[:5]
+    return text
+
+
 def _send_message(token: str, chat_id: str, text: str) -> None:
     """
     POST a message to the Telegram Bot API.
@@ -172,16 +248,35 @@ def _send_message(token: str, chat_id: str, text: str) -> None:
     }
 
     logger.info("Sending Telegram message to chat_id=%s", chat_id)
-    response = requests.post(url, json=payload, timeout=30)
+    last_exc: Exception | None = None
 
-    if not response.ok:
-        raise RuntimeError(
-            f"Telegram API error {response.status_code}: {response.text}"
-        )
+    for attempt in range(1, 4):
+        try:
+            response = requests.post(url, json=payload, timeout=30)
+            if not response.ok:
+                raise RuntimeError(
+                    f"Telegram API error {response.status_code}: {response.text}"
+                )
 
-    result = response.json()
-    if not result.get("ok"):
-        raise RuntimeError(f"Telegram API returned ok=false: {result}")
+            result = response.json()
+            if not result.get("ok"):
+                raise RuntimeError(f"Telegram API returned ok=false: {result}")
 
-    message_id = (result.get("result") or {}).get("message_id", "unknown")
-    logger.info("Telegram message sent successfully (message_id=%s).", message_id)
+            message_id = (result.get("result") or {}).get("message_id", "unknown")
+            logger.info("Telegram message sent successfully (message_id=%s).", message_id)
+            return
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt == 3:
+                break
+            delay = 2 ** (attempt - 1)
+            logger.warning(
+                "Telegram send failed due to network issue (%s). Retrying in %ss (%d/3).",
+                exc,
+                delay,
+                attempt,
+            )
+            time.sleep(delay)
+
+    assert last_exc is not None
+    raise RuntimeError(f"Telegram message send failed after retries: {last_exc}")

@@ -74,15 +74,17 @@ def main() -> None:
         return
 
     # ------------------------------------------------------------------
-    # Step 3 – Fetch today's classes
+    # Step 3 – Fetch today's classes and appointments
     # ------------------------------------------------------------------
-    logger.info("=== Step 3: Fetching today's classes from Supabase ===")
+    logger.info("=== Step 3: Fetching today's classes and appointments from Supabase ===")
     try:
-        from database import get_today_schedule
+        from database import get_today_schedule, get_today_appointments
         today_classes = get_today_schedule(student_id=student_id)
+        today_appointments = get_today_appointments(student_id=student_id)
         logger.info("Today has %d class(es).", len(today_classes))
+        logger.info("Today has %d appointment(s).", len(today_appointments))
     except Exception as exc:
-        _handle_fatal("Failed to fetch today's schedule", exc)
+        _handle_fatal("Failed to fetch today's data", exc)
         return
 
     # ------------------------------------------------------------------
@@ -90,8 +92,8 @@ def main() -> None:
     # ------------------------------------------------------------------
     logger.info("=== Step 4: Sending Telegram notification ===")
     try:
-        from notifier import send_today_schedule
-        send_today_schedule(today_classes)
+        from notifier import send_daily_summary
+        send_daily_summary(today_classes, today_appointments)
         logger.info("Notification sent. Pipeline complete.")
     except Exception as exc:
         _handle_fatal("Telegram notification failed", exc)

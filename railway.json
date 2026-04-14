@@ -1,0 +1,62 @@
+{
+  "$schema": "https://railway.app/schema.json",
+  "build": {
+    "builder": "dockerfile",
+    "context": "."
+  },
+  "deploy": {
+    "startCommand": "uvicorn webhook_app:app --host 0.0.0.0 --port $PORT",
+    "restartPolicyMaxRetries": 5,
+    "restartPolicyWindow": 600
+  },
+  "env": {
+    "STUDENT_ID": {
+      "description": "TDTU student ID",
+      "example": "21nnXXXXX"
+    },
+    "PASSWORD": {
+      "description": "TDTU portal password",
+      "sensitive": true
+    },
+    "SUPABASE_URL": {
+      "description": "Supabase project URL",
+      "example": "https://xxx.supabase.co"
+    },
+    "SUPABASE_SERVICE_ROLE_KEY": {
+      "description": "Supabase service role key (for writes)",
+      "sensitive": true
+    },
+    "SUPABASE_KEY": {
+      "description": "Supabase public key",
+      "sensitive": true
+    },
+    "TELEGRAM_BOT_TOKEN": {
+      "description": "Telegram bot token from @BotFather",
+      "sensitive": true,
+      "example": "123456:ABCdefGHIjklMNOpqrsTUVwxyz"
+    },
+    "TELEGRAM_CHAT_ID": {
+      "description": "Your Telegram chat ID (get from bot)",
+      "example": "987654321"
+    },
+    "TELEGRAM_WEBHOOK_URL": {
+      "description": "Public webhook URL (set after deployment)",
+      "example": "https://tool-check-tkb-production.up.railway.app/telegram/webhook"
+    },
+    "TELEGRAM_WEBHOOK_SECRET": {
+      "description": "Random secret token for webhook security",
+      "sensitive": true,
+      "example": "your_random_secret_here"
+    },
+    "GEMINI_API_KEY": {
+      "description": "Google Gemini API key (optional)",
+      "sensitive": true,
+      "required": false
+    },
+    "TARGET_SEMESTER": {
+      "description": "Optional semester override (e.g., HK2/2025-2026)",
+      "example": "HK2/2025-2026",
+      "required": false
+    }
+  }
+}
