@@ -20,7 +20,10 @@ Target table schema (SQL):
 
 import logging
 import os
+import base64
+import json
 
+from postgrest.exceptions import APIError
 from supabase import create_client, Client
 
 logger = logging.getLogger(__name__)
@@ -28,10 +31,48 @@ logger = logging.getLogger(__name__)
 TABLE_NAME = "schedules"
 
 
-def _get_client() -> Client:
+def _decode_jwt_role(jwt_token: str) -> str | None:
+    """Best-effort decode of JWT role claim; returns None if token is not JWT."""
+    try:
+        parts = jwt_token.split(".")
+        if len(parts) < 2:
+            return None
+
+        payload = parts[1]
+        padding = "=" * (-len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(payload + padding).decode("utf-8")
+        data = json.loads(decoded)
+        role = data.get("role")
+        return str(role) if role else None
+    except Exception:
+        return None
+
+
+def _resolve_supabase_key(for_write: bool) -> str:
+    """Resolve the Supabase API key with write-safe priority order."""
+    service_role_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    standard_key = os.environ.get("SUPABASE_KEY")
+
+    key = service_role_key or standard_key
+    if not key:
+        raise KeyError("SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY must be set.")
+
+    if for_write and not service_role_key:
+        role = _decode_jwt_role(key)
+        if role == "anon":
+            logger.warning(
+                "Using anon SUPABASE_KEY for write operation. "
+                "This usually fails with RLS (42501). "
+                "Set SUPABASE_SERVICE_ROLE_KEY for server-side writes."
+            )
+
+    return key
+
+
+def _get_client(for_write: bool = False) -> Client:
     """Create and return a Supabase client using env vars."""
     url = os.environ["SUPABASE_URL"]
-    key = os.environ["SUPABASE_KEY"]
+    key = _resolve_supabase_key(for_write=for_write)
     return create_client(url, key)
 
 
@@ -65,30 +106,41 @@ def upsert_schedule(schedule: list[dict], student_id: str | None = None) -> None
         logger.warning("Empty schedule provided; skipping database update.")
         return
 
-    client = _get_client()
+    client = _get_client(for_write=True)
 
     # -------------------------------------------------------------------------
     # Step 1 – Clear existing schedule for this student
     # -------------------------------------------------------------------------
     logger.info("Clearing existing schedule for student_id=%s", sid)
-    delete_resp = (
-        client.table(TABLE_NAME)
-        .delete()
-        .eq("student_id", sid)
-        .execute()
-    )
-    logger.debug("Delete response: %s", delete_resp)
+    try:
+        delete_resp = (
+            client.table(TABLE_NAME)
+            .delete()
+            .eq("student_id", sid)
+            .execute()
+        )
+        logger.debug("Delete response: %s", delete_resp)
 
-    # -------------------------------------------------------------------------
-    # Step 2 – Insert fresh schedule rows
-    # -------------------------------------------------------------------------
-    logger.info("Inserting %d new schedule rows for student_id=%s", len(schedule), sid)
-    insert_resp = (
-        client.table(TABLE_NAME)
-        .insert(schedule)
-        .execute()
-    )
-    logger.debug("Insert response: %s", insert_resp)
+        # ---------------------------------------------------------------------
+        # Step 2 – Insert fresh schedule rows
+        # ---------------------------------------------------------------------
+        logger.info("Inserting %d new schedule rows for student_id=%s", len(schedule), sid)
+        insert_resp = (
+            client.table(TABLE_NAME)
+            .insert(schedule)
+            .execute()
+        )
+        logger.debug("Insert response: %s", insert_resp)
+    except APIError as exc:
+        detail = str(exc)
+        if "42501" in detail or "row-level security" in detail.lower():
+            raise RuntimeError(
+                "Supabase write blocked by RLS. "
+                "Fix by setting SUPABASE_SERVICE_ROLE_KEY for backend writes, "
+                "or create INSERT/DELETE policies on table 'schedules'. "
+                f"Original error: {exc}"
+            ) from exc
+        raise
 
     logger.info("Schedule updated successfully in Supabase.")
 
@@ -121,7 +173,7 @@ def get_today_schedule(student_id: str | None = None, day_of_week: str | None = 
 
     logger.info("Querying schedule for student_id=%s, day=%s", sid, day_of_week)
 
-    client = _get_client()
+    client = _get_client(for_write=False)
     response = (
         client.table(TABLE_NAME)
         .select("subject_name, room, day_of_week, start_period, end_period")
