@@ -1,9 +1,10 @@
 """
 crawler.py – Playwright-based scraper for TDTU student schedule portal.
 
-Logs in to https://thongtin.tdtu.edu.vn/ using credentials from environment
-variables, navigates to the schedule section, and parses the timetable HTML
-table.
+Logs in to https://thongtin.tdtu.edu.vn/ (which currently redirects to
+https://old-stdportal.tdtu.edu.vn/Login/Index) using credentials from
+environment variables, navigates to the schedule section, and parses the
+timetable HTML table.
 
 Required environment variables:
     STUDENT_ID  – TDTU student ID used as the login username
@@ -22,6 +23,9 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 PORTAL_URL = "https://thongtin.tdtu.edu.vn/"
+
+# Timeout (ms) for locating the submit button before falling back to Enter
+SUBMIT_BUTTON_TIMEOUT_MS = 5_000
 
 # Selector hints – adjust if the portal markup changes
 SELECTOR_USERNAME = "input[name='username'], input[id='username'], input[placeholder*='MSSV'], input[type='text']"
@@ -132,7 +136,7 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             # Try clicking the submit button; fall back to pressing Enter when
             # the button cannot be located (e.g. portal markup changes).
             try:
-                page.locator(SELECTOR_SUBMIT).first.click(timeout=5_000)
+                page.locator(SELECTOR_SUBMIT).first.click(timeout=SUBMIT_BUTTON_TIMEOUT_MS)
             except Exception:
                 logger.warning(
                     "Submit button not found via selector %r; pressing Enter to submit.",
