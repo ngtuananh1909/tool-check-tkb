@@ -137,7 +137,7 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             # Step 3 – Navigate to the schedule section
             # ----------------------------------------------------------------
             # Try to find and click a navigation link that matches common labels
-            schedule_link = page.locator(f"a:has-text('{SCHEDULE_MENU_TEXT.pattern}')")
+            schedule_link = page.get_by_text(SCHEDULE_MENU_TEXT)
             if schedule_link.count() == 0:
                 # Fallback: look for any link whose href contains 'tkb' or 'schedule'
                 schedule_link = page.locator("a[href*='tkb'], a[href*='schedule'], a[href*='lichhoc']")
@@ -222,8 +222,10 @@ def _parse_schedule_table(page, student_id: str) -> list[dict]:
                 continue
 
             try:
-                start_period = int(re.search(r"\d+", start_raw).group()) if re.search(r"\d+", start_raw) else 0
-                end_period = int(re.search(r"\d+", end_raw).group()) if re.search(r"\d+", end_raw) else 0
+                start_match = re.search(r"\d+", start_raw)
+                end_match = re.search(r"\d+", end_raw)
+                start_period = int(start_match.group()) if start_match else 0
+                end_period = int(end_match.group()) if end_match else 0
             except (AttributeError, ValueError):
                 start_period = 0
                 end_period = 0

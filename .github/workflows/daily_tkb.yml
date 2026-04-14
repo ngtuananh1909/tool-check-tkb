@@ -21,6 +21,12 @@ jobs:
     name: Fetch & Send Schedule
     runs-on: ubuntu-latest
 
+    # Restrict GITHUB_TOKEN to the minimum required permissions.
+    # This workflow only reads repository contents (checkout) and does not
+    # write back to the repository.
+    permissions:
+      contents: read
+
     # All secrets are injected as environment variables so the Python code
     # can read them with os.environ.
     env:

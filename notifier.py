@@ -174,4 +174,5 @@ def _send_message(token: str, chat_id: str, text: str) -> None:
     if not result.get("ok"):
         raise RuntimeError(f"Telegram API returned ok=false: {result}")
 
-    logger.info("Telegram message sent successfully (message_id=%s).", result["result"]["message_id"])
+    message_id = (result.get("result") or {}).get("message_id", "unknown")
+    logger.info("Telegram message sent successfully (message_id=%s).", message_id)
