@@ -1,10 +1,9 @@
 """
 crawler.py – Playwright-based scraper for TDTU student schedule portal.
 
-Logs in to https://thongtin.tdtu.edu.vn/ (which currently redirects to
-https://old-stdportal.tdtu.edu.vn/Login/Index) using credentials from
-environment variables, navigates to the schedule section, and parses the
-timetable HTML table.
+Logs in to https://old-stdportal.tdtu.edu.vn/ using credentials from environment
+variables, navigates to the schedule section, and parses the timetable HTML
+table.
 
 Required environment variables:
     STUDENT_ID  – TDTU student ID used as the login username
@@ -22,7 +21,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-PORTAL_URL = "https://thongtin.tdtu.edu.vn/"
+PORTAL_URL = "https://stdportal.tdtu.edu.vn/Login/Index?ReturnUrl=https%3A%2F%2Fstdportal.tdtu.edu.vn%2F"
+SCHEDULE_URL = "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx?Token=844ca834&RequestId=5d78ea85"
 
 # Timeout (ms) for locating the submit button before falling back to Enter
 SUBMIT_BUTTON_TIMEOUT_MS = 5_000
@@ -167,18 +167,17 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             # Try to find and click a navigation link that matches common labels
             schedule_link = page.get_by_text(SCHEDULE_MENU_TEXT)
             if schedule_link.count() == 0:
-                # Fallback: look for any link whose href contains 'tkb' or 'schedule'
-                schedule_link = page.locator("a[href*='tkb'], a[href*='schedule'], a[href*='lichhoc']")
+                # Fallback: look for any link whose href contains known schedule patterns
+                schedule_link = page.locator("a[href*='tkb'], a[href*='schedule'], a[href*='lichhoc'], a[href*='lichhoc-lichthi']")
 
             if schedule_link.count() > 0:
                 logger.info("Clicking schedule navigation link")
                 schedule_link.first.click()
                 page.wait_for_load_state("networkidle", timeout=60_000)
             else:
-                logger.warning(
-                    "Could not find a schedule navigation link; attempting to parse "
-                    "current page."
-                )
+                # Fallback: navigate directly to the schedule URL
+                logger.info("No schedule link found; navigating directly to %s", SCHEDULE_URL)
+                page.goto(SCHEDULE_URL, wait_until="networkidle", timeout=60_000)
 
             # ----------------------------------------------------------------
             # Step 4 – Parse the schedule table
