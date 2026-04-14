@@ -221,11 +221,16 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             # ----------------------------------------------------------------
             # Step 3 – Navigate to the schedule section
             # ----------------------------------------------------------------
-            # Try to find and click a navigation link that matches common labels
-            schedule_link = page.get_by_text(SCHEDULE_MENU_TEXT)
+            # Priority 1: anchor tags whose href already points at the schedule
+            schedule_link = page.locator(
+                "a[href*='tkb'], a[href*='schedule'], a[href*='lichhoc'], a[href*='lichhoc-lichthi']"
+            )
+
+            # Priority 2: visible anchor tags whose *text* matches schedule keywords.
+            # Restrict to <a> so we never accidentally resolve to a hidden news/post
+            # element (e.g. a <b> inside an announcement) that shares the same words.
             if schedule_link.count() == 0:
-                # Fallback: look for any link whose href contains known schedule patterns
-                schedule_link = page.locator("a[href*='tkb'], a[href*='schedule'], a[href*='lichhoc'], a[href*='lichhoc-lichthi']")
+                schedule_link = page.locator("a").filter(has_text=SCHEDULE_MENU_TEXT)
 
             if schedule_link.count() > 0:
                 logger.info("Clicking schedule navigation link")
