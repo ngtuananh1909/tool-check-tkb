@@ -27,7 +27,13 @@ SCHEDULE_URL = "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx"
 # Selector hints – adjust if the portal markup changes
 SELECTOR_USERNAME = "input[name='username'], input[id='username'], input[placeholder*='MSSV'], input[type='text']"
 SELECTOR_PASSWORD = "input[name='password'], input[id='password'], input[type='password']"
-SELECTOR_SUBMIT = "button[type='submit'], input[type='submit']"
+# Match submit buttons broadly: explicit type=submit, input[type=submit], or any
+# <button> that isn't explicitly type=button/reset (the HTML default is "submit").
+SELECTOR_SUBMIT = (
+    "button[type='submit'], "
+    "input[type='submit'], "
+    "button:not([type='button']):not([type='reset'])"
+)
 # Maximum time (ms) to wait for the submit button before falling back to Enter
 SUBMIT_BUTTON_TIMEOUT_MS = 10_000
 
@@ -121,27 +127,63 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             page.fill(SELECTOR_USERNAME, sid)
             page.fill(SELECTOR_PASSWORD, pwd)
 
-            # Try clicking a submit button; fall back to pressing Enter on the
-            # password field in case the portal uses a non-standard button type.
+            # Try clicking a submit button; use progressively broader fallbacks
+            # to handle portals whose button lacks an explicit type attribute or
+            # relies on JavaScript onclick handlers.
+            clicked = False
             try:
                 page.click(SELECTOR_SUBMIT, timeout=SUBMIT_BUTTON_TIMEOUT_MS)
+                clicked = True
             except PlaywrightTimeoutError:
                 logger.warning(
-                    "Submit button not found via selector '%s'; pressing Enter to submit.",
+                    "Submit button not found via selector '%s'; trying role-based lookup.",
                     SELECTOR_SUBMIT,
                 )
-                page.press(SELECTOR_PASSWORD, "Enter")
 
-            # Wait until navigation is complete after login
+            if not clicked:
+                try:
+                    # Role-based fallback: find any visible button on the page
+                    btn = page.get_by_role("button").first
+                    btn.click(timeout=SUBMIT_BUTTON_TIMEOUT_MS)
+                    clicked = True
+                except PlaywrightTimeoutError:
+                    logger.warning("Role-based button click failed; trying JS form submit.")
+
+            if not clicked:
+                # Last resort: submit the form that contains the password field
+                # via JavaScript, which handles non-standard button implementations.
+                submitted = page.evaluate(
+                    """() => {
+                        const pw = document.querySelector('input[type="password"]');
+                        if (pw && pw.form) { pw.form.submit(); return true; }
+                        return false;
+                    }"""
+                )
+                if not submitted:
+                    logger.warning("JS form submit returned false; pressing Enter as final fallback.")
+                    page.press(SELECTOR_PASSWORD, "Enter")
+
+            # Wait for navigation away from the login page (up to 30 s), then
+            # for the new page to be fully idle.
+            try:
+                page.wait_for_url(
+                    lambda url: "login" not in url.lower(),
+                    timeout=30_000,
+                )
+            except PlaywrightTimeoutError:
+                pass  # URL check below will catch the failure
+
             page.wait_for_load_state("networkidle", timeout=60_000)
 
             # Basic check – if we're still on the login page, fail loudly
             if "login" in page.url.lower() or "old-stdportal.tdtu.edu.vn/login" in page.url.lower():
-                # Try to grab an error message from the page for better diagnostics
+                # Dump the visible text and the raw HTML for diagnostics
                 error_text = page.text_content("body") or ""
+                page_html = page.content() or ""
+                logger.debug("Login failure page HTML:\n%s", page_html[:2000])
                 raise RuntimeError(
                     f"Login appears to have failed. Current URL: {page.url}. "
-                    f"Page excerpt: {error_text[:200]}"
+                    f"Page excerpt: {error_text[:500]}"
                 )
 
             logger.info("Login successful. Current URL: %s", page.url)
