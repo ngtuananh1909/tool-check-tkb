@@ -167,7 +167,7 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             # for the new page to be fully idle.
             try:
                 page.wait_for_url(
-                    lambda url: "login" not in url.lower(),
+                    lambda url: PORTAL_URL not in url and "/Login/" not in url,
                     timeout=30_000,
                 )
             except PlaywrightTimeoutError:
@@ -183,7 +183,7 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
                 logger.debug("Login failure page HTML:\n%s", page_html[:2000])
                 raise RuntimeError(
                     f"Login appears to have failed. Current URL: {page.url}. "
-                    f"Page excerpt: {error_text[:500]}"
+                    f"Page excerpt: {error_text[:2000]}"
                 )
 
             logger.info("Login successful. Current URL: %s", page.url)
