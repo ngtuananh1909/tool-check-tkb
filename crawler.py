@@ -21,15 +21,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-PORTAL_URL = "https://old-stdportal.tdtu.edu.vn/Login/Index"
-SCHEDULE_URL = "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx"
+PORTAL_URL = "https://stdportal.tdtu.edu.vn/Login/Index?ReturnUrl=https%3A%2F%2Fstdportal.tdtu.edu.vn%2F"
+SCHEDULE_URL = "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx?Token=844ca834&RequestId=5d78ea85"
+
+# Timeout (ms) for locating the submit button before falling back to Enter
+SUBMIT_BUTTON_TIMEOUT_MS = 5_000
 
 # Selector hints – adjust if the portal markup changes
 SELECTOR_USERNAME = "input[name='username'], input[id='username'], input[placeholder*='MSSV'], input[type='text']"
 SELECTOR_PASSWORD = "input[name='password'], input[id='password'], input[type='password']"
-SELECTOR_SUBMIT = "button[type='submit'], input[type='submit']"
-# Maximum time (ms) to wait for the submit button before falling back to Enter
-SUBMIT_BUTTON_TIMEOUT_MS = 10_000
+SELECTOR_SUBMIT = (
+    "button[type='submit'], input[type='submit'], "
+    "button.btn-login, "
+    "input[type='button'][value*='Login'], input[type='button'][value*='login'], "
+    "input[type='button'][value*='Đăng'], "
+    "button.btn[type!='button']:has-text('Login'), "
+    "button:has-text('Đăng nhập'), button:has-text('Login')"
+)
 
 # The schedule table typically lives inside an element with this text / URL
 SCHEDULE_MENU_TEXT = re.compile(r"thời khóa biểu|TKB|lịch học", re.IGNORECASE)
@@ -121,22 +129,29 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             page.fill(SELECTOR_USERNAME, sid)
             page.fill(SELECTOR_PASSWORD, pwd)
 
-            # Try clicking a submit button; fall back to pressing Enter on the
-            # password field in case the portal uses a non-standard button type.
+            # Record the login page URL *after* any redirect so we can
+            # detect a failed login (i.e., we were returned to this URL).
+            login_page_url = page.url
+
+            # Try clicking the submit button; fall back to pressing Enter when
+            # the button cannot be located (e.g. portal markup changes).
             try:
-                page.click(SELECTOR_SUBMIT, timeout=SUBMIT_BUTTON_TIMEOUT_MS)
-            except PlaywrightTimeoutError:
+                page.locator(SELECTOR_SUBMIT).first.click(timeout=SUBMIT_BUTTON_TIMEOUT_MS)
+            except Exception:
                 logger.warning(
-                    "Submit button not found via selector '%s'; pressing Enter to submit.",
+                    "Submit button not found via selector %r; pressing Enter to submit.",
                     SELECTOR_SUBMIT,
                 )
-                page.press(SELECTOR_PASSWORD, "Enter")
+                page.locator(SELECTOR_PASSWORD).press("Enter")
 
             # Wait until navigation is complete after login
             page.wait_for_load_state("networkidle", timeout=60_000)
 
-            # Basic check – if we're still on the login page, fail loudly
-            if "login" in page.url.lower() or "old-stdportal.tdtu.edu.vn/login" in page.url.lower():
+            # Basic check – if we're still on the login page, fail loudly.
+            # We compare against the login_page_url captured after redirect
+            # so that the check works regardless of whether the portal uses
+            # its canonical URL or an old-portal redirect.
+            if page.url == login_page_url or "login" in page.url.lower():
                 # Try to grab an error message from the page for better diagnostics
                 error_text = page.text_content("body") or ""
                 raise RuntimeError(
