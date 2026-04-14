@@ -1,0 +1,7 @@
+# Core runtime dependencies
+playwright==1.44.0
+supabase==2.5.0
+requests==2.32.3
+
+# Optional: load .env when running locally (not needed in CI)
+python-dotenv==1.0.1
