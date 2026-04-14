@@ -1,7 +1,7 @@
 """
 crawler.py – Playwright-based scraper for TDTU student schedule portal.
 
-Logs in to https://thongtin.tdtu.edu.vn/ using credentials from environment
+Logs in to https://old-stdportal.tdtu.edu.vn/ using credentials from environment
 variables, navigates to the schedule section, and parses the timetable HTML
 table.
 
@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-PORTAL_URL = "https://thongtin.tdtu.edu.vn/"
+PORTAL_URL = "https://old-stdportal.tdtu.edu.vn/Login/Index"
+SCHEDULE_URL = "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx"
 
 # Selector hints – adjust if the portal markup changes
 SELECTOR_USERNAME = "input[name='username'], input[id='username'], input[placeholder*='MSSV'], input[type='text']"
@@ -123,7 +124,7 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             page.wait_for_load_state("networkidle", timeout=60_000)
 
             # Basic check – if we're still on the login page, fail loudly
-            if page.url == PORTAL_URL or "login" in page.url.lower():
+            if "login" in page.url.lower() or "old-stdportal.tdtu.edu.vn/login" in page.url.lower():
                 # Try to grab an error message from the page for better diagnostics
                 error_text = page.text_content("body") or ""
                 raise RuntimeError(
@@ -139,18 +140,17 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             # Try to find and click a navigation link that matches common labels
             schedule_link = page.get_by_text(SCHEDULE_MENU_TEXT)
             if schedule_link.count() == 0:
-                # Fallback: look for any link whose href contains 'tkb' or 'schedule'
-                schedule_link = page.locator("a[href*='tkb'], a[href*='schedule'], a[href*='lichhoc']")
+                # Fallback: look for any link whose href contains known schedule patterns
+                schedule_link = page.locator("a[href*='tkb'], a[href*='schedule'], a[href*='lichhoc'], a[href*='lichhoc-lichthi']")
 
             if schedule_link.count() > 0:
                 logger.info("Clicking schedule navigation link")
                 schedule_link.first.click()
                 page.wait_for_load_state("networkidle", timeout=60_000)
             else:
-                logger.warning(
-                    "Could not find a schedule navigation link; attempting to parse "
-                    "current page."
-                )
+                # Fallback: navigate directly to the schedule URL
+                logger.info("No schedule link found; navigating directly to %s", SCHEDULE_URL)
+                page.goto(SCHEDULE_URL, wait_until="networkidle", timeout=60_000)
 
             # ----------------------------------------------------------------
             # Step 4 – Parse the schedule table
