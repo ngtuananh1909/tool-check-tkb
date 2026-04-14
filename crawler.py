@@ -28,15 +28,29 @@ SCHEDULE_URL = "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx?Token=844ca834&Req
 SUBMIT_BUTTON_TIMEOUT_MS = 5_000
 
 # Selector hints – adjust if the portal markup changes
-SELECTOR_USERNAME = "input[name='username'], input[id='username'], input[placeholder*='MSSV'], input[type='text']"
-SELECTOR_PASSWORD = "input[name='password'], input[id='password'], input[type='password']"
+# Include both lowercase (HTML) and PascalCase (ASP.NET MVC model binding) variants.
+SELECTOR_USERNAME = (
+    "input[name='UserName'], input[id='UserName'], "
+    "input[name='username'], input[id='username'], "
+    "input[placeholder*='MSSV'], input[placeholder*='mssv'], "
+    "input[type='text']"
+)
+SELECTOR_PASSWORD = (
+    "input[name='Password'], input[id='Password'], "
+    "input[name='password'], input[id='password'], "
+    "input[type='password']"
+)
+# Ordered from most specific to a broad fallback (`button` with no type filter).
+# Note: avoid combining CSS attribute selectors with Playwright :has-text() in the
+# same compound rule – keep them as separate comma-separated alternatives instead.
 SELECTOR_SUBMIT = (
     "button[type='submit'], input[type='submit'], "
     "button.btn-login, "
     "input[type='button'][value*='Login'], input[type='button'][value*='login'], "
     "input[type='button'][value*='Đăng'], "
-    "button.btn[type!='button']:has-text('Login'), "
-    "button:has-text('Đăng nhập'), button:has-text('Login')"
+    "button:has-text('Đăng nhập'), button:has-text('Đăng Nhập'), "
+    "button:has-text('Login'), button:has-text('Sign in'), "
+    "button"  # broad fallback – catches <button> without explicit type
 )
 
 # The schedule table typically lives inside an element with this text / URL
@@ -111,8 +125,20 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
     schedule: list[dict] = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+            ],
+        )
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+        )
         page = context.new_page()
 
         try:
@@ -125,6 +151,8 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             # ----------------------------------------------------------------
             # Step 2 – Fill in credentials and submit
             # ----------------------------------------------------------------
+            # Wait for the username input to be ready before filling.
+            page.wait_for_selector(SELECTOR_USERNAME, state="visible", timeout=30_000)
             logger.info("Filling in login credentials for student %s", sid)
             page.fill(SELECTOR_USERNAME, sid)
             page.fill(SELECTOR_PASSWORD, pwd)
@@ -133,30 +161,53 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             # detect a failed login (i.e., we were returned to this URL).
             login_page_url = page.url
 
-            # Try clicking the submit button; fall back to pressing Enter when
-            # the button cannot be located (e.g. portal markup changes).
+            # ── Submission strategy 1: click the submit button ──────────────
+            submit_clicked = False
             try:
                 page.locator(SELECTOR_SUBMIT).first.click(timeout=SUBMIT_BUTTON_TIMEOUT_MS)
+                submit_clicked = True
+                logger.info("Submit button clicked.")
             except Exception:
                 logger.warning(
-                    "Submit button not found via selector %r; pressing Enter to submit.",
+                    "Submit button not found via selector %r; trying fallback strategies.",
                     SELECTOR_SUBMIT,
                 )
-                page.locator(SELECTOR_PASSWORD).press("Enter")
 
-            # Wait until navigation is complete after login
-            page.wait_for_load_state("networkidle", timeout=60_000)
+            if not submit_clicked:
+                # ── Submission strategy 2: press Enter on the password field ─
+                try:
+                    page.locator(SELECTOR_PASSWORD).press("Enter")
+                    logger.info("Pressed Enter on password field.")
+                except Exception:
+                    logger.warning("Enter key on password field failed; trying JS form submit.")
+                    # ── Submission strategy 3: JavaScript form.submit() ───────
+                    try:
+                        page.evaluate("document.querySelector('form').submit()")
+                        logger.info("Triggered JS form.submit().")
+                    except Exception as js_exc:
+                        logger.warning("JS form.submit() also failed: %s", js_exc)
+
+            # Wait for the page to navigate away from the login URL.
+            # Using wait_for_url is more reliable than wait_for_load_state
+            # when some submission methods don't trigger a full page reload.
+            try:
+                page.wait_for_url(
+                    lambda url: "login" not in url.lower(),
+                    timeout=30_000,
+                )
+            except PlaywrightTimeoutError:
+                # URL did not change – fall through to the explicit failure check below.
+                pass
+
+            page.wait_for_load_state("networkidle", timeout=30_000)
 
             # Basic check – if we're still on the login page, fail loudly.
-            # We compare against the login_page_url captured after redirect
-            # so that the check works regardless of whether the portal uses
-            # its canonical URL or an old-portal redirect.
             if page.url == login_page_url or "login" in page.url.lower():
                 # Try to grab an error message from the page for better diagnostics
                 error_text = page.text_content("body") or ""
                 raise RuntimeError(
                     f"Login appears to have failed. Current URL: {page.url}. "
-                    f"Page excerpt: {error_text[:200]}"
+                    f"Page excerpt: {error_text[:500]}"
                 )
 
             logger.info("Login successful. Current URL: %s", page.url)
