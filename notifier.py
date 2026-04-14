@@ -95,9 +95,11 @@ def send_error_alert(error: str) -> None:
         logger.error("Telegram credentials missing; cannot send error alert.")
         return
 
+    # In MarkdownV2 inline code spans only the backtick itself needs escaping.
+    safe_error = error.replace("\\", "\\\\").replace("`", "\\`")
     text = (
         "⚠️ *Schedule Bot Error*\n\n"
-        f"`{_escape(error)}`"
+        f"`{safe_error}`"
     )
     try:
         _send_message(token, chat_id, text)

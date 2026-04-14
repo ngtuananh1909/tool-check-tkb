@@ -118,7 +118,17 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             logger.info("Filling in login credentials for student %s", sid)
             page.fill(SELECTOR_USERNAME, sid)
             page.fill(SELECTOR_PASSWORD, pwd)
-            page.click(SELECTOR_SUBMIT)
+
+            # Try clicking a submit button; fall back to pressing Enter on the
+            # password field in case the portal uses a non-standard button type.
+            try:
+                page.click(SELECTOR_SUBMIT, timeout=10_000)
+            except PlaywrightTimeoutError:
+                logger.warning(
+                    "Submit button not found via selector '%s'; pressing Enter to submit.",
+                    SELECTOR_SUBMIT,
+                )
+                page.press(SELECTOR_PASSWORD, "Enter")
 
             # Wait until navigation is complete after login
             page.wait_for_load_state("networkidle", timeout=60_000)
