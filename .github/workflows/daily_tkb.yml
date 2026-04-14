@@ -1,0 +1,66 @@
+# .github/workflows/daily_tkb.yml
+#
+# GitHub Actions workflow – TDTU Daily Schedule Notification
+#
+# Schedule: runs every day at 23:00 UTC = 06:00 AM Vietnam time (UTC+7).
+# Can also be triggered manually via the "Run workflow" button.
+
+name: Daily Schedule Notification
+
+on:
+  schedule:
+    # Cron syntax: minute hour day-of-month month day-of-week
+    # 23:00 UTC = 06:00 ICT (UTC+7)
+    - cron: "0 23 * * *"
+
+  # Allow manual triggers from the GitHub Actions UI
+  workflow_dispatch:
+
+jobs:
+  notify:
+    name: Fetch & Send Schedule
+    runs-on: ubuntu-latest
+
+    # All secrets are injected as environment variables so the Python code
+    # can read them with os.environ.
+    env:
+      STUDENT_ID: ${{ secrets.STUDENT_ID }}
+      PASSWORD: ${{ secrets.PASSWORD }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Check out the repository
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # 2. Set up Python 3.11
+      # -----------------------------------------------------------------------
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"           # Cache pip downloads between runs
+
+      # -----------------------------------------------------------------------
+      # 3. Install Python dependencies
+      # -----------------------------------------------------------------------
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # -----------------------------------------------------------------------
+      # 4. Install Playwright browsers (Chromium only to keep the image lean)
+      # -----------------------------------------------------------------------
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium
+
+      # -----------------------------------------------------------------------
+      # 5. Run the main script
+      # -----------------------------------------------------------------------
+      - name: Run schedule notifier
+        run: python main.py
