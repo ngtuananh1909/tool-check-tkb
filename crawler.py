@@ -182,7 +182,9 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
                     logger.warning("Enter key on password field failed; trying JS form submit.")
                     # ── Submission strategy 3: JavaScript form.submit() ───────
                     try:
-                        page.evaluate("document.querySelector('form').submit()")
+                        page.evaluate(
+                            "const f = document.querySelector('form'); if (f) f.submit();"
+                        )
                         logger.info("Triggered JS form.submit().")
                     except Exception as js_exc:
                         logger.warning("JS form.submit() also failed: %s", js_exc)
@@ -192,13 +194,17 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             # when some submission methods don't trigger a full page reload.
             try:
                 page.wait_for_url(
-                    lambda url: "login" not in url.lower(),
+                    lambda url: "login" not in str(url).lower(),
                     timeout=30_000,
                 )
             except PlaywrightTimeoutError:
-                # URL did not change – fall through to the explicit failure check below.
-                pass
+                # URL did not change within the timeout window.
+                # Fall through to the explicit failure check below.
+                logger.warning(
+                    "wait_for_url timed out – login may have failed or navigation was delayed."
+                )
 
+            # Ensure the page is fully loaded after the URL change.
             page.wait_for_load_state("networkidle", timeout=30_000)
 
             # Basic check – if we're still on the login page, fail loudly.
