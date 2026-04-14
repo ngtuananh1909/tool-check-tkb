@@ -1,0 +1,64 @@
+name: Daily Schedule Notification
+
+on:
+  # Run every day at 23:00 UTC = 06:00 AM Vietnam time (UTC+7)
+  schedule:
+    - cron: "0 23 * * *"
+
+  # Allow manual trigger for testing from the GitHub Actions UI
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    name: Fetch & Send TKB Notification
+    runs-on: ubuntu-latest
+
+    env:
+      # Student portal credentials
+      STUDENT_ID: ${{ secrets.STUDENT_ID }}
+      PASSWORD: ${{ secrets.PASSWORD }}
+
+      # Supabase connection
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+
+      # Telegram bot
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      # ----------------------------------------------------------------
+      # 1. Check out the repository
+      # ----------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------------
+      # 2. Set up Python 3.11
+      # ----------------------------------------------------------------
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ----------------------------------------------------------------
+      # 3. Install Python dependencies
+      # ----------------------------------------------------------------
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # ----------------------------------------------------------------
+      # 4. Install Playwright browsers (Chromium only to save time)
+      # ----------------------------------------------------------------
+      - name: Install Playwright browsers
+        run: python -m playwright install --with-deps chromium
+
+      # ----------------------------------------------------------------
+      # 5. Run the main orchestration script
+      # ----------------------------------------------------------------
+      - name: Run schedule notifier
+        run: python main.py
