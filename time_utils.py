@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+from functools import lru_cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_TIMEZONE = "Asia/Ho_Chi_Minh"
 
 
+@lru_cache(maxsize=1)
 def _resolve_timezone() -> ZoneInfo:
     timezone_name = os.environ.get("APP_TIMEZONE", DEFAULT_TIMEZONE).strip() or DEFAULT_TIMEZONE
     try:
