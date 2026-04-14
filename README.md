@@ -30,6 +30,7 @@ Các biến cần có:
 Tuỳ chọn:
 
 - `TARGET_SEMESTER`: ép bot chọn học kỳ cụ thể, ví dụ `HK2/2025-2026`
+- `APP_TIMEZONE`: múi giờ để tính "hôm nay", mặc định `Asia/Ho_Chi_Minh`
 
 Nếu không set `TARGET_SEMESTER`, bot tự chọn theo rule:
 

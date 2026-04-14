@@ -30,6 +30,7 @@ import requests
 
 from database import create_appointment, get_today_appointments
 from gemini_parser import parse_appointment_with_gemini
+from time_utils import local_now, local_today
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -180,7 +181,7 @@ def _normalize_time_value(value: object) -> str | None:
 def _parse_time_field(raw: str) -> tuple[dt.date, str]:
     """Return (date, HH:MM) from accepted time patterns."""
     value = raw.strip()
-    now = dt.datetime.now()
+    now = local_now()
 
     m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})", value)
     if m:
@@ -215,7 +216,7 @@ def _validate_hhmm(hour: int, minute: int) -> str:
 
 
 def _build_today_appointments_text(rows: list[dict]) -> str:
-    today = dt.date.today().strftime("%d/%m/%Y")
+    today = local_today().strftime("%d/%m/%Y")
     lines = [f"Lich hen hom nay ({today}):"]
     if not rows:
         lines.append("- Khong co lich hen.")
