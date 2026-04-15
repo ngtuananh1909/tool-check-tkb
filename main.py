@@ -153,7 +153,7 @@ def main() -> None:
             logger.info("Google Calendar sync complete.")
         else:
             logger.info(
-                "Google Calendar sync skipped (missing GOOGLE_CALENDAR_ID or GOOGLE_SERVICE_ACCOUNT_JSON)."
+                "Google Calendar sync skipped (missing GOOGLE_CALENDAR_ID or Google service-account credentials)."
             )
     except Exception as exc:
         _handle_fatal("CSV export / Google Calendar sync failed", exc)

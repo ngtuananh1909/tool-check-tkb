@@ -265,9 +265,27 @@ def _export_csv_sessions(class_sessions: list[dict], appointments: list[dict], t
 
 def _build_calendar_service(service_account_json: str, service_account_file: str) -> tuple[Resource, str]:
     if service_account_json:
-        info = json.loads(service_account_json)
+        try:
+            info = json.loads(service_account_json)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON. "
+                "For GitHub Actions, store the full raw service-account JSON in secrets.GOOGLE_SERVICE_ACCOUNT_JSON."
+            ) from exc
         credentials = service_account.Credentials.from_service_account_info(info, scopes=CALENDAR_SCOPE)
     else:
+        if not service_account_file:
+            raise RuntimeError(
+                "Google Calendar credentials are missing. "
+                "Set GOOGLE_SERVICE_ACCOUNT_JSON (recommended for GitHub Actions) "
+                "or GOOGLE_SERVICE_ACCOUNT_FILE (for local file-based setup)."
+            )
+        if not os.path.isfile(service_account_file):
+            raise RuntimeError(
+                "GOOGLE_SERVICE_ACCOUNT_FILE points to a missing file: "
+                f"'{service_account_file}'. "
+                "In GitHub Actions, use GOOGLE_SERVICE_ACCOUNT_JSON secret instead of a local absolute path."
+            )
         credentials = service_account.Credentials.from_service_account_file(
             service_account_file,
             scopes=CALENDAR_SCOPE,

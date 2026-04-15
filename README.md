@@ -4,6 +4,30 @@ Bot này đăng nhập TDTU, lấy thời khóa biểu theo học kỳ/tuần, l
 
 ## Cách chạy end to end
 
+## GitHub Actions (CI) cho lịch hằng ngày
+
+Khi chạy workflow trên GitHub Actions, không dùng đường dẫn local cho `GOOGLE_SERVICE_ACCOUNT_FILE`.
+Runner không có file trên máy cá nhân của bạn.
+
+Thiết lập các GitHub Secrets sau:
+
+- `STUDENT_ID`
+- `PASSWORD`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_KEY`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `GOOGLE_CALENDAR_ID`
+- `GOOGLE_SERVICE_ACCOUNT_JSON` (raw JSON của service account)
+- `GOOGLE_CALENDAR_REQUIRED` (`true` để fail-fast nếu sync Calendar lỗi)
+
+Lưu ý:
+
+- `GOOGLE_SERVICE_ACCOUNT_JSON` phải là nội dung JSON hợp lệ (không phải path file).
+- Nếu bạn muốn chạy local bằng file, chỉ set `GOOGLE_SERVICE_ACCOUNT_FILE` trong `.env` local.
+- Trên CI, ưu tiên `GOOGLE_SERVICE_ACCOUNT_JSON`.
+
 ### 1. Chuẩn bị môi trường
 
 Từ thư mục project, cài dependency và Playwright browser:

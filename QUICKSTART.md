@@ -130,6 +130,11 @@ A: Yes, use ngrok: `ngrok http 8000` and set `TELEGRAM_WEBHOOK_URL` to the ngrok
 1. Run `supabase/init_tables.sql` to create schema
 2. Verify `SUPABASE_SERVICE_ROLE_KEY` has write permissions
 
+### Google Calendar sync fails on GitHub Actions (FileNotFoundError)
+1. Do not set a local absolute path in `GOOGLE_SERVICE_ACCOUNT_FILE` for CI
+2. Put full service-account JSON into GitHub secret `GOOGLE_SERVICE_ACCOUNT_JSON`
+3. Ensure `GOOGLE_CALENDAR_ID` and `GOOGLE_CALENDAR_REQUIRED` are set in workflow secrets
+
 ### Webhook URL keeps changing
 → Use a custom domain or set `TELEGRAM_DELETE_WEBHOOK_ON_SHUTDOWN=false` to persist
 
