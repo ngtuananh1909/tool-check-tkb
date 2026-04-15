@@ -2,7 +2,7 @@
 #
 # GitHub Actions workflow – TDTU Daily Schedule Notification
 #
-# Schedule: runs every day at 23:00 UTC = 06:00 AM Vietnam time (UTC+7).
+# Schedule: runs every day at 17:00 UTC = 00:00 AM Vietnam time (UTC+7).
 # Can also be triggered manually via the "Run workflow" button.
 
 name: Daily Schedule Notification
@@ -10,8 +10,8 @@ name: Daily Schedule Notification
 on:
   schedule:
     # Cron syntax: minute hour day-of-month month day-of-week
-    # 23:00 UTC = 06:00 ICT (UTC+7)
-    - cron: "30 23 * * *"
+    # 17:00 UTC = 00:00 ICT (UTC+7)
+    - cron: "0 17 * * *"
 
   # Allow manual triggers from the GitHub Actions UI
   workflow_dispatch:
