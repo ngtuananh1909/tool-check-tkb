@@ -43,6 +43,20 @@ def _load_dotenv() -> None:
         pass
 
 
+def _resolve_crawler_weeks_ahead() -> int:
+    """Read multi-week crawl horizon from env with safe fallback."""
+    raw = (os.environ.get("CRAWLER_WEEKS_AHEAD") or "2").strip()
+    try:
+        weeks = int(raw)
+    except ValueError:
+        logger.warning("Invalid CRAWLER_WEEKS_AHEAD=%r; using 2.", raw)
+        return 2
+
+    if weeks < 0:
+        return 0
+    return min(weeks, 12)
+
+
 def main() -> None:
     """Run the full schedule-notification pipeline."""
     _load_dotenv()
@@ -55,7 +69,9 @@ def main() -> None:
     logger.info("=== Step 1: Crawling schedule from TDTU portal ===")
     try:
         from crawler import fetch_schedule
-        schedule = fetch_schedule()
+        weeks_ahead = _resolve_crawler_weeks_ahead()
+        logger.info("Crawler will fetch current week + %d future week(s).", weeks_ahead)
+        schedule = fetch_schedule(weeks_ahead=weeks_ahead)
         logger.info("Crawler returned %d schedule entries.", len(schedule))
     except Exception as exc:
         _handle_fatal("Crawler failed", exc)
@@ -66,31 +82,87 @@ def main() -> None:
     # ------------------------------------------------------------------
     logger.info("=== Step 2: Updating schedule in Supabase ===")
     try:
-        from database import upsert_schedule
+        from database import (
+            materialize_class_sessions,
+            upsert_actual_class_sessions,
+            upsert_schedule,
+        )
         upsert_schedule(schedule, student_id=student_id)
+        materialized = upsert_actual_class_sessions(schedule, student_id=student_id)
+        if materialized == 0:
+            logger.warning(
+                "Crawler did not return concrete session_date rows; using generated fallback class sessions."
+            )
+            materialized = materialize_class_sessions(schedule, student_id=student_id)
         logger.info("Supabase update complete.")
+        logger.info("Class sessions materialized: %d row(s).", materialized)
     except Exception as exc:
         _handle_fatal("Database update failed", exc)
         return
 
     # ------------------------------------------------------------------
-    # Step 3 – Fetch today's classes and appointments
+    # Step 3 – Fetch today's classes and appointments, plus full sync data
     # ------------------------------------------------------------------
-    logger.info("=== Step 3: Fetching today's classes and appointments from Supabase ===")
+    logger.info("=== Step 3: Fetching today's data and full sync data from Supabase ===")
     try:
-        from database import get_today_schedule, get_today_appointments
-        today_classes = get_today_schedule(student_id=student_id)
+        from database import (
+            get_all_appointments,
+            get_all_class_sessions,
+            get_all_schedule,
+            get_today_appointments,
+            get_today_class_sessions,
+            get_today_schedule,
+        )
+        today_classes = get_today_class_sessions(student_id=student_id)
+        if not today_classes:
+            logger.warning(
+                "No class sessions found for today; falling back to weekly schedule rows for notifications."
+            )
+            today_classes = get_today_schedule(student_id=student_id)
+
         today_appointments = get_today_appointments(student_id=student_id)
+        all_schedule_rows = get_all_class_sessions(student_id=student_id)
+        if not all_schedule_rows:
+            logger.warning(
+                "No class sessions found for full sync; falling back to weekly schedule rows for calendar sync."
+            )
+            all_schedule_rows = get_all_schedule(student_id=student_id)
+        all_appointments = get_all_appointments(student_id=student_id)
         logger.info("Today has %d class(es).", len(today_classes))
         logger.info("Today has %d appointment(s).", len(today_appointments))
+        logger.info("Full class dataset has %d row(s).", len(all_schedule_rows))
+        logger.info("Full appointment set has %d row(s).", len(all_appointments))
     except Exception as exc:
         _handle_fatal("Failed to fetch today's data", exc)
         return
 
     # ------------------------------------------------------------------
-    # Step 4 – Send Telegram notification
+    # Step 4 – Export CSV and sync to Google Calendar
     # ------------------------------------------------------------------
-    logger.info("=== Step 4: Sending Telegram notification ===")
+    logger.info("=== Step 4: Exporting CSV and syncing Google Calendar ===")
+    try:
+        from calendar_sync import sync_database_to_csv_and_google_calendar
+
+        csv_path, did_sync = sync_database_to_csv_and_google_calendar(
+            all_schedule_rows,
+            all_appointments,
+            student_id=student_id,
+        )
+        logger.info("CSV export complete: %s", csv_path)
+        if did_sync:
+            logger.info("Google Calendar sync complete.")
+        else:
+            logger.info(
+                "Google Calendar sync skipped (missing GOOGLE_CALENDAR_ID or GOOGLE_SERVICE_ACCOUNT_JSON)."
+            )
+    except Exception as exc:
+        _handle_fatal("CSV export / Google Calendar sync failed", exc)
+        return
+
+    # ------------------------------------------------------------------
+    # Step 5 – Send Telegram notification
+    # ------------------------------------------------------------------
+    logger.info("=== Step 5: Sending Telegram notification ===")
     try:
         from notifier import send_daily_summary
         send_daily_summary(today_classes, today_appointments)

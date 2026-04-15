@@ -72,8 +72,17 @@ def _register_webhook(token: str, webhook_url: str, webhook_secret: str | None) 
         json=payload,
         timeout=30,
     )
-    response.raise_for_status()
-    result = response.json()
+    result: dict[str, object]
+    try:
+        result = response.json()
+    except ValueError:
+        result = {"ok": False, "raw": response.text}
+
+    if not response.ok:
+        raise RuntimeError(
+            f"Telegram setWebhook failed: status={response.status_code}, body={result}"
+        )
+
     if not result.get("ok"):
         raise RuntimeError(f"Failed to register webhook: {result}")
 

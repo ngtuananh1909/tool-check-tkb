@@ -11,6 +11,7 @@ Required environment variables:
 
 Optional environment variables:
     TARGET_SEMESTER – Force specific semester label (e.g. HK2/2025-2026)
+    CRAWLER_WEEKS_AHEAD – Number of future weeks to crawl beyond current week
 """
 
 import logging
@@ -98,7 +99,11 @@ def _normalize_day(raw: str) -> str:
     return DAY_MAP.get(key, raw.strip())
 
 
-def fetch_schedule(student_id: str | None = None, password: str | None = None) -> list[dict]:
+def fetch_schedule(
+    student_id: str | None = None,
+    password: str | None = None,
+    weeks_ahead: int | None = None,
+) -> list[dict]:
     """
     Log in to the TDTU portal and return the student's timetable as a list of
     dictionaries.
@@ -134,6 +139,8 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
         )
 
     schedule: list[dict] = []
+    extra_weeks = _resolve_weeks_ahead(weeks_ahead)
+    total_weeks = 1 + extra_weeks
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -272,13 +279,37 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             logger.info("Configuring schedule filters (semester + weekly view) when available")
             _configure_schedule_filters(page)
 
-            logger.info("Parsing schedule table on %s", page.url)
-            schedule = _parse_schedule_table(page, sid)
+            logger.info(
+                "Parsing schedule table on %s (current week + %d future week(s)).",
+                page.url,
+                extra_weeks,
+            )
+            all_rows: list[dict] = []
+            for index in range(total_weeks):
+                logger.info("Parsing week %d/%d.", index + 1, total_weeks)
+                week_rows = _parse_schedule_table(page, sid)
+                if week_rows:
+                    all_rows.extend(week_rows)
+                    logger.info("Week %d yielded %d row(s).", index + 1, len(week_rows))
+                else:
+                    logger.warning("Week %d yielded no rows.", index + 1)
+
+                if index >= total_weeks - 1:
+                    break
+
+                if not _goto_next_week(page):
+                    logger.warning(
+                        "Could not navigate to next week after week %d. Keeping partial multi-week data.",
+                        index + 1,
+                    )
+                    break
+
+            schedule = _deduplicate_schedule_rows(all_rows)
 
             if not schedule:
-                logger.warning("No schedule entries found in the table.")
+                logger.warning("No schedule entries found in the crawled week range.")
             else:
-                logger.info("Parsed %d schedule entries.", len(schedule))
+                logger.info("Parsed %d unique schedule entries across crawled weeks.", len(schedule))
 
         except PlaywrightTimeoutError as exc:
             raise RuntimeError(f"Playwright timed out: {exc}") from exc
@@ -287,6 +318,152 @@ def fetch_schedule(student_id: str | None = None, password: str | None = None) -
             browser.close()
 
     return schedule
+
+
+def _resolve_weeks_ahead(weeks_ahead: int | None) -> int:
+    """Resolve number of extra weeks to crawl, using env var when not provided."""
+    raw = weeks_ahead
+    if raw is None:
+        env_value = (os.environ.get("CRAWLER_WEEKS_AHEAD") or "0").strip()
+        try:
+            raw = int(env_value)
+        except ValueError:
+            logger.warning("Invalid CRAWLER_WEEKS_AHEAD=%r; using 0.", env_value)
+            raw = 0
+
+    if raw is None:
+        return 0
+    if raw < 0:
+        return 0
+    return min(raw, 12)
+
+
+def _deduplicate_schedule_rows(rows: list[dict]) -> list[dict]:
+    """Deduplicate rows across all crawled weeks while preserving first-seen order."""
+    deduped: list[dict] = []
+    seen: set[tuple[str, str, str, str, int, int]] = set()
+
+    for row in rows:
+        signature = (
+            str(row.get("subject_name") or "").strip().lower(),
+            str(row.get("room") or "").strip().lower(),
+            str(row.get("day_of_week") or "").strip().lower(),
+            str(row.get("session_date") or "").strip(),
+            int(row.get("start_period", 0) or 0),
+            int(row.get("end_period", 0) or 0),
+        )
+        if signature in seen:
+            continue
+        seen.add(signature)
+        deduped.append(row)
+
+    return deduped
+
+
+def _capture_week_signature(page) -> str:
+    """Get a lightweight signature for current week-view header to detect week changes."""
+    current_week_controls = page.locator(
+        "input[id*='btnTuanHienTai'], input[name*='btnTuanHienTai'], #ThoiKhoaBieu1_btnTuanHienTai"
+    )
+    try:
+        if current_week_controls.count() > 0:
+            value = (current_week_controls.first.input_value() or "").strip()
+            if value:
+                return re.sub(r"\s+", " ", value)
+    except Exception:
+        pass
+
+    header_candidates = [
+        "table tr:first-child",
+        "table thead tr:first-child",
+    ]
+    for selector in header_candidates:
+        locator = page.locator(selector)
+        try:
+            if locator.count() == 0:
+                continue
+            text = (locator.first.inner_text() or "").strip()
+            if text:
+                return re.sub(r"\s+", " ", text)
+        except Exception:
+            continue
+
+    return page.url
+
+
+def _goto_next_week(page) -> bool:
+    """Navigate to the next timetable week using common portal controls."""
+    before = _capture_week_signature(page)
+    selectors = [
+        "#ThoiKhoaBieu1_btnTuanSau",
+        "input[id*='btnTuanSau']",
+        "input[name*='btnTuanSau']",
+        "button:has-text('Tuần sau')",
+        "a:has-text('Tuần sau')",
+        "input[type='button'][value*='Tuần sau']",
+        "input[type='submit'][value*='Tuần sau']",
+        "input[value*='Following week']",
+        "button:has-text('Next week')",
+        "a:has-text('Next week')",
+        "button:has-text('Next')",
+        "a:has-text('Next')",
+        "input[type='button'][value*='Next']",
+        "input[type='submit'][value*='Next']",
+        "button[title*='next' i]",
+        "a[title*='next' i]",
+        "button[aria-label*='next' i]",
+        "a[aria-label*='next' i]",
+    ]
+
+    for selector in selectors:
+        locator = page.locator(selector)
+        try:
+            if locator.count() == 0:
+                continue
+        except Exception:
+            continue
+
+        for idx in range(locator.count()):
+            control = locator.nth(idx)
+            try:
+                if not control.is_visible():
+                    continue
+                control.click(timeout=8_000)
+                try:
+                    page.wait_for_function(
+                        r"""
+                        (previous) => {
+                            const currentWeek = document.querySelector(
+                                "input[id*='btnTuanHienTai'], input[name*='btnTuanHienTai'], #ThoiKhoaBieu1_btnTuanHienTai"
+                            );
+                            if (currentWeek) {
+                                const value = (currentWeek.value || currentWeek.innerText || "").trim().replace(/\s+/g, " ");
+                                if (value) {
+                                    return value !== previous;
+                                }
+                            }
+
+                            const header = document.querySelector("table tr:first-child, table thead tr:first-child");
+                            if (!header) return false;
+                            const text = (header.innerText || "").trim().replace(/\s+/g, " ");
+                            return !!text && text !== previous;
+                        }
+                        """,
+                        before,
+                        timeout=15_000,
+                    )
+                except Exception:
+                    pass
+                page.wait_for_load_state("networkidle", timeout=30_000)
+                page.wait_for_timeout(1_200)
+                after = _capture_week_signature(page)
+                if after != before:
+                    logger.info("Moved to next week using selector: %s", selector)
+                    return True
+            except Exception:
+                continue
+
+    return False
 
 
 def _configure_schedule_filters(page) -> None:
@@ -613,9 +790,9 @@ def _parse_schedule_table(page, student_id: str) -> list[dict]:
 
 
 def _parse_weekly_grid_table(page, student_id: str) -> list[dict]:
-        """Parse timetable from the week-view matrix layout (Period x Day)."""
-        raw_entries: list[dict] = page.evaluate(
-            r"""
+    """Parse timetable from the week-view matrix layout (Period x Day)."""
+    raw_entries: list[dict] = page.evaluate(
+        r"""
                 () => {
                     const dayNames = [
                         "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"
@@ -642,6 +819,21 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict]:
                             if (lower.includes(vn)) return en;
                         }
                         return "";
+                    };
+
+                    const extractDate = (headerText) => {
+                        const text = (headerText || "").replace(/\s+/g, " ");
+                        const m = text.match(/(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?/);
+                        if (!m) return "";
+
+                        const day = parseInt(m[1], 10);
+                        const month = parseInt(m[2], 10);
+                        let year = m[3] ? parseInt(m[3], 10) : (new Date()).getFullYear();
+                        if (year < 100) year += 2000;
+
+                        if (!day || !month || !year) return "";
+                        if (month < 1 || month > 12 || day < 1 || day > 31) return "";
+                        return `${year.toString().padStart(4, "0")}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
                     };
 
                     const cleanSubject = (text) => {
@@ -677,8 +869,11 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict]:
 
                     // Logical day columns are expected at indices 1..7.
                     const dayByColumn = {};
+                    const dateByColumn = {};
                     for (let col = 1; col <= 7; col += 1) {
-                        dayByColumn[col] = extractWeekday(headerCells[col]?.innerText || "");
+                        const headerText = headerCells[col]?.innerText || "";
+                        dayByColumn[col] = extractWeekday(headerText);
+                        dateByColumn[col] = extractDate(headerText);
                     }
 
                     const carry = {}; // col -> remaining rowspan from previous rows
@@ -712,6 +907,7 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict]:
                             } else if (rowPeriod > 0) {
                                 for (let c = logicalCol; c < logicalCol + colSpan; c += 1) {
                                     const dayOfWeek = dayByColumn[c] || "";
+                                    const sessionDate = dateByColumn[c] || "";
                                     if (!dayOfWeek || !text || !/room|phòng/i.test(text)) {
                                         continue;
                                     }
@@ -723,6 +919,7 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict]:
                                         subject_name: subject,
                                         room: extractRoom(text),
                                         day_of_week: dayOfWeek,
+                                        session_date: sessionDate,
                                         start_period: rowPeriod,
                                         end_period: rowPeriod + rowSpan - 1,
                                     });
@@ -743,7 +940,7 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict]:
                     const seen = new Set();
                     const deduped = [];
                     for (const e of entries) {
-                        const key = [e.subject_name, e.room, e.day_of_week, e.start_period, e.end_period].join("|");
+                        const key = [e.subject_name, e.room, e.day_of_week, e.session_date, e.start_period, e.end_period].join("|");
                         if (seen.has(key)) continue;
                         seen.add(key);
                         deduped.push(e);
@@ -752,22 +949,23 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict]:
                     return deduped;
                 }
                 """
+    )
+
+    entries: list[dict] = []
+    for row in raw_entries or []:
+        entries.append(
+            {
+                "student_id": student_id,
+                "subject_name": row.get("subject_name", ""),
+                "room": row.get("room", ""),
+                "day_of_week": row.get("day_of_week", ""),
+                "session_date": row.get("session_date", ""),
+                "start_period": int(row.get("start_period", 0) or 0),
+                "end_period": int(row.get("end_period", 0) or 0),
+            }
         )
 
-        entries: list[dict] = []
-        for row in raw_entries or []:
-                entries.append(
-                        {
-                                "student_id": student_id,
-                                "subject_name": row.get("subject_name", ""),
-                                "room": row.get("room", ""),
-                                "day_of_week": row.get("day_of_week", ""),
-                                "start_period": int(row.get("start_period", 0) or 0),
-                                "end_period": int(row.get("end_period", 0) or 0),
-                        }
-                )
-
-        return entries
+    return entries
 
 
 def _detect_columns(headers: list[str]) -> dict[str, int | None]:

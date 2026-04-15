@@ -30,6 +30,7 @@ Các biến cần có:
 Tuỳ chọn:
 
 - `TARGET_SEMESTER`: ép bot chọn học kỳ cụ thể, ví dụ `HK2/2025-2026`
+- `CRAWLER_WEEKS_AHEAD`: số tuần tương lai crawl thêm từ portal mỗi lần chạy. Mặc định `2` (tức là crawl tuần hiện tại + 2 tuần tới)
 - `APP_TIMEZONE`: múi giờ để tính "hôm nay", mặc định `Asia/Ho_Chi_Minh`
 
 Nếu không set `TARGET_SEMESTER`, bot tự chọn theo rule:
@@ -117,7 +118,7 @@ Luồng chạy của bot:
 1. Đăng nhập portal TDTU.
 2. Mở trang thời khóa biểu.
 3. Chọn đúng học kỳ và chế độ xem theo tuần.
-4. Parse lịch học tuần hiện tại.
+4. Parse lịch học tuần hiện tại và các tuần kế tiếp theo `CRAWLER_WEEKS_AHEAD`.
 5. Ghi dữ liệu vào Supabase.
 6. Lấy lịch của hôm nay.
 7. Gửi thông báo Telegram.

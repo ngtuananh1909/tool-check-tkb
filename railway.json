@@ -5,6 +5,9 @@
     "context": "."
   },
   "deploy": {
+    "startCommand": "uvicorn webhook_app:app --host 0.0.0.0 --port ${PORT:-8000}",
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 180,
     "restartPolicyMaxRetries": 5,
     "restartPolicyWindow": 600
   },
@@ -52,9 +55,33 @@
       "sensitive": true,
       "required": false
     },
+    "GOOGLE_CALENDAR_ID": {
+      "description": "Google Calendar ID to sync classes/appointments",
+      "example": "primary",
+      "required": false
+    },
+    "GOOGLE_SERVICE_ACCOUNT_JSON": {
+      "description": "Google service account JSON credentials in one line",
+      "sensitive": true,
+      "required": false
+    },
+    "GOOGLE_SERVICE_ACCOUNT_FILE": {
+      "description": "Path to mounted service account JSON file (if using file-based credentials)",
+      "required": false
+    },
+    "GOOGLE_CALENDAR_REQUIRED": {
+      "description": "When true, app fails if calendar sync cannot run",
+      "example": "true",
+      "required": false
+    },
     "TARGET_SEMESTER": {
       "description": "Optional semester override (e.g., HK2/2025-2026)",
       "example": "HK2/2025-2026",
+      "required": false
+    },
+    "APP_TIMEZONE": {
+      "description": "Timezone for date and calendar event generation",
+      "example": "Asia/Ho_Chi_Minh",
       "required": false
     }
   }

@@ -17,6 +17,8 @@ uvicorn webhook_app:app --reload
 
 Then send a test message to your Telegram bot. See [LOCAL_SETUP.md](LOCAL_SETUP.md) for details.
 
+Tip: set `CRAWLER_WEEKS_AHEAD=2` in `.env` so each run syncs current week + next 2 weeks to Google Calendar.
+
 ---
 
 ## ☁️ Option 2: Deploy to Railway (Recommended Production)

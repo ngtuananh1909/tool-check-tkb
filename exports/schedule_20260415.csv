@@ -1,0 +1,21 @@
+event_type,title,day_of_week,appointment_date,start_time,end_time,location,notes,first_occurrence
+class_session,Đại số tuyến tính cho Công nghệ thông tin,Monday,2026-04-13,09:30,12:00,B406-A,Imported from table class_sessions,2026-04-13
+class_session,Sinh hoạt chủ nhiệm khoa CNTT,Monday,2026-04-13,17:30,19:40,B409,Imported from table class_sessions,2026-04-13
+class_session,Lập trình hướng đối tượng,Tuesday,2026-04-14,09:30,12:00,B311,Imported from table class_sessions,2026-04-14
+class_session,Thực hành Lập trình hướng đối tượng,Tuesday,2026-04-14,12:30,15:00,A707,Imported from table class_sessions,2026-04-14
+class_session,GDTC 2 - Cờ vua vận động,Tuesday,2026-04-14,15:00,17:30,T1-NTD-1,Imported from table class_sessions,2026-04-14
+class_session,Thực hành Nhập môn hệ điều hành,Wednesday,2026-04-15,07:00,09:30,A505,Imported from table class_sessions,2026-04-15
+class_session,Thực hành Đại số tuyến tính cho Công nghệ thông tin,Thursday,2026-04-16,12:30,15:00,A508,Imported from table class_sessions,2026-04-16
+class_session,Nhập môn hệ điều hành,Friday,2026-04-17,07:00,09:30,B406-A,Imported from table class_sessions,2026-04-17
+class_session,Triết học Mác - Lênin,Saturday,2026-04-18,09:30,12:00,B303,Imported from table class_sessions,2026-04-18
+class_session,Đại số tuyến tính cho Công nghệ thông tin,Monday,2026-04-20,09:30,12:00,B406-A,Imported from table class_sessions,2026-04-20
+class_session,Lập trình hướng đối tượng,Tuesday,2026-04-21,09:30,12:00,B311,Imported from table class_sessions,2026-04-21
+class_session,GDTC 2 - Cờ vua vận động,Tuesday,2026-04-21,15:00,17:30,T1-NTD-1,Imported from table class_sessions,2026-04-21
+class_session,Nhập môn hệ điều hành,Wednesday,2026-04-22,07:00,09:30,A602,Imported from table class_sessions,2026-04-22
+class_session,Nhập môn hệ điều hành,Friday,2026-04-24,07:00,09:30,B406-A,Imported from table class_sessions,2026-04-24
+class_session,Triết học Mác - Lênin,Saturday,2026-04-25,09:30,12:00,B303,Imported from table class_sessions,2026-04-25
+class_session,Lập trình hướng đối tượng,Tuesday,2026-04-28,09:30,12:00,B311,Imported from table class_sessions,2026-04-28
+class_session,GDTC 2 - Cờ vua vận động,Tuesday,2026-04-28,15:00,17:30,T1-NTD-1,Imported from table class_sessions,2026-04-28
+class_session,Triết học Mác - Lênin,Saturday,2026-05-02,09:30,12:00,B303,Imported from table class_sessions,2026-05-02
+appointment,Thuyết trình demo cho giảng viên,,2026-04-15,20:30,,,,
+appointment,Đăng ký môn học,,2026-05-06,16:00,16:00,trường,,
