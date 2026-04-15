@@ -791,165 +791,213 @@ def _parse_schedule_table(page, student_id: str) -> list[dict]:
 
 def _parse_weekly_grid_table(page, student_id: str) -> list[dict]:
     """Parse timetable from the week-view matrix layout (Period x Day)."""
-    raw_entries: list[dict] = page.evaluate(
-        r"""
-                () => {
-                    const dayNames = [
-                        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"
-                    ];
+    script = r"""
+        () => {
+            const englishDays = [
+                ["monday", "Monday"],
+                ["tuesday", "Tuesday"],
+                ["wednesday", "Wednesday"],
+                ["thursday", "Thursday"],
+                ["friday", "Friday"],
+                ["saturday", "Saturday"],
+                ["sunday", "Sunday"]
+            ];
 
-                    const extractWeekday = (headerText) => {
-                        const text = (headerText || "").replace(/\s+/g, " ");
-                        for (const day of dayNames) {
-                            if (text.includes(day)) return day;
-                        }
+            const extractWeekday = (headerText) => {
+                const lower = (headerText || "").replace(/\s+/g, " ").toLowerCase();
 
-                        // Fallback to Vietnamese labels when English is not present.
-                        const vnMap = [
-                            ["thứ 2", "Monday"],
-                            ["thứ 3", "Tuesday"],
-                            ["thứ 4", "Wednesday"],
-                            ["thứ 5", "Thursday"],
-                            ["thứ 6", "Friday"],
-                            ["thứ 7", "Saturday"],
-                            ["chủ nhật", "Sunday"]
-                        ];
-                        const lower = text.toLowerCase();
-                        for (const [vn, en] of vnMap) {
-                            if (lower.includes(vn)) return en;
-                        }
-                        return "";
-                    };
-
-                    const extractDate = (headerText) => {
-                        const text = (headerText || "").replace(/\s+/g, " ");
-                        const m = text.match(/(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?/);
-                        if (!m) return "";
-
-                        const day = parseInt(m[1], 10);
-                        const month = parseInt(m[2], 10);
-                        let year = m[3] ? parseInt(m[3], 10) : (new Date()).getFullYear();
-                        if (year < 100) year += 2000;
-
-                        if (!day || !month || !year) return "";
-                        if (month < 1 || month > 12 || day < 1 || day > 31) return "";
-                        return `${year.toString().padStart(4, "0")}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
-                    };
-
-                    const cleanSubject = (text) => {
-                        const first = (text || "").split("\n")[0] || "";
-                        return first.split("|")[0].trim();
-                    };
-
-                    const extractRoom = (text) => {
-                        const roomMatch = (text || "").match(/Phòng\|Room:\s*([^\n]+)/i)
-                            || (text || "").match(/Room:\s*([^\n]+)/i)
-                            || (text || "").match(/Phòng:\s*([^\n]+)/i);
-                        return roomMatch ? roomMatch[1].trim() : "";
-                    };
-
-                    // Pick the main weekly table: first row should contain "Period | Day".
-                    let target = null;
-                    for (const tbl of Array.from(document.querySelectorAll("table"))) {
-                        const firstRow = tbl.querySelector(":scope > tbody > tr, :scope > tr");
-                        if (!firstRow) continue;
-                        const firstText = (firstRow.innerText || "").toLowerCase();
-                        if (firstText.includes("period") && firstText.includes("day")) {
-                            target = tbl;
-                            break;
-                        }
-                    }
-                    if (!target) return [];
-
-                    const rows = Array.from(target.querySelectorAll(":scope > tbody > tr, :scope > tr"));
-                    if (rows.length < 2) return [];
-
-                    const headerCells = Array.from(rows[0].querySelectorAll(":scope > th, :scope > td"));
-                    if (headerCells.length < 8) return [];
-
-                    // Logical day columns are expected at indices 1..7.
-                    const dayByColumn = {};
-                    const dateByColumn = {};
-                    for (let col = 1; col <= 7; col += 1) {
-                        const headerText = headerCells[col]?.innerText || "";
-                        dayByColumn[col] = extractWeekday(headerText);
-                        dateByColumn[col] = extractDate(headerText);
-                    }
-
-                    const carry = {}; // col -> remaining rowspan from previous rows
-                    const entries = [];
-
-                    for (let r = 1; r < rows.length; r += 1) {
-                        for (const key of Object.keys(carry)) {
-                            if (carry[key] > 0) carry[key] -= 1;
-                        }
-
-                        const cells = Array.from(rows[r].querySelectorAll(":scope > td, :scope > th"));
-                        if (!cells.length) continue;
-
-                        let logicalCol = 0;
-                        let rowPeriod = 0;
-
-                        for (const cell of cells) {
-                            while (carry[logicalCol] > 0) {
-                                logicalCol += 1;
-                            }
-
-                            const rowSpan = Math.max(parseInt(cell.getAttribute("rowspan") || "1", 10) || 1, 1);
-                            const colSpan = Math.max(parseInt(cell.getAttribute("colspan") || "1", 10) || 1, 1);
-                            const text = (cell.innerText || "").trim();
-
-                            if (logicalCol === 0) {
-                                const periodMatch = text.match(/^\d+$/);
-                                if (periodMatch) {
-                                    rowPeriod = parseInt(periodMatch[0], 10);
-                                }
-                            } else if (rowPeriod > 0) {
-                                for (let c = logicalCol; c < logicalCol + colSpan; c += 1) {
-                                    const dayOfWeek = dayByColumn[c] || "";
-                                    const sessionDate = dateByColumn[c] || "";
-                                    if (!dayOfWeek || !text || !/room|phòng/i.test(text)) {
-                                        continue;
-                                    }
-
-                                    const subject = cleanSubject(text);
-                                    if (!subject) continue;
-
-                                    entries.push({
-                                        subject_name: subject,
-                                        room: extractRoom(text),
-                                        day_of_week: dayOfWeek,
-                                        session_date: sessionDate,
-                                        start_period: rowPeriod,
-                                        end_period: rowPeriod + rowSpan - 1,
-                                    });
-                                }
-                            }
-
-                            if (rowSpan > 1) {
-                                for (let c = logicalCol; c < logicalCol + colSpan; c += 1) {
-                                    carry[c] = Math.max(carry[c] || 0, rowSpan - 1);
-                                }
-                            }
-
-                            logicalCol += colSpan;
-                        }
-                    }
-
-                    // De-duplicate by (subject, room, day, start, end)
-                    const seen = new Set();
-                    const deduped = [];
-                    for (const e of entries) {
-                        const key = [e.subject_name, e.room, e.day_of_week, e.session_date, e.start_period, e.end_period].join("|");
-                        if (seen.has(key)) continue;
-                        seen.add(key);
-                        deduped.push(e);
-                    }
-
-                    return deduped;
+                for (const [needle, day] of englishDays) {
+                    if (lower.includes(needle)) return day;
                 }
-                """
-    )
+
+                const vnMap = [
+                    ["thứ 2", "Monday"],
+                    ["thu 2", "Monday"],
+                    ["thứ hai", "Monday"],
+                    ["thứ 3", "Tuesday"],
+                    ["thu 3", "Tuesday"],
+                    ["thứ ba", "Tuesday"],
+                    ["thứ 4", "Wednesday"],
+                    ["thu 4", "Wednesday"],
+                    ["thứ tư", "Wednesday"],
+                    ["thứ 5", "Thursday"],
+                    ["thu 5", "Thursday"],
+                    ["thứ năm", "Thursday"],
+                    ["thứ 6", "Friday"],
+                    ["thu 6", "Friday"],
+                    ["thứ sáu", "Friday"],
+                    ["thứ 7", "Saturday"],
+                    ["thu 7", "Saturday"],
+                    ["thứ bảy", "Saturday"],
+                    ["chủ nhật", "Sunday"],
+                    ["chu nhat", "Sunday"],
+                    ["cn", "Sunday"]
+                ];
+                for (const [vn, en] of vnMap) {
+                    if (lower.includes(vn)) return en;
+                }
+                return "";
+            };
+
+            const extractDate = (headerText) => {
+                const text = (headerText || "").replace(/\s+/g, " ");
+                const m = text.match(/(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?/);
+                if (!m) return "";
+
+                const day = parseInt(m[1], 10);
+                const month = parseInt(m[2], 10);
+                let year = m[3] ? parseInt(m[3], 10) : (new Date()).getFullYear();
+                if (year < 100) year += 2000;
+
+                if (!day || !month || !year) return "";
+                if (month < 1 || month > 12 || day < 1 || day > 31) return "";
+                return `${year.toString().padStart(4, "0")}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
+            };
+
+            const cleanSubject = (text) => {
+                const first = (text || "").split("\n")[0] || "";
+                return first.split("|")[0].trim();
+            };
+
+            const extractRoom = (text) => {
+                const roomMatch = (text || "").match(/Phòng\|Room:\s*([^\n]+)/i)
+                    || (text || "").match(/Room:\s*([^\n]+)/i)
+                    || (text || "").match(/Phòng:\s*([^\n]+)/i);
+                return roomMatch ? roomMatch[1].trim() : "";
+            };
+
+            let target = null;
+            let targetRows = [];
+
+            for (const tbl of Array.from(document.querySelectorAll("table"))) {
+                const rows = Array.from(tbl.querySelectorAll(":scope > tbody > tr, :scope > tr"));
+                if (rows.length < 2) continue;
+
+                const headerCells = Array.from(rows[0].querySelectorAll(":scope > th, :scope > td"));
+                if (headerCells.length < 6) continue;
+
+                const firstHeader = (headerCells[0]?.innerText || "").toLowerCase();
+                const allHeaders = headerCells.map((c) => (c.innerText || "").toLowerCase()).join(" ");
+
+                const hasPeriodHeader = /period|tiết|tiet/.test(firstHeader) || /period|tiết|tiet/.test(allHeaders);
+                const hasDayHeader = /day|thứ|thu|monday|tuesday|wednesday|thursday|friday|saturday|sunday|cn|chủ nhật|chu nhat/.test(allHeaders);
+
+                if (hasPeriodHeader && hasDayHeader) {
+                    target = tbl;
+                    targetRows = rows;
+                    break;
+                }
+            }
+
+            if (!target) return [];
+
+            const rows = targetRows;
+            const headerCells = Array.from(rows[0].querySelectorAll(":scope > th, :scope > td"));
+            if (headerCells.length < 6) return [];
+
+            const dayByColumn = {};
+            const dateByColumn = {};
+            const maxDayCol = headerCells.length - 1;
+            for (let col = 1; col <= maxDayCol; col += 1) {
+                const headerText = headerCells[col]?.innerText || "";
+                dayByColumn[col] = extractWeekday(headerText);
+                dateByColumn[col] = extractDate(headerText);
+            }
+
+            const carry = {};
+            const entries = [];
+
+            for (let r = 1; r < rows.length; r += 1) {
+                for (const key of Object.keys(carry)) {
+                    if (carry[key] > 0) carry[key] -= 1;
+                }
+
+                const cells = Array.from(rows[r].querySelectorAll(":scope > td, :scope > th"));
+                if (!cells.length) continue;
+
+                let logicalCol = 0;
+                let rowPeriod = 0;
+
+                for (const cell of cells) {
+                    while (carry[logicalCol] > 0) {
+                        logicalCol += 1;
+                    }
+
+                    const rowSpan = Math.max(parseInt(cell.getAttribute("rowspan") || "1", 10) || 1, 1);
+                    const colSpan = Math.max(parseInt(cell.getAttribute("colspan") || "1", 10) || 1, 1);
+                    const text = (cell.innerText || "").trim();
+
+                    if (logicalCol === 0) {
+                        const periodMatch = text.match(/^\d+$/);
+                        if (periodMatch) {
+                            rowPeriod = parseInt(periodMatch[0], 10);
+                        }
+                    } else if (rowPeriod > 0) {
+                        for (let c = logicalCol; c < logicalCol + colSpan; c += 1) {
+                            const dayOfWeek = dayByColumn[c] || "";
+                            const sessionDate = dateByColumn[c] || "";
+                            if (!dayOfWeek || !text) continue;
+                            if (/^(-|x|trống|rong)$/i.test(text)) continue;
+
+                            const subject = cleanSubject(text);
+                            if (!subject) continue;
+
+                            entries.push({
+                                subject_name: subject,
+                                room: extractRoom(text),
+                                day_of_week: dayOfWeek,
+                                session_date: sessionDate,
+                                start_period: rowPeriod,
+                                end_period: rowPeriod + rowSpan - 1,
+                            });
+                        }
+                    }
+
+                    if (rowSpan > 1) {
+                        for (let c = logicalCol; c < logicalCol + colSpan; c += 1) {
+                            carry[c] = Math.max(carry[c] || 0, rowSpan - 1);
+                        }
+                    }
+
+                    logicalCol += colSpan;
+                }
+            }
+
+            const seen = new Set();
+            const deduped = [];
+            for (const e of entries) {
+                const key = [e.subject_name, e.room, e.day_of_week, e.session_date, e.start_period, e.end_period].join("|");
+                if (seen.has(key)) continue;
+                seen.add(key);
+                deduped.push(e);
+            }
+
+            return deduped;
+        }
+        """
+
+    contexts = [("main-page", page)]
+    for index, frame in enumerate(page.frames):
+        if frame == page.main_frame:
+            continue
+        contexts.append((f"frame-{index}", frame))
+
+    raw_entries: list[dict] = []
+    for context_name, context in contexts:
+        try:
+            candidate = context.evaluate(script)
+        except Exception as exc:
+            logger.debug("Skipping weekly-grid parse for %s: %s", context_name, exc)
+            continue
+
+        if candidate:
+            raw_entries = candidate
+            logger.info(
+                "Detected weekly grid schedule in %s with %d raw entries.",
+                context_name,
+                len(raw_entries),
+            )
+            break
 
     entries: list[dict] = []
     for row in raw_entries or []:
