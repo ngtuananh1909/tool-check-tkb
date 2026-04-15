@@ -162,8 +162,8 @@ async def telegram_webhook(
                 "MVP format:\n"
                 "tieude-thoigian-diadiem(optional)\n\n"
                 "Vi du:\n"
-                "hop nhom-15/04 14:00-B402\n"
-                "di kham-2026-04-16 09:30\n"
+                "họp nhóm-15/04 14:00-B402\n"
+                "đi khám-2026-04-16 09:30\n"
                 "gym-18:00",
             )
             return {"ok": True}
@@ -178,7 +178,7 @@ async def telegram_webhook(
             if gemini_payload.get("needs_clarification", False):
                 if _looks_like_appointment_message(text):
                     question = gemini_payload.get("clarification_question") or (
-                        "Mình chưa hiểu rõ lịch hẹn này, bạn gửi lại giúp mình theo format: tieu de-thoi gian-dia diem(optional) nhé."
+                        "Mình chưa hiểu rõ lịch hẹn này, bạn gửi lại giúp mình theo format: tiêu đề-thời gian-địa điểm(optional) nhé."
                     )
                     _send_text(token, chat_id, str(question))
                 else:

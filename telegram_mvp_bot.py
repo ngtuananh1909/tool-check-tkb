@@ -5,8 +5,8 @@ Message format (plain text):
     tieude-thoigian-diadiem(optional)
 
 Examples:
-    hop nhom-15/04 14:00-B402
-    di kham-2026-04-16 09:30
+    họp nhóm-15/04 14:00-B402
+    đi khám-2026-04-16 09:30
     gym-18:00
 
 Time parsing rules (MVP):
@@ -265,7 +265,7 @@ def _fallback_conversational_reply(user_text: str) -> str:
         return "Ôm tinh thần bạn một cái nhẹ nha, nghỉ một chút rồi mình cùng sắp xếp lại lịch cho dễ thở hơn."
     return (
         "Mình vẫn ở đây để nghe bạn nè. "
-        "Nếu cần tạo lịch hẹn, bạn cứ nhắn kiểu: hop nhom-15/04 14:00-B402."
+        "Nếu cần tạo lịch hẹn, bạn cứ nhắn kiểu: họp nhóm-15/04 14:00-B402."
     )
 
 
@@ -325,8 +325,8 @@ def run() -> None:
                         "MVP format:\n"
                         "tieude-thoigian-diadiem(optional)\n\n"
                         "Vi du:\n"
-                        "hop nhom-15/04 14:00-B402\n"
-                        "di kham-2026-04-16 09:30\n"
+                        "họp nhóm-15/04 14:00-B402\n"
+                        "đi khám-2026-04-16 09:30\n"
                         "gym-18:00",
                     )
                     continue
@@ -342,7 +342,7 @@ def run() -> None:
                         if gemini_payload.get("needs_clarification", False):
                             if _looks_like_appointment_message(text):
                                 question = gemini_payload.get("clarification_question") or (
-                                    "Mình chưa hiểu rõ lịch hẹn này, bạn gửi lại giúp mình theo format: tieu de-thoi gian-dia diem(optional) nhé."
+                                    "Mình chưa hiểu rõ lịch hẹn này, bạn gửi lại giúp mình theo format: tiêu đề-thời gian-địa điểm(optional) nhé."
                                 )
                                 _send_text(token, chat_id, str(question))
                             else:
