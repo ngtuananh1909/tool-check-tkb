@@ -618,6 +618,10 @@ def _switch_to_week_view_if_available(page) -> bool:
                 item = radio.nth(i)
                 if item.is_visible() and not item.is_checked():
                     item.check()
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=30_000)
+                    except Exception:
+                        pass
                     logger.info("Switched schedule mode to week view via radio control.")
                     return True
             except Exception:
@@ -716,8 +720,12 @@ def _parse_schedule_table(page, student_id: str) -> list[dict]:
     inspecting the header row.
     """
     weekly_entries = _parse_weekly_grid_table(page, student_id)
-    if weekly_entries:
-        logger.info("Parsed %d entries from weekly grid table.", len(weekly_entries))
+    if weekly_entries is not None:
+        # Grid table structure was detected (weekly_entries may be [] for an empty week).
+        if weekly_entries:
+            logger.info("Parsed %d entries from weekly grid table.", len(weekly_entries))
+        else:
+            logger.info("Weekly grid table found but contains no entries for this week.")
         return weekly_entries
 
     # Grab all tables on the page
@@ -789,7 +797,7 @@ def _parse_schedule_table(page, student_id: str) -> list[dict]:
     )
 
 
-def _parse_weekly_grid_table(page, student_id: str) -> list[dict]:
+def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
     """Parse timetable from the week-view matrix layout (Period x Day)."""
     script = r"""
         () => {
@@ -874,12 +882,12 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict]:
                 if (rows.length < 2) continue;
 
                 const headerCells = Array.from(rows[0].querySelectorAll(":scope > th, :scope > td"));
-                if (headerCells.length < 6) continue;
+                if (headerCells.length < 3) continue;
 
                 const firstHeader = (headerCells[0]?.innerText || "").toLowerCase();
                 const allHeaders = headerCells.map((c) => (c.innerText || "").toLowerCase()).join(" ");
 
-                const hasPeriodHeader = /period|tiết|tiet/.test(firstHeader) || /period|tiết|tiet/.test(allHeaders);
+                const hasPeriodHeader = /period|tiết|tiet|buổi|buoi|\bca\b|slot/.test(firstHeader) || /period|tiết|tiet|buổi|buoi|\bca\b|slot/.test(allHeaders);
                 const hasDayHeader = /day|thứ|thu|monday|tuesday|wednesday|thursday|friday|saturday|sunday|cn|chủ nhật|chu nhat/.test(allHeaders);
 
                 if (hasPeriodHeader && hasDayHeader) {
@@ -889,11 +897,11 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict]:
                 }
             }
 
-            if (!target) return [];
+            if (!target) return null;
 
             const rows = targetRows;
             const headerCells = Array.from(rows[0].querySelectorAll(":scope > th, :scope > td"));
-            if (headerCells.length < 6) return [];
+            if (headerCells.length < 3) return null;
 
             const dayByColumn = {};
             const dateByColumn = {};
@@ -982,7 +990,7 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict]:
             continue
         contexts.append((f"frame-{index}", frame))
 
-    raw_entries: list[dict] = []
+    raw_entries: list[dict] | None = None
     for context_name, context in contexts:
         try:
             candidate = context.evaluate(script)
@@ -990,17 +998,25 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict]:
             logger.debug("Skipping weekly-grid parse for %s: %s", context_name, exc)
             continue
 
-        if candidate:
-            raw_entries = candidate
-            logger.info(
-                "Detected weekly grid schedule in %s with %d raw entries.",
-                context_name,
-                len(raw_entries),
-            )
-            break
+        if candidate is None:
+            # JS returned null: this context had no matching table structure.
+            continue
+
+        # JS returned a list (possibly empty): table structure was detected.
+        raw_entries = candidate
+        logger.info(
+            "Detected weekly grid schedule in %s with %d raw entries.",
+            context_name,
+            len(raw_entries),
+        )
+        break
+
+    if raw_entries is None:
+        # No table structure was found in any frame.
+        return None
 
     entries: list[dict] = []
-    for row in raw_entries or []:
+    for row in raw_entries:
         entries.append(
             {
                 "student_id": student_id,
