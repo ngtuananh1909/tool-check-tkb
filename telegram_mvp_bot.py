@@ -135,7 +135,11 @@ def _parse_input(text: str) -> tuple[str, dt.date, str, str | None]:
 def _looks_like_appointment_message(text: str) -> bool:
     lower = text.lower()
     if "-" in text:
-        return True
+        _, rest = text.split("-", 1)
+        if re.search(r"\b\d{1,2}:\d{2}\b", rest) or re.search(r"\b\d{1,2}/\d{1,2}(?:/\d{4})?\b", rest) or re.search(
+            r"\b\d{4}-\d{2}-\d{2}\b", rest
+        ):
+            return True
     if re.search(r"\b\d{1,2}:\d{2}\b", text):
         return True
     if re.search(r"\b\d{1,2}/\d{1,2}(?:/\d{4})?\b", text):
