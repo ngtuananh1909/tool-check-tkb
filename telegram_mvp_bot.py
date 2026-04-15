@@ -134,18 +134,22 @@ def _parse_input(text: str) -> tuple[str, dt.date, str, str | None]:
 
 def _looks_like_appointment_message(text: str) -> bool:
     lower = text.lower()
+    has_time = re.search(r"\b\d{1,2}:\d{2}\b", text) is not None
+    has_short_date = re.search(r"\b\d{1,2}/\d{1,2}(?:/\d{4})?\b", text) is not None
+    has_iso_date = re.search(r"\b\d{4}-\d{2}-\d{2}\b", text) is not None
+
     if "-" in text:
-        _, rest = text.split("-", 1)
-        if re.search(r"\b\d{1,2}:\d{2}\b", rest) or re.search(r"\b\d{1,2}/\d{1,2}(?:/\d{4})?\b", rest) or re.search(
-            r"\b\d{4}-\d{2}-\d{2}\b", rest
-        ):
-            return True
-    if re.search(r"\b\d{1,2}:\d{2}\b", text):
+        parts = text.split("-", 1)
+        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+            rest = parts[1]
+            if re.search(r"\b\d{1,2}:\d{2}\b", rest) or re.search(r"\b\d{1,2}/\d{1,2}(?:/\d{4})?\b", rest) or re.search(
+                r"\b\d{4}-\d{2}-\d{2}\b", rest
+            ):
+                return True
+
+    if has_time or has_short_date or has_iso_date:
         return True
-    if re.search(r"\b\d{1,2}/\d{1,2}(?:/\d{4})?\b", text):
-        return True
-    if re.search(r"\b\d{4}-\d{2}-\d{2}\b", text):
-        return True
+
     keywords = ("hẹn", "hen", "họp", "hop", "lịch", "lich", "meeting", "deadline")
     return any(word in lower for word in keywords)
 
