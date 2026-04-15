@@ -90,6 +90,7 @@ Chạy listener Telegram (long polling):
 ```
 
 Bot sẽ ưu tiên dùng Gemini để đọc tin nhắn và tạo JSON trước, rồi mới fallback sang parser rule-based nếu Gemini chưa có hoặc trả kết quả không rõ.
+Ngoài tạo lịch hẹn, bot cũng có thể chat tự nhiên hơn (tông nhẹ nhàng, lịch sự kiểu người yêu nhưng không quá thân mật).
 
 ### 6. Chạy webhook Telegram
 
@@ -134,6 +135,7 @@ Lệnh hỗ trợ nhanh:
 - `/today`: xem lịch hẹn hôm nay
 
 Nếu có `GEMINI_API_KEY` trong `.env`, bot sẽ cố gắng hiểu câu tự nhiên và lưu vào database theo JSON. Nếu không có key, bot vẫn chạy bằng format cứng ở trên.
+Với tin nhắn không phải lịch hẹn, bot sẽ trả lời hội thoại tự nhiên thay vì báo lỗi format.
 
 ## Bot làm gì
 

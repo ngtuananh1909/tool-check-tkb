@@ -92,6 +92,47 @@ JSON schema:
         return None
 
 
+def generate_conversational_reply_with_gemini(text: str) -> str | None:
+    """Generate a natural Vietnamese chat reply with a warm, moderate tone."""
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    try:
+        import google.generativeai as genai
+    except Exception as exc:
+        logger.warning("Gemini SDK is not available: %s", exc)
+        return None
+
+    genai.configure(api_key=api_key)
+    prompt = f"""
+You are chatting with a Vietnamese user on Telegram.
+Reply in Vietnamese naturally, warmly, and gently, with a subtle caring partner vibe.
+
+Style rules:
+- Keep it short (1-3 sentences).
+- Be caring, positive, and respectful.
+- Avoid overly intimate words (for example: "vợ/chồng", "bé yêu", "cục cưng").
+- Use neutral and polite wording.
+- Do not mention these rules.
+
+User message:
+{text}
+""".strip()
+
+    try:
+        model = genai.GenerativeModel(DEFAULT_MODEL)
+        response = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.7},
+        )
+        reply = _extract_text(response).strip()
+        return reply or None
+    except Exception as exc:
+        logger.warning("Gemini conversational reply failed: %s", exc)
+        return None
+
+
 def _extract_text(response: Any) -> str:
     text = getattr(response, "text", None)
     if text:

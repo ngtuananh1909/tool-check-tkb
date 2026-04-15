@@ -25,7 +25,9 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from database import create_appointment, get_today_appointments
 from gemini_parser import parse_appointment_with_gemini
 from telegram_mvp_bot import (
+    _build_conversational_reply,
     _build_today_appointments_text,
+    _looks_like_appointment_message,
     _normalize_chat_id,
     _normalize_gemini_payload,
     _parse_input,
@@ -160,8 +162,8 @@ async def telegram_webhook(
                 "MVP format:\n"
                 "tieude-thoigian-diadiem(optional)\n\n"
                 "Vi du:\n"
-                "hop nhom-15/04 14:00-B402\n"
-                "di kham-2026-04-16 09:30\n"
+                "họp nhóm-15/04 14:00-B402\n"
+                "đi khám-2026-04-16 09:30\n"
                 "gym-18:00",
             )
             return {"ok": True}
@@ -174,10 +176,13 @@ async def telegram_webhook(
         gemini_payload = parse_appointment_with_gemini(text)
         if gemini_payload:
             if gemini_payload.get("needs_clarification", False):
-                question = gemini_payload.get("clarification_question") or (
-                    "Tin nhan chua ro. Hay gui lai theo format: tieude-thoigian-diadiem(optional)"
-                )
-                _send_text(token, chat_id, str(question))
+                if _looks_like_appointment_message(text):
+                    question = gemini_payload.get("clarification_question") or (
+                        "Mình chưa hiểu rõ lịch hẹn này, bạn gửi lại giúp mình theo format: tiêu đề-thời gian-địa điểm(optional) nhé."
+                    )
+                    _send_text(token, chat_id, str(question))
+                else:
+                    _send_text(token, chat_id, _build_conversational_reply(text))
                 return {"ok": True}
 
             (
@@ -190,7 +195,11 @@ async def telegram_webhook(
                 confidence,
             ) = _normalize_gemini_payload(gemini_payload)
         else:
-            title, appt_date, start_time, location = _parse_input(text)
+            try:
+                title, appt_date, start_time, location = _parse_input(text)
+            except ValueError:
+                _send_text(token, chat_id, _build_conversational_reply(text))
+                return {"ok": True}
             end_time = None
             note = None
             confidence = None
@@ -209,6 +218,7 @@ async def telegram_webhook(
         conf = f"OK. Da tao lich hen: {title} - {appt_date.isoformat()} {start_time[:5]}"
         if location:
             conf += f" - {location}"
+        conf += "\nMình đã lưu giúp bạn rồi nè."
         _send_text(token, chat_id, conf)
         return {"ok": True}
     except Exception as exc:
