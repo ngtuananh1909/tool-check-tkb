@@ -29,7 +29,10 @@ from requests import RequestException
 import requests
 
 from database import create_appointment, get_today_appointments
-from gemini_parser import parse_appointment_with_gemini
+from gemini_parser import (
+    generate_conversational_reply_with_gemini,
+    parse_appointment_with_gemini,
+)
 from time_utils import local_now, local_today
 
 logger = logging.getLogger(__name__)
@@ -127,6 +130,20 @@ def _parse_input(text: str) -> tuple[str, dt.date, str, str | None]:
         "Không đọc được thời gian. Dùng format: "
         "tieude-thoigian-diadiem(optional)."
     )
+
+
+def _looks_like_appointment_message(text: str) -> bool:
+    lower = text.lower()
+    if "-" in text:
+        return True
+    if re.search(r"\b\d{1,2}:\d{2}\b", text):
+        return True
+    if re.search(r"\b\d{1,2}/\d{1,2}(?:/\d{4})?\b", text):
+        return True
+    if re.search(r"\b\d{4}-\d{2}-\d{2}\b", text):
+        return True
+    keywords = ("hẹn", "hen", "họp", "hop", "lịch", "lich", "meeting", "deadline")
+    return any(word in lower for word in keywords)
 
 
 def _normalize_gemini_payload(payload: dict) -> tuple[str, dt.date, str | None, str | None, str | None, str | None, float | None]:
@@ -234,6 +251,27 @@ def _build_today_appointments_text(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _fallback_conversational_reply(user_text: str) -> str:
+    lower = user_text.lower()
+    if any(word in lower for word in ("chào", "hello", "hi")):
+        return "Chào bạn, mình đây nè. Bạn muốn mình nhắc lịch hay trò chuyện một chút?"
+    if "cảm ơn" in lower:
+        return "Không có gì đâu, mình luôn sẵn sàng hỗ trợ bạn nè."
+    if "buồn" in lower or "mệt" in lower:
+        return "Ôm tinh thần bạn một cái nhẹ nha, nghỉ một chút rồi mình cùng sắp xếp lại lịch cho dễ thở hơn."
+    return (
+        "Mình vẫn ở đây để nghe bạn nè. "
+        "Nếu cần tạo lịch hẹn, bạn cứ nhắn kiểu: hop nhom-15/04 14:00-B402."
+    )
+
+
+def _build_conversational_reply(user_text: str) -> str:
+    reply = generate_conversational_reply_with_gemini(user_text)
+    if reply:
+        return reply
+    return _fallback_conversational_reply(user_text)
+
+
 def run() -> None:
     _load_dotenv()
 
@@ -298,10 +336,13 @@ def run() -> None:
                     gemini_payload = parse_appointment_with_gemini(text)
                     if gemini_payload:
                         if gemini_payload.get("needs_clarification", False):
-                            question = gemini_payload.get("clarification_question") or (
-                                "Tin nhan chua ro. Hay gui lai theo format: tieude-thoigian-diadiem(optional)"
-                            )
-                            _send_text(token, chat_id, str(question))
+                            if _looks_like_appointment_message(text):
+                                question = gemini_payload.get("clarification_question") or (
+                                    "Mình chưa hiểu rõ lịch hẹn này, bạn gửi lại giúp mình theo format: tieude-thoigian-diadiem(optional) nhé."
+                                )
+                                _send_text(token, chat_id, str(question))
+                            else:
+                                _send_text(token, chat_id, _build_conversational_reply(text))
                             continue
 
                         (
@@ -314,7 +355,11 @@ def run() -> None:
                             confidence,
                         ) = _normalize_gemini_payload(gemini_payload)
                     else:
-                        title, appt_date, start_time, location = _parse_input(text)
+                        try:
+                            title, appt_date, start_time, location = _parse_input(text)
+                        except ValueError:
+                            _send_text(token, chat_id, _build_conversational_reply(text))
+                            continue
                         end_time = None
                         note = None
                         confidence = None
@@ -332,6 +377,7 @@ def run() -> None:
                     conf = f"OK. Da tao lich hen: {title} - {appt_date.isoformat()} {start_time[:5]}"
                     if location:
                         conf += f" - {location}"
+                    conf += "\nMình đã lưu giúp bạn rồi nè."
                     _send_text(token, chat_id, conf)
                 except Exception as exc:
                     _send_text(token, chat_id, f"Khong tao duoc lich hen: {exc}")
