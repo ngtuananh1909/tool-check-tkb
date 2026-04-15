@@ -178,7 +178,7 @@ async def telegram_webhook(
             if gemini_payload.get("needs_clarification", False):
                 if _looks_like_appointment_message(text):
                     question = gemini_payload.get("clarification_question") or (
-                        "Mình chưa hiểu rõ lịch hẹn này, bạn gửi lại giúp mình theo format: tieude-thoigian-diadiem(optional) nhé."
+                        "Mình chưa hiểu rõ lịch hẹn này, bạn gửi lại giúp mình theo format: tieu de-thoi gian-dia diem(optional) nhé."
                     )
                     _send_text(token, chat_id, str(question))
                 else:

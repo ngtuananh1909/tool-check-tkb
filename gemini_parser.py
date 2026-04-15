@@ -107,7 +107,7 @@ def generate_conversational_reply_with_gemini(text: str) -> str | None:
     genai.configure(api_key=api_key)
     prompt = f"""
 You are chatting with a Vietnamese user on Telegram.
-Reply in Vietnamese naturally and warmly, with a gentle "người yêu" vibe but NOT overly intimate.
+Reply in Vietnamese naturally, warmly, and gently (supportive tone, not romantic roleplay).
 
 Style rules:
 - Keep it short (1-3 sentences).
