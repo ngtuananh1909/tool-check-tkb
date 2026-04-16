@@ -32,6 +32,10 @@ RUN playwright install chromium
 # Copy application code
 COPY . .
 
+# Copy and enable start script for proper PORT expansion
+COPY start.sh .
+RUN chmod +x start.sh
+
 # Health check endpoint
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import os, requests; port = os.environ.get('PORT', '8000'); requests.get(f'http://localhost:{port}/health', timeout=5); print('OK')" || exit 1
@@ -39,5 +43,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # Expose port
 EXPOSE 8000
 
-# Run webhook server on Railway's assigned port when available.
-CMD ["sh", "-c", "uvicorn webhook_app:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Run webhook server using start.sh script that properly handles PORT env var
+CMD ["./start.sh"]

@@ -152,11 +152,130 @@ Now every `git push` will auto-deploy!
 
 ---
 
+## Scheduled Jobs (Hourly Data Sync + Daily Morning Notification)
+
+Your bot now supports two scheduled workflows:
+
+### `run_hour.py` - Hourly Data Collection (Steps 1-4)
+- **What it does**: Crawls TDTU portal, syncs to Supabase, exports CSV, syncs Google Calendar
+- **Frequency**: Every hour
+- **Why**: Keeps schedule data fresh across multiple crawl cycles
+
+### `main.py` - Daily Morning Notification (Step 5)
+- **What it does**: Sends morning Telegram briefing with today's schedule
+- **Frequency**: Once daily at midnight (0:00 AM)
+- **Why**: Single consolidated morning notification with all classes & appointments
+
+### Setup Option 1: Railway Cron Jobs (Recommended)
+
+Railway supports scheduled jobs via cron configuration:
+
+1. **Add to `railway.json`** (in `deploy` section):
+```json
+"scheduledJobs": [
+  {
+    "command": "python run_hour.py",
+    "schedule": "0 * * * *"
+  },
+  {
+    "command": "python main.py",
+    "schedule": "0 0 * * *"
+  }
+]
+```
+
+2. **Deploy**:
+```bash
+git add railway.json
+git commit -m "Add scheduled jobs for hourly sync and daily notifications"
+git push
+```
+
+3. Railway will automatically create and manage these cron jobs.
+
+### Setup Option 2: GitHub Actions (Free Alternative)
+
+If Railway doesn't support scheduled jobs yet:
+
+1. **Create `.github/workflows/schedule_jobs.yml`**:
+```yaml
+name: Scheduled Data Sync & Notifications
+
+on:
+  schedule:
+    - cron: '0 * * * *'        # Hourly at :00
+    - cron: '0 0 * * *'        # Daily at 00:00 UTC
+
+jobs:
+  hourly-sync:
+    if: github.event.schedule == '0 * * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python run_hour.py
+        env:
+          STUDENT_ID: ${{ secrets.STUDENT_ID }}
+          PASSWORD: ${{ secrets.PASSWORD }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+  daily-notification:
+    if: github.event.schedule == '0 0 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python main.py
+        env:
+          STUDENT_ID: ${{ secrets.STUDENT_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+```
+
+2. **Add secrets to GitHub repo** (Settings → Secrets):
+   - `STUDENT_ID`, `PASSWORD`, `SUPABASE_URL`, etc. (same as Railway vars)
+
+3. **Optional**: Use `workflow_dispatch` to manually trigger jobs for testing:
+```yaml
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:     # Allows manual trigger from Actions tab
+```
+
+### Setup Option 3: Local Cron (If Self-Hosting)
+
+If running on your machine or VPS:
+
+```bash
+crontab -e
+```
+
+Add:
+```
+0 * * * * cd /home/tuananh/Documents/tool-check-tkb && python run_hour.py 2>&1 >> logs/run_hour.log
+0 0 * * * cd /home/tuananh/Documents/tool-check-tkb && python main.py 2>&1 >> logs/main.log
+```
+
+---
+
 ## Next Steps
 
 - **Push code updates**: `git push` → auto-deploys
 - **Monitor**: Railway dashboard or webhook logs
-- **6 AM daily summary**: Update `.github/workflows/daily_tkb.yml` to include appointments query
+- **Schedule jobs**: Choose one of the 3 setup options above
+- **Test manually**: `python run_hour.py` and `python main.py` locally to verify before deploying
 
 ## Alternative: Self-Hosted on Your Machine
 
