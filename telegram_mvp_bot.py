@@ -5,8 +5,8 @@ Message format (plain text):
     tieude-thoigian-diadiem(optional)
 
 Examples:
-    hop nhom-15/04 14:00-B402
-    di kham-2026-04-16 09:30
+    họp nhóm-15/04 14:00-B402
+    đi khám-2026-04-16 09:30
     gym-18:00
 
 Time parsing rules (MVP):
@@ -29,7 +29,10 @@ from requests import RequestException
 import requests
 
 from database import create_appointment, get_today_appointments
-from gemini_parser import parse_appointment_with_gemini
+from gemini_parser import (
+    generate_conversational_reply_with_gemini,
+    parse_appointment_with_gemini,
+)
 from time_utils import local_now, local_today
 
 logger = logging.getLogger(__name__)
@@ -147,6 +150,28 @@ def _parse_input(text: str) -> tuple[str, dt.date, str, str | None]:
     )
 
 
+def _looks_like_appointment_message(text: str) -> bool:
+    lower = text.lower()
+    has_time = re.search(r"\b\d{1,2}:\d{2}\b", text) is not None
+    has_short_date = re.search(r"\b\d{1,2}/\d{1,2}(?:/\d{4})?\b", text) is not None
+    has_iso_date = re.search(r"\b\d{4}-\d{2}-\d{2}\b", text) is not None
+
+    if "-" in text:
+        parts = text.split("-", 1)
+        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+            rest = parts[1]
+            if re.search(r"\b\d{1,2}:\d{2}\b", rest) or re.search(r"\b\d{1,2}/\d{1,2}(?:/\d{4})?\b", rest) or re.search(
+                r"\b\d{4}-\d{2}-\d{2}\b", rest
+            ):
+                return True
+
+    if has_time or has_short_date or has_iso_date:
+        return True
+
+    keywords = ("hẹn", "hen", "họp", "hop", "lịch", "lich", "meeting", "deadline")
+    return any(word in lower for word in keywords)
+
+
 def _normalize_gemini_payload(payload: dict) -> tuple[str, dt.date, str | None, str | None, str | None, str | None, float | None]:
     """Convert Gemini JSON payload into DB-ready fields."""
     title = str(payload.get("title") or "").strip()
@@ -252,6 +277,27 @@ def _build_today_appointments_text(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _fallback_conversational_reply(user_text: str) -> str:
+    lower = user_text.lower()
+    if any(word in lower for word in ("chào", "hello", "hi")):
+        return "Chào bạn, mình đây nè. Bạn muốn mình nhắc lịch hay trò chuyện một chút?"
+    if "cảm ơn" in lower:
+        return "Không có gì đâu, mình luôn sẵn sàng hỗ trợ bạn nè."
+    if "buồn" in lower or "mệt" in lower:
+        return "Ôm tinh thần bạn một cái nhẹ nha, nghỉ một chút rồi mình cùng sắp xếp lại lịch cho dễ thở hơn."
+    return (
+        "Mình vẫn ở đây để nghe bạn nè. "
+        "Nếu cần tạo lịch hẹn, bạn cứ nhắn kiểu: họp nhóm-15/04 14:00-B402."
+    )
+
+
+def _build_conversational_reply(user_text: str) -> str:
+    reply = generate_conversational_reply_with_gemini(user_text)
+    if reply:
+        return reply
+    return _fallback_conversational_reply(user_text)
+
+
 def run() -> None:
     _load_dotenv()
 
@@ -323,7 +369,11 @@ def run() -> None:
                             confidence,
                         ) = _normalize_gemini_payload(gemini_payload)
                     else:
-                        title, appt_date, start_time, location = _parse_input(text)
+                        try:
+                            title, appt_date, start_time, location = _parse_input(text)
+                        except ValueError:
+                            _send_text(token, chat_id, _build_conversational_reply(text))
+                            continue
                         end_time = None
                         note = None
                         confidence = None
@@ -341,6 +391,7 @@ def run() -> None:
                     conf = f"{CONFIRM_PREFIX} {title} - {appt_date.isoformat()} {start_time[:5]}"
                     if location:
                         conf += f" - {location}"
+                    conf += "\nMình đã lưu giúp bạn rồi nè."
                     _send_text(token, chat_id, conf)
                 except Exception as exc:
                     _send_text(token, chat_id, f"{CREATE_ERROR_PREFIX}: {exc}. Ban thu gui lai giup minh nhe.")
