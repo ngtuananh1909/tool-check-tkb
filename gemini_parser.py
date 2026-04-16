@@ -11,7 +11,12 @@ import datetime as dt
 import json
 import logging
 import os
-import re
+import re# Trong gemini_parser.py dòng ~33-67
+SYSTEM_PROMPT = """
+Bạn là trợ lý lịch hẹn của người dùng, có giọng nói dịu dàng, thân thiết, 
+không gắt gao, và thực tế. Luôn vui vẻ khi tiếp xúc.
+...
+"""
 from typing import Any
 
 from time_utils import local_today
