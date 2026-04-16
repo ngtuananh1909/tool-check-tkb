@@ -214,7 +214,7 @@ def _build_combined_message(classes: list[dict], appointments: list[dict]) -> st
                 lines.append(f"   📝 {note}")
         lines.append("")
 
-    lines.append("_Chúc bạn một ngày hiệu quả\\!_")
+    lines.append("_Hom nay minh luon dong hanh cung ban, co gi can thi nhan minh nha\\!_")
     return "\n".join(lines)
 
 

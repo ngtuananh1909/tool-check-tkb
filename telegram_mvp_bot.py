@@ -38,6 +38,24 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
 )
 
+HELP_TEXT = (
+    "Hi ban, minh san sang ghi lich cho ban ne.\n"
+    "Nhap theo mau:\n"
+    "tieude-thoigian-diadiem(optional)\n\n"
+    "Vi du:\n"
+    "hop nhom-15/04 14:00-B402\n"
+    "di kham-2026-04-16 09:30\n"
+    "gym-18:00"
+)
+
+CLARIFICATION_FALLBACK_TEXT = (
+    "Tin nhan cua ban chua du ro de minh tao lich. "
+    "Ban gui lai theo mau: tieude-thoigian-diadiem(optional) nha."
+)
+
+CONFIRM_PREFIX = "Xong roi ne, minh da ghi lich cho ban:"
+CREATE_ERROR_PREFIX = "Minh chua tao duoc lich hen luc nay"
+
 
 def _load_dotenv() -> None:
     try:
@@ -277,16 +295,7 @@ def run() -> None:
 
                 lowered = text.lower()
                 if lowered in {"/start", "/help"}:
-                    _send_text(
-                        token,
-                        chat_id,
-                        "MVP format:\n"
-                        "tieude-thoigian-diadiem(optional)\n\n"
-                        "Vi du:\n"
-                        "hop nhom-15/04 14:00-B402\n"
-                        "di kham-2026-04-16 09:30\n"
-                        "gym-18:00",
-                    )
+                    _send_text(token, chat_id, HELP_TEXT)
                     continue
 
                 if lowered == "/today":
@@ -299,7 +308,7 @@ def run() -> None:
                     if gemini_payload:
                         if gemini_payload.get("needs_clarification", False):
                             question = gemini_payload.get("clarification_question") or (
-                                "Tin nhan chua ro. Hay gui lai theo format: tieude-thoigian-diadiem(optional)"
+                                CLARIFICATION_FALLBACK_TEXT
                             )
                             _send_text(token, chat_id, str(question))
                             continue
@@ -329,12 +338,12 @@ def run() -> None:
                         raw_user_input=text,
                         gemini_confidence=confidence,
                     )
-                    conf = f"OK. Da tao lich hen: {title} - {appt_date.isoformat()} {start_time[:5]}"
+                    conf = f"{CONFIRM_PREFIX} {title} - {appt_date.isoformat()} {start_time[:5]}"
                     if location:
                         conf += f" - {location}"
                     _send_text(token, chat_id, conf)
                 except Exception as exc:
-                    _send_text(token, chat_id, f"Khong tao duoc lich hen: {exc}")
+                    _send_text(token, chat_id, f"{CREATE_ERROR_PREFIX}: {exc}. Ban thu gui lai giup minh nhe.")
 
         except Exception as exc:
             logger.error("Polling error: %s", exc)

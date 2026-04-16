@@ -34,7 +34,7 @@ COPY . .
 
 # Health check endpoint
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/health'); print('OK')" || exit 1
+    CMD python -c "import os, requests; port = os.environ.get('PORT', '8000'); requests.get(f'http://localhost:{port}/health', timeout=5); print('OK')" || exit 1
 
 # Expose port
 EXPOSE 8000

@@ -2,3 +2,31 @@
 .venv
 *service-account*.json
 amazing-smile-441004-j1-58a596defc04.json
+LO
+
+# Python caches and artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Build outputs
+build/
+dist/
+*.egg
+
+# Runtime files
+*.log
+
+# Generated local exports
+exports/
+*.ics
+
+# Local editor/OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
