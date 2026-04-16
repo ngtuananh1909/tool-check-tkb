@@ -1,33 +1,28 @@
-# .github/workflows/daily_tkb.yml
+# .github/workflows/hourly_sync.yml
 #
-# GitHub Actions workflow – TDTU Daily Morning Notification
+# GitHub Actions workflow – Hourly TDTU Schedule Sync
 #
-# Schedule: runs every day at 17:00 UTC = 00:00 AM Vietnam time (UTC+7).
-# This sends the morning briefing with today's schedule and appointments.
-# Requires data to already be synced (run_hour.py should have run earlier).
+# Schedule: runs every hour at minute 0.
+# This crawls the TDTU portal, syncs to Supabase, exports CSV, and syncs Google Calendar.
 # Can also be triggered manually via the "Run workflow" button.
-#
-# Note: Data collection (crawl, sync, calendar) is handled by hourly_sync.yml
 
-name: Daily Morning Notification
+name: Hourly Schedule Sync
 
 on:
   schedule:
     # Cron syntax: minute hour day-of-month month day-of-week
-    # 17:00 UTC = 00:00 ICT (UTC+7)
-    - cron: "0 17 * * *"
+    # "0 * * * *" = every hour at :00
+    - cron: "0 * * * *"
 
   # Allow manual triggers from the GitHub Actions UI
   workflow_dispatch:
 
 jobs:
-  notify:
-    name: Fetch & Send Schedule
+  sync:
+    name: Crawl & Sync TDTU Schedule
     runs-on: ubuntu-latest
 
     # Restrict GITHUB_TOKEN to the minimum required permissions.
-    # This workflow only reads repository contents (checkout) and does not
-    # write back to the repository.
     permissions:
       contents: read
 
@@ -35,10 +30,16 @@ jobs:
     # can read them with os.environ.
     env:
       STUDENT_ID: ${{ secrets.STUDENT_ID }}
+      PASSWORD: ${{ secrets.PASSWORD }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      CRAWLER_WEEKS_AHEAD: ${{ secrets.CRAWLER_WEEKS_AHEAD }}
+      GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      GOOGLE_CALENDAR_REQUIRED: ${{ secrets.GOOGLE_CALENDAR_REQUIRED }}
 
     steps:
       # -----------------------------------------------------------------------
@@ -63,13 +64,23 @@ jobs:
         run: pip install -r requirements.txt
 
       # -----------------------------------------------------------------------
-      # 4. Install Playwright browsers (Chromium only to keep the image lean)
+      # 4. Install Playwright browsers (Chromium only)
       # -----------------------------------------------------------------------
       - name: Install Playwright browsers
         run: playwright install --with-deps chromium
 
       # -----------------------------------------------------------------------
-      # 5. Send morning Telegram notification (step 5 only)
+      # 5. Create Google service account file (if needed)
       # -----------------------------------------------------------------------
-      - name: Send morning Telegram notification
-        run: python main.py
+      - name: Create Google service account file
+        if: env.GOOGLE_SERVICE_ACCOUNT_JSON != ''
+        run: |
+          echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}" > service-account.json
+
+      # -----------------------------------------------------------------------
+      # 6. Run the hourly sync script (steps 1-4)
+      # -----------------------------------------------------------------------
+      - name: Run hourly data collection and sync
+        env:
+          GOOGLE_SERVICE_ACCOUNT_FILE: ${{ github.workspace }}/service-account.json
+        run: python run_hour.py
