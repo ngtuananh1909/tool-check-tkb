@@ -593,8 +593,8 @@ def _pick_target_semester(
 
     # Also try matching on just the year range + semester number with common Vietnamese prefixes
     # Normalize away spaces around separators for the year-range check.
-    year_range = f"{start_year}-{end_year}"
     year_re = re.compile(rf'{start_year}\s*[-/]\s*{end_year}')
+    # k[yỳiì]: matches "ky" (unaccented), "kỳ" (grave), "ki", "kì" – Vietnamese romanisations of "kỳ"
     sem_re = re.compile(
         rf'(?:hk|ky|k[yỳiì]|học\s*kỳ|hoc\s*ky|semester)\s*[/\-]?\s*{hk_num}(?!\d)',
         re.IGNORECASE,
@@ -942,16 +942,18 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
             const dayByColumn = {};
             const dateByColumn = {};
             const maxDayCol = headerCells.length - 1;
-            const ISO_DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+            // Index 0 = Sunday … 6 = Saturday, matching JavaScript's Date.getUTCDay()
+            const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
             for (let col = 1; col <= maxDayCol; col += 1) {
                 const headerText = headerCells[col]?.innerText || "";
                 dayByColumn[col] = extractWeekday(headerText);
+                // extractDate always returns "" or "YYYY-MM-DD" (ISO format)
                 dateByColumn[col] = extractDate(headerText);
-                // Derive day of week from parsed date when the header has no weekday name
+                // Derive day of week from the ISO date when the header has no weekday name
                 if (!dayByColumn[col] && dateByColumn[col]) {
                     const d = new Date(dateByColumn[col] + "T00:00:00Z");
                     if (!isNaN(d.getTime())) {
-                        dayByColumn[col] = ISO_DAYS[d.getUTCDay()];
+                        dayByColumn[col] = WEEKDAY_NAMES[d.getUTCDay()];
                     }
                 }
             }
