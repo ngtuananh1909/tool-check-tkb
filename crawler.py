@@ -580,11 +580,28 @@ def _pick_target_semester(
         start_year = today.year
         end_year = today.year + 1
 
-    default_target = f"hk{hk_num}/{start_year}-{end_year}".lower()
+    # Match flexibly: strip all separators/spaces from both the target and the option
+    # so that "HK2/2025-2026", "HK2 2025-2026", "HK2-2025-2026" are all equivalent.
+    def _sem_key(s: str) -> str:
+        return re.sub(r'[\s/\-]+', '', s.lower())
+
+    default_key = _sem_key(f"hk{hk_num}{start_year}{end_year}")
     for value, text in valid_options:
-        normalized = text.lower().replace(" ", "")
-        if default_target in normalized:
+        if default_key in _sem_key(text):
             logger.info("Auto-selected semester by date rule: %s", text)
+            return value, text
+
+    # Also try matching on just the year range + semester number with common Vietnamese prefixes
+    # Normalize away spaces around separators for the year-range check.
+    year_range = f"{start_year}-{end_year}"
+    year_re = re.compile(rf'{start_year}\s*[-/]\s*{end_year}')
+    sem_re = re.compile(
+        rf'(?:hk|ky|k[yỳiì]|học\s*kỳ|hoc\s*ky|semester)\s*[/\-]?\s*{hk_num}(?!\d)',
+        re.IGNORECASE,
+    )
+    for value, text in valid_options:
+        if year_re.search(text) and sem_re.search(text):
+            logger.info("Auto-selected semester by date rule (flexible match): %s", text)
             return value, text
 
     # 3) Keep current if it still maps to a valid option
@@ -849,7 +866,7 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
 
             const extractDate = (headerText) => {
                 const text = (headerText || "").replace(/\s+/g, " ");
-                const m = text.match(/(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?/);
+                const m = text.match(/(\d{1,2})[\/.\-](\d{1,2})(?:[\/.\-](\d{2,4}))?/);
                 if (!m) return "";
 
                 const day = parseInt(m[1], 10);
@@ -925,10 +942,18 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
             const dayByColumn = {};
             const dateByColumn = {};
             const maxDayCol = headerCells.length - 1;
+            const ISO_DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
             for (let col = 1; col <= maxDayCol; col += 1) {
                 const headerText = headerCells[col]?.innerText || "";
                 dayByColumn[col] = extractWeekday(headerText);
                 dateByColumn[col] = extractDate(headerText);
+                // Derive day of week from parsed date when the header has no weekday name
+                if (!dayByColumn[col] && dateByColumn[col]) {
+                    const d = new Date(dateByColumn[col] + "T00:00:00Z");
+                    if (!isNaN(d.getTime())) {
+                        dayByColumn[col] = ISO_DAYS[d.getUTCDay()];
+                    }
+                }
             }
 
             const carry = {};
@@ -955,9 +980,10 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
                     const text = (cell.innerText || "").trim();
 
                     if (logicalCol === 0) {
-                        const periodMatch = text.match(/^\d+$/);
+                        // Match bare numbers ("1") or prefixed formats ("Tiết 1", "Ca 1", "Period 2")
+                        const periodMatch = text.match(/^(?:tiết|tiet|ca\s*học|ca|period|slot)[.\s]*(\d+)$|^(\d+)$/i);
                         if (periodMatch) {
-                            rowPeriod = parseInt(periodMatch[0], 10);
+                            rowPeriod = parseInt(periodMatch[1] || periodMatch[2], 10);
                         }
                     } else if (rowPeriod > 0) {
                         for (let c = logicalCol; c < logicalCol + colSpan; c += 1) {
