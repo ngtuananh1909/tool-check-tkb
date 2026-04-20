@@ -41,6 +41,15 @@ CLASS_SESSIONS_TABLE = "class_sessions"
 CALENDAR_SYNC_STATE_TABLE = "calendar_sync_state"
 _RETRYABLE_NETWORK_ERRORS = (httpx.RequestError, OSError, socket.gaierror)
 
+_VALID_SESSION_STATUSES = {
+    "scheduled",  # normal class (học chính thức)
+    "makeup",     # makeup class (học bù) – detected by crawler
+    "absent",     # absence notification (báo vắng) – detected by crawler
+    "cancelled",  # cancelled – set manually or externally
+    "moved",      # rescheduled – set manually or externally
+}
+_DEFAULT_SESSION_STATUS = "scheduled"
+
 _PERIOD_START: dict[int, str] = {
     1: "07:00",
     2: "07:50",
@@ -261,7 +270,7 @@ def upsert_actual_class_sessions(schedule_rows: list[dict], student_id: str | No
                 "end_period": end_period,
                 "start_time": start_time,
                 "end_time": end_time,
-                "status": "scheduled",
+                "status": _validate_session_status(row.get("status")),
                 "source_signature": signature,
             }
         )
@@ -855,6 +864,12 @@ def _parse_iso_date(value: object) -> datetime.date | None:
         return datetime.date.fromisoformat(text)
     except ValueError:
         return None
+
+
+def _validate_session_status(status: object) -> str:
+    """Return a valid class_session status, defaulting to 'scheduled'."""
+    value = str(status or "").strip().lower()
+    return value if value in _VALID_SESSION_STATUSES else _DEFAULT_SESSION_STATUS
 
 
 def _cleanup_stale_crawler_sessions(
