@@ -49,6 +49,14 @@ WEEKDAY_TO_INDEX = {
     "sunday": 6,
 }
 
+# Google Calendar colorId mapping for special class session statuses.
+# See https://developers.google.com/calendar/api/v3/reference/colors/get
+# "absent" (báo vắng) → Graphite (grey), "makeup" (học bù) → Peacock (blue).
+SESSION_STATUS_COLOR_ID: dict[str, str] = {
+    "absent": "8",   # Graphite – grey
+    "makeup": "7",   # Peacock – blue
+}
+
 # Approximate TDTU period start times.
 PERIOD_START: dict[int, str] = {
     1: "07:00",
@@ -575,6 +583,8 @@ def _build_sync_items_from_sessions(
             end_dt = start_dt + dt.timedelta(minutes=50)
 
         source_key = _class_session_source_key(session)
+        status = str(session.get("status") or "scheduled").strip()
+        color_id = SESSION_STATUS_COLOR_ID.get(status)
         payload = {
             "summary": subject,
             "location": room,
@@ -582,6 +592,8 @@ def _build_sync_items_from_sessions(
             "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
         }
+        if color_id:
+            payload["colorId"] = color_id
         source_hash = _sync_hash(
             {
                 "source_type": SYNC_SOURCE_CLASS_SESSION,
@@ -591,6 +603,7 @@ def _build_sync_items_from_sessions(
                 "room": room,
                 "start_time": start_time,
                 "end_time": end_time,
+                "status": status,
                 "payload": payload,
             }
         )

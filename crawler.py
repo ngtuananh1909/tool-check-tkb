@@ -874,6 +874,25 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
                 return roomMatch ? roomMatch[1].trim() : "";
             };
 
+            const detectStatus = (text) => {
+                const lower = (text || "").toLowerCase()
+                    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+                    .replace(/\s+/g, " ");
+                // Absence notification keywords: "báo vắng", "GV vắng", "nghỉ học",
+                // "nghỉ tiết", "vắng tiết", "GV báo vắng", "lớp nghỉ"
+                const absentPattern = /bao\s*vang|gv\s*vang|nghi\s*hoc|nghi\s*tiet|vang\s*tiet|gv\s*bao\s*vang|lop\s*nghi/;
+                if (absentPattern.test(lower)) {
+                    return "absent";
+                }
+                // Makeup class keywords: "học bù", "lịch bù", "dạy bù", "bù học",
+                // "bù tiết", "LHB" (lịch học bù abbreviation)
+                const makeupPattern = /hoc\s*bu|lich\s*bu|day\s*bu|bu\s*hoc|bu\s*tiet|lhb/;
+                if (makeupPattern.test(lower)) {
+                    return "makeup";
+                }
+                return "scheduled";
+            };
+
             let target = null;
             let targetRows = [];
 
@@ -957,6 +976,7 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
                                 session_date: sessionDate,
                                 start_period: rowPeriod,
                                 end_period: rowPeriod + rowSpan - 1,
+                                status: detectStatus(text),
                             });
                         }
                     }
@@ -1026,6 +1046,7 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
                 "session_date": row.get("session_date", ""),
                 "start_period": int(row.get("start_period", 0) or 0),
                 "end_period": int(row.get("end_period", 0) or 0),
+                "status": row.get("status", "scheduled"),
             }
         )
 
