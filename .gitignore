@@ -1,10 +1,13 @@
+# Environment files
 .env
+.env.*
+!.env.example
+
 .venv
 __pycache__/
 *.pyc
 *service-account*.json
 amazing-smile-441004-j1-58a596defc04.json
-LO
 
 # Python caches and artifacts
 __pycache__/

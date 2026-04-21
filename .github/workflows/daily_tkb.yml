@@ -14,8 +14,8 @@ name: Daily Morning Notification
 on:
   schedule:
     # Cron syntax: minute hour day-of-month month day-of-week
-    # 17:00 UTC = 00:00 ICT (UTC+7)
-    - cron: "0 17 * * *"
+    # 17:10 UTC = 00:10 ICT (UTC+7), delayed to avoid race with hourly sync at :00
+    - cron: "10 17 * * *"
 
   # Allow manual triggers from the GitHub Actions UI
   workflow_dispatch:
@@ -36,6 +36,7 @@ jobs:
     env:
       STUDENT_ID: ${{ secrets.STUDENT_ID }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
