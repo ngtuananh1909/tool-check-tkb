@@ -1,15 +1,169 @@
 # tool-check-tkb
 
-Bot này đăng nhập TDTU, lấy thời khóa biểu theo học kỳ/tuần, lưu vào Supabase, rồi gửi lịch hôm nay qua Telegram.
+Bot tự động lấy thời khóa biểu TDTU, đồng bộ vào Supabase, và gửi thông báo lịch học/lịch hẹn qua Telegram.
 
-## Cách chạy end to end
+README này dành cho người mới: đọc xong có thể chạy local, hiểu các script chính, và cấu hình GitHub Actions đúng cách.
 
-## GitHub Actions (CI) cho lịch hằng ngày
+## 1) Repo này làm gì?
 
-Khi chạy workflow trên GitHub Actions, không dùng đường dẫn local cho `GOOGLE_SERVICE_ACCOUNT_FILE`.
-Runner không có file trên máy cá nhân của bạn.
+Có 3 luồng chính:
 
-Thiết lập các GitHub Secrets sau:
+1. Thu thập dữ liệu (`run_hour.py`)
+   - Crawl lịch học từ portal TDTU
+   - Ghi vào Supabase
+   - Sync Google Calendar (nếu cấu hình)
+
+2. Gửi bản tin buổi sáng (`main.py`)
+   - Lấy lịch hôm nay từ Supabase
+   - Gửi Telegram summary
+
+3. Nhận lịch hẹn từ Telegram (`telegram_mvp_bot.py` hoặc `webhook_app.py`)
+   - Parse tin nhắn người dùng
+   - Lưu appointment vào Supabase
+
+## 2) Cần chuẩn bị gì trước khi chạy?
+
+- Python 3.11
+- Tài khoản Supabase (đã tạo project)
+- Telegram bot token (từ BotFather)
+- Tài khoản TDTU: `STUDENT_ID` + `PASSWORD`
+- Playwright Chromium (để crawl portal)
+
+## 3) Setup local nhanh (khuyên dùng cho new user)
+
+### Bước 1: Cài dependency
+
+```bash
+cd /home/tuananh/Documents/tool-check-tkb
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
+```
+
+### Bước 2: Tạo file môi trường
+
+```bash
+cp .env.example .env
+```
+
+Mở `.env` và điền tối thiểu các biến sau:
+
+- `STUDENT_ID`
+- `PASSWORD`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_KEY`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+
+### Bước 3: Tạo schema Supabase
+
+Chạy SQL trong file `supabase/init_tables.sql` bằng Supabase SQL Editor.
+
+### Bước 4: Test chạy end-to-end
+
+```bash
+python run_hour.py
+python main.py
+```
+
+Kỳ vọng:
+
+- `run_hour.py` crawl + upsert dữ liệu thành công
+- `main.py` gửi Telegram bản tin hôm nay
+
+## 4) Các script chính và khi nào dùng
+
+### `run_hour.py`
+
+Dùng để đồng bộ dữ liệu định kỳ (crawl + DB + calendar).
+
+```bash
+python run_hour.py
+```
+
+### `main.py`
+
+Dùng để gửi thông báo lịch hôm nay.
+
+```bash
+python main.py
+```
+
+### `telegram_mvp_bot.py` (long polling)
+
+Phù hợp khi chạy local nhanh để test bot nhập lịch hẹn.
+
+```bash
+python telegram_mvp_bot.py
+```
+
+### `webhook_app.py` (FastAPI webhook)
+
+Phù hợp cho production (Railway/VPS), Telegram gọi webhook qua HTTPS.
+
+```bash
+uvicorn webhook_app:app --host 0.0.0.0 --port 8000
+```
+
+Health check: `GET /health`
+
+Webhook endpoint: `POST /telegram/webhook`
+
+## 5) Format tạo lịch hẹn qua Telegram
+
+Format mặc định:
+
+```text
+tieude-thoigian-diadiem(optional)
+```
+
+Ví dụ:
+
+- `hop nhom-15/04 14:00-B402`
+- `di kham-2026-04-16 09:30`
+- `gym-18:00`
+
+Lệnh hỗ trợ:
+
+- `/help`
+- `/today`
+
+Nếu có `GEMINI_API_KEY`, bot ưu tiên parse ngôn ngữ tự nhiên bằng Gemini, sau đó mới fallback rule-based.
+
+## 6) Biến môi trường quan trọng
+
+Tham khảo đầy đủ trong `.env.example`.
+
+Biến thường dùng nhất:
+
+- `TARGET_SEMESTER`
+  - Ví dụ: `HK2/2025-2026`
+  - Nếu để trống, hệ thống tự chọn theo tháng hiện tại
+
+- `CRAWLER_WEEKS_AHEAD`
+  - Số tuần tương lai crawl thêm
+  - Mặc định: `2`
+
+- `APP_TIMEZONE`
+  - Mặc định: `Asia/Ho_Chi_Minh`
+
+- `GOOGLE_CALENDAR_ID`
+- `GOOGLE_SERVICE_ACCOUNT_FILE` (local)
+- `GOOGLE_SERVICE_ACCOUNT_JSON` (CI/GitHub Actions)
+
+## 7) Chạy bằng GitHub Actions
+
+Repo có 2 workflow:
+
+- `.github/workflows/hourly_sync.yml`
+  - Chạy mỗi giờ để crawl + sync dữ liệu
+
+- `.github/workflows/daily_tkb.yml`
+  - Chạy mỗi ngày để gửi bản tin sáng
+
+### Secrets cần có trên GitHub
 
 - `STUDENT_ID`
 - `PASSWORD`
@@ -19,169 +173,57 @@ Thiết lập các GitHub Secrets sau:
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
 - `GOOGLE_CALENDAR_ID`
-- `GOOGLE_SERVICE_ACCOUNT_JSON` (raw JSON của service account)
-- `GOOGLE_CALENDAR_REQUIRED` (`true` để fail-fast nếu sync Calendar lỗi)
+- `GOOGLE_SERVICE_ACCOUNT_JSON`
+- `GOOGLE_CALENDAR_REQUIRED`
 
-Lưu ý:
+Lưu ý quan trọng:
 
-- `GOOGLE_SERVICE_ACCOUNT_JSON` phải là nội dung JSON hợp lệ (không phải path file).
-- Nếu bạn muốn chạy local bằng file, chỉ set `GOOGLE_SERVICE_ACCOUNT_FILE` trong `.env` local.
-- Trên CI, ưu tiên `GOOGLE_SERVICE_ACCOUNT_JSON`.
+- Trên CI, dùng `GOOGLE_SERVICE_ACCOUNT_JSON` (raw JSON), không dùng đường dẫn file local.
+- `SUPABASE_SERVICE_ROLE_KEY` nên luôn có để tránh lỗi quyền khi đọc/ghi do RLS.
 
-### 1. Chuẩn bị môi trường
+## 8) Troubleshooting nhanh
 
-Từ thư mục project, cài dependency và Playwright browser:
+### Lỗi thiếu credentials TDTU
 
-```bash
-cd /home/tuananh/Documents/tool-check-tkb
-/home/tuananh/Documents/tool-check-tkb/.venv/bin/python -m pip install -r requirements.txt
-/home/tuananh/Documents/tool-check-tkb/.venv/bin/python -m playwright install chromium
-```
+`Crawler failed: Credentials missing`
 
-### 2. Tạo file `.env`
+Kiểm tra lại `STUDENT_ID`, `PASSWORD` trong `.env` hoặc GitHub Secrets.
 
-Copy từ `.env.example` rồi điền các giá trị thật.
+### Lỗi Supabase RLS / 42501
 
-Các biến cần có:
+Đảm bảo `SUPABASE_SERVICE_ROLE_KEY` đúng project và còn hiệu lực.
 
-- `STUDENT_ID`: MSSV TDTU
-- `PASSWORD`: mật khẩu portal
-- `SUPABASE_URL`: URL project Supabase
-- `SUPABASE_SERVICE_ROLE_KEY`: key có quyền ghi dữ liệu vào bảng `schedules`
-- `TELEGRAM_BOT_TOKEN`: token bot Telegram
-- `TELEGRAM_CHAT_ID`: chat id nhận thông báo
+### Không gửi được Telegram
 
-Tuỳ chọn:
+Kiểm tra `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
 
-- `TARGET_SEMESTER`: ép bot chọn học kỳ cụ thể, ví dụ `HK2/2025-2026`
-- `CRAWLER_WEEKS_AHEAD`: số tuần tương lai crawl thêm từ portal mỗi lần chạy. Mặc định `2` (tức là crawl tuần hiện tại + 2 tuần tới)
-- `APP_TIMEZONE`: múi giờ để tính "hôm nay", mặc định `Asia/Ho_Chi_Minh`
+### Action chạy nhưng không có dữ liệu hôm nay
 
-Nếu không set `TARGET_SEMESTER`, bot tự chọn theo rule:
+Kiểm tra:
 
-- Tháng 1-7: chọn `HK2/(năm trước)-(năm hiện tại)`
-- Tháng 8-12: chọn `HK1/(năm hiện tại)-(năm sau)`
+- workflow hourly có chạy trước daily không
+- `STUDENT_ID` ở local và GitHub Secrets có giống nhau không
+- timezone (`APP_TIMEZONE`) có đúng không
 
-### 3. Chạy bot
+## 9) Bảo mật và Git
+
+- Không commit `.env`.
+- File `.env.example` dùng để chia sẻ template, không chứa secret thật.
+- Nếu lỡ track `.env` trước đó:
 
 ```bash
-/home/tuananh/Documents/tool-check-tkb/.venv/bin/python main.py
+git rm --cached .env
+git commit -m "stop tracking .env"
 ```
 
-### 4. Bật bảng lịch hẹn cá nhân trên Supabase (mới)
+## 10) Tài liệu liên quan
 
-Để dùng tính năng lịch hẹn cá nhân và bản tin tổng hợp, chạy SQL trong file sau bằng Supabase SQL Editor:
+- `QUICKSTART.md`
+- `LOCAL_SETUP.md`
+- `DEPLOY_RAILWAY.md`
+- `SYSTEMD_AUTORUN.md`
+- `supabase/init_tables.sql`
 
-- [supabase/init_tables.sql](supabase/init_tables.sql)
+---
 
-Sau khi chạy script này, bot sẽ có thêm bảng:
-
-- `appointments`
-- `notification_log`
-
-Nếu chưa chạy SQL, bot vẫn gửi lịch học bình thường nhưng phần lịch hẹn sẽ rỗng.
-
-### 5. Chạy bot Telegram tạo lịch hẹn (MVP)
-
-Chạy listener Telegram (long polling):
-
-```bash
-/home/tuananh/Documents/tool-check-tkb/.venv/bin/python telegram_mvp_bot.py
-```
-
-Bot sẽ ưu tiên dùng Gemini để đọc tin nhắn và tạo JSON trước, rồi mới fallback sang parser rule-based nếu Gemini chưa có hoặc trả kết quả không rõ.
-Ngoài tạo lịch hẹn, bot cũng có thể chat tự nhiên hơn (tông nhẹ nhàng, lịch sự kiểu người yêu nhưng không quá thân mật).
-
-### 6. Chạy webhook Telegram
-
-Webhook là cách phù hợp nếu bạn muốn bot chạy khi tắt máy. Chạy local bằng FastAPI + uvicorn:
-
-```bash
-/home/tuananh/Documents/tool-check-tkb/.venv/bin/python -m uvicorn webhook_app:app --host 0.0.0.0 --port 8000
-```
-
-Muốn Telegram gọi được webhook, bạn cần:
-
-- Một URL public HTTPS trỏ tới `/telegram/webhook`
-- Điền `TELEGRAM_WEBHOOK_URL` và `TELEGRAM_WEBHOOK_SECRET` trong `.env`
-- Khi app khởi động, nó sẽ tự đăng ký webhook nếu thấy `TELEGRAM_WEBHOOK_URL`
-
-Để auto-run 24/7 trên VPS, dùng file service mẫu:
-
-- [deploy/telegram-webhook.service](deploy/telegram-webhook.service)
-
-Format tin nhắn để tạo lịch hẹn:
-
-```text
-tieude-thoigian-diadiem(optional)
-```
-
-Ví dụ hợp lệ:
-
-- `hop nhom-15/04 14:00-B402`
-- `di kham-2026-04-16 09:30`
-- `gym-18:00`
-
-Rule parse thời gian MVP:
-
-- `YYYY-MM-DD HH:MM`
-- `DD/MM/YYYY HH:MM`
-- `DD/MM HH:MM` (tự dùng năm hiện tại)
-- `HH:MM` (tự dùng ngày hôm nay)
-
-Lệnh hỗ trợ nhanh:
-
-- `/help`: xem hướng dẫn format
-- `/today`: xem lịch hẹn hôm nay
-
-Nếu có `GEMINI_API_KEY` trong `.env`, bot sẽ cố gắng hiểu câu tự nhiên và lưu vào database theo JSON. Nếu không có key, bot vẫn chạy bằng format cứng ở trên.
-Với tin nhắn không phải lịch hẹn, bot sẽ trả lời hội thoại tự nhiên thay vì báo lỗi format.
-
-## Bot làm gì
-
-Luồng chạy của bot:
-
-1. Đăng nhập portal TDTU.
-2. Mở trang thời khóa biểu.
-3. Chọn đúng học kỳ và chế độ xem theo tuần.
-4. Parse lịch học tuần hiện tại và các tuần kế tiếp theo `CRAWLER_WEEKS_AHEAD`.
-5. Ghi dữ liệu vào Supabase.
-6. Lấy lịch của hôm nay.
-7. Gửi thông báo Telegram.
-
-## Nếu muốn đổi học kỳ
-
-Đặt trong `.env`:
-
-```env
-TARGET_SEMESTER=HK2/2025-2026
-```
-
-Sau đó chạy lại `main.py`.
-
-## Lỗi thường gặp
-
-### 1. `Crawler failed: Credentials missing`
-
-Kiểm tra lại `STUDENT_ID` và `PASSWORD` trong `.env`.
-
-### 2. `new row violates row-level security policy for table "schedules"`
-
-Bot đang ghi Supabase bằng `SUPABASE_SERVICE_ROLE_KEY`. Nếu vẫn lỗi, kiểm tra:
-
-- key có đúng là service role key không
-- URL Supabase có đúng project không
-- bảng `schedules` có RLS/policy phù hợp không
-
-### 3. Bot lấy sai học kỳ
-
-Đặt `TARGET_SEMESTER=HK2/2025-2026` trong `.env` để ép đúng học kỳ cần lấy.
-
-### 4. Không gửi được Telegram
-
-Kiểm tra `TELEGRAM_BOT_TOKEN` và `TELEGRAM_CHAT_ID`.
-
-## Ghi chú kỹ thuật
-
-- Trang TKB TDTU dùng layout theo tuần dạng ma trận `Period x Day`, nên parser không phải bảng đơn giản.
-- Học kỳ đúng được chọn từ dropdown trên trang TKB, và bot có thể tự chuyển sang chế độ xem tuần trước khi parse.
+Nếu bạn là new user, chỉ cần làm theo mục 3 là có thể chạy thử thành công trong 10-15 phút.
