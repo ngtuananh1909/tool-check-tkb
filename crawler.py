@@ -31,6 +31,29 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 PORTAL_URL = "https://old-stdportal.tdtu.edu.vn/Login/"
 SCHEDULE_URL_BASE = "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx"
+EXAM_URL_BASE = "https://lichhoc-lichthi.tdtu.edu.vn/xemlichthi.aspx"
+ELEARNING_LOGIN_URL = "https://elearning.tdtu.edu.vn/login/index.php"
+ELEARNING_MY_URL = "https://elearning.tdtu.edu.vn/my/"
+
+# eLearning login pages may include hidden username fields (e.g. guest value).
+# Restrict selectors to interactive inputs only.
+ELEARNING_SELECTOR_USERNAME = (
+    "form#login input[name='username']:not([type='hidden']), "
+    "form#login input[id='username']:not([type='hidden']), "
+    "input[id='username']:not([type='hidden'])"
+)
+ELEARNING_SELECTOR_PASSWORD = (
+    "form#login input[name='password']:not([type='hidden']), "
+    "form#login input[id='password']:not([type='hidden']), "
+    "input[id='password']:not([type='hidden']), "
+    "input[type='password']"
+)
+ELEARNING_SELECTOR_SUBMIT = (
+    "form#login #loginbtn, "
+    "form#login button[type='submit'], "
+    "form#login input[type='submit'], "
+    "#loginbtn"
+)
 
 # Timeout (ms) for locating the submit button before falling back to Enter
 SUBMIT_BUTTON_TIMEOUT_MS = 5_000
@@ -358,6 +381,1131 @@ def _deduplicate_schedule_rows(rows: list[dict]) -> list[dict]:
         deduped.append(row)
 
     return deduped
+
+
+def fetch_exam_schedule(
+    student_id: str | None = None,
+    password: str | None = None,
+    weeks_ahead: int | None = None,
+) -> list[dict]:
+    """Fetch exam schedule with portal-first strategy and optional eLearning fallback."""
+    sid = student_id or os.environ.get("STUDENT_ID")
+    pwd = password or os.environ.get("PASSWORD")
+    if not sid or not pwd:
+        raise ValueError("Credentials missing. Set STUDENT_ID and PASSWORD environment variables.")
+
+    exams: list[dict] = []
+    try:
+        exams = _fetch_exam_schedule_from_portal(sid, pwd, weeks_ahead=weeks_ahead)
+        if exams:
+            logger.info("Fetched %d exam row(s) from TDTU portal.", len(exams))
+            return exams
+    except Exception as exc:
+        logger.warning("Portal exam crawl failed: %s", exc)
+
+    try:
+        exams = _fetch_exam_schedule_from_stdportal_announcements(sid, pwd)
+        if exams:
+            logger.info("Fetched %d exam row(s) from stdportal announcements fallback.", len(exams))
+            return exams
+    except Exception as exc:
+        logger.warning("Stdportal announcements exam fallback failed: %s", exc)
+
+    enable_fallback = str(os.environ.get("EXAM_SOURCE_FALLBACK_ELEARNING", "true")).strip().lower()
+    if enable_fallback not in {"1", "true", "yes", "on"}:
+        return []
+
+    try:
+        exams = _fetch_exam_schedule_from_elearning(sid, pwd)
+        if exams:
+            logger.info("Fetched %d exam row(s) from eLearning fallback.", len(exams))
+    except Exception as exc:
+        logger.warning("eLearning exam fallback failed: %s", exc)
+        exams = []
+
+    return exams
+
+
+def fetch_elearning_progress(
+    username: str | None = None,
+    password: str | None = None,
+) -> list[dict]:
+    """Login to eLearning and parse per-course completion percentages from /my page."""
+    # eLearning credentials are unified with portal credentials.
+    user = username or os.environ.get("STUDENT_ID")
+    pwd = password or os.environ.get("PASSWORD")
+    if not user or not pwd:
+        raise ValueError(
+            "eLearning credentials missing. Set STUDENT_ID and PASSWORD."
+        )
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+            ],
+        )
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+        )
+        page = context.new_page()
+
+        try:
+            logger.info("Navigating to eLearning login page: %s", ELEARNING_LOGIN_URL)
+            page.goto(ELEARNING_LOGIN_URL, wait_until="networkidle", timeout=60_000)
+            page.wait_for_selector(ELEARNING_SELECTOR_USERNAME, state="visible", timeout=30_000)
+
+            page.fill(ELEARNING_SELECTOR_USERNAME, user)
+            page.fill(ELEARNING_SELECTOR_PASSWORD, pwd)
+            page.locator(ELEARNING_SELECTOR_SUBMIT).first.click(timeout=10_000)
+            page.wait_for_load_state("networkidle", timeout=30_000)
+
+            if "login" in page.url.lower():
+                raise RuntimeError(f"eLearning login failed. Current URL: {page.url}")
+
+            page.goto(ELEARNING_MY_URL, wait_until="networkidle", timeout=60_000)
+            # Moodle dashboards often render course cards asynchronously.
+            try:
+                page.wait_for_selector(
+                    ".dashboard-card, .block_myoverview, [data-region='courses-view'], .progress, .progress-bar",
+                    timeout=20_000,
+                )
+            except Exception:
+                logger.warning("eLearning dashboard selectors did not appear before timeout; parsing anyway.")
+
+            progress_rows = _parse_elearning_progress(page)
+            deduped = _deduplicate_progress_rows(progress_rows)
+            if not deduped:
+                logger.warning(
+                    "eLearning progress parser returned 0 rows. url=%s title=%s",
+                    page.url,
+                    page.title(),
+                )
+                body_excerpt = (page.locator("body").inner_text() or "").strip().replace("\n", " ")
+                logger.debug("eLearning page excerpt: %s", body_excerpt[:500])
+            return deduped
+        finally:
+            context.close()
+            browser.close()
+
+
+def _fetch_exam_schedule_from_portal(sid: str, pwd: str, weeks_ahead: int | None = None) -> list[dict]:
+    """Fetch exam rows from the old portal / lichhoc-lichthi stack."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+            ],
+        )
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+        )
+        page = context.new_page()
+
+        try:
+            page.goto(PORTAL_URL, wait_until="networkidle", timeout=60_000)
+            page.wait_for_selector(SELECTOR_USERNAME, state="visible", timeout=30_000)
+            page.fill(SELECTOR_USERNAME, sid)
+            page.fill(SELECTOR_PASSWORD, pwd)
+
+            login_page_url = page.url
+            try:
+                page.locator(SELECTOR_SUBMIT).first.click(timeout=SUBMIT_BUTTON_TIMEOUT_MS)
+            except Exception:
+                page.locator(SELECTOR_PASSWORD).press("Enter")
+
+            try:
+                page.wait_for_url(lambda url: "login" not in str(url).lower(), timeout=30_000)
+            except PlaywrightTimeoutError:
+                logger.warning("Portal exam login wait_for_url timed out.")
+
+            page.wait_for_load_state("networkidle", timeout=30_000)
+            if page.url == login_page_url or "login" in page.url.lower():
+                raise RuntimeError("Portal exam login failed.")
+
+            # Strategy 1: click a visible exam link from the authenticated portal page.
+            exam_link = page.locator(
+                "a[href*='lichthi'], a[href*='Lichthi'], a[href*='exam'], a[href*='Exam']"
+            )
+            if exam_link.count() > 0:
+                for i in range(exam_link.count()):
+                    candidate = exam_link.nth(i)
+                    try:
+                        if not candidate.is_visible():
+                            continue
+                        candidate.click(timeout=10_000)
+                        page.wait_for_load_state("networkidle", timeout=60_000)
+                        exams = _parse_exam_table_with_filters(page)
+                        if exams:
+                            return exams
+                    except Exception:
+                        continue
+
+            # Strategy 2: move to timetable page (using visible links first), then click exam tab.
+            schedule_link = page.locator(
+                "a[href*='tkb'], a[href*='schedule'], a[href*='lichhoc'], a[href*='lichhoc-lichthi']"
+            )
+            if schedule_link.count() == 0:
+                schedule_link = page.locator("a").filter(has_text=SCHEDULE_MENU_TEXT)
+
+            clicked_schedule_link = False
+            if schedule_link.count() > 0:
+                for i in range(schedule_link.count()):
+                    candidate = schedule_link.nth(i)
+                    try:
+                        if not candidate.is_visible():
+                            continue
+                        candidate.click(timeout=10_000)
+                        page.wait_for_load_state("networkidle", timeout=60_000)
+                        clicked_schedule_link = True
+                        break
+                    except Exception:
+                        continue
+
+            if not clicked_schedule_link:
+                schedule_url = _build_schedule_url(page.url)
+                page.goto(schedule_url, wait_until="networkidle", timeout=60_000)
+
+            exam_tab = page.locator("a, button, input[type='button'], input[type='submit']").filter(
+                has_text=re.compile(r"lịch\s*thi|lich\s*thi|exam", re.IGNORECASE)
+            )
+            if exam_tab.count() > 0:
+                for i in range(exam_tab.count()):
+                    candidate = exam_tab.nth(i)
+                    try:
+                        if not candidate.is_visible():
+                            continue
+                        candidate.click(timeout=10_000)
+                        page.wait_for_load_state("networkidle", timeout=30_000)
+                        exams = _parse_exam_table_with_filters(page)
+                        if exams:
+                            return exams
+                    except Exception:
+                        continue
+
+            # Strategy 3: final fallback to direct exam URL built from any available token.
+            exam_url = _build_exam_url(page.url)
+            page.goto(exam_url, wait_until="networkidle", timeout=60_000)
+            exams = _parse_exam_table_with_filters(page)
+            return exams
+        finally:
+            context.close()
+            browser.close()
+
+
+def _fetch_exam_schedule_from_elearning(username: str, password: str) -> list[dict]:
+    """Best-effort exam parsing from eLearning pages when portal source is unavailable."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+            ],
+        )
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+        )
+        page = context.new_page()
+        try:
+            page.goto(ELEARNING_LOGIN_URL, wait_until="networkidle", timeout=60_000)
+            page.wait_for_selector(ELEARNING_SELECTOR_USERNAME, state="visible", timeout=30_000)
+            page.fill(ELEARNING_SELECTOR_USERNAME, username)
+            page.fill(ELEARNING_SELECTOR_PASSWORD, password)
+            page.locator(ELEARNING_SELECTOR_SUBMIT).first.click(timeout=10_000)
+            page.wait_for_load_state("networkidle", timeout=30_000)
+            if "login" in page.url.lower():
+                raise RuntimeError("eLearning login failed while fetching exams.")
+
+            page.goto(ELEARNING_MY_URL, wait_until="networkidle", timeout=60_000)
+            exams = _parse_exam_table(page)
+            return exams
+        finally:
+            context.close()
+            browser.close()
+
+
+def _fetch_exam_schedule_from_stdportal_announcements(username: str, password: str) -> list[dict]:
+    """Fallback: collect exam-related announcements from stdportal homepage."""
+    stdportal_home = "https://stdportal.tdtu.edu.vn/"
+    stdportal_login_home = (
+        "https://stdportal.tdtu.edu.vn/Login/Index?ReturnUrl=https%3A%2F%2Fstdportal.tdtu.edu.vn%2F"
+    )
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+            ],
+        )
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+        )
+        page = context.new_page()
+        try:
+            # Reuse old-portal login to establish SSO session before opening stdportal pages.
+            page.goto(PORTAL_URL, wait_until="networkidle", timeout=60_000)
+            page.wait_for_selector(SELECTOR_USERNAME, state="visible", timeout=30_000)
+            page.fill(SELECTOR_USERNAME, username)
+            page.fill(SELECTOR_PASSWORD, password)
+            try:
+                page.locator(SELECTOR_SUBMIT).first.click(timeout=SUBMIT_BUTTON_TIMEOUT_MS)
+            except Exception:
+                page.locator(SELECTOR_PASSWORD).press("Enter")
+            try:
+                page.wait_for_url(lambda url: "login" not in str(url).lower(), timeout=30_000)
+            except Exception:
+                pass
+
+            # Two-step navigation consistently lands on authenticated stdportal home.
+            page.goto(stdportal_home, wait_until="networkidle", timeout=60_000)
+            page.goto(stdportal_login_home, wait_until="networkidle", timeout=60_000)
+
+            links = page.evaluate(
+                r"""
+                () => {
+                    const examPattern = /(lịch\s*thi|lich\s*thi|thi\s*cuối\s*kỳ|exam)/i;
+                    return Array.from(document.querySelectorAll("a"))
+                        .map((a) => ({
+                            text: (a.innerText || "").trim(),
+                            href: (a.href || "").trim(),
+                        }))
+                        .filter((item) => item.text && item.href)
+                        .filter((item) => examPattern.test(item.text) || examPattern.test(item.href));
+                }
+                """
+            ) or []
+
+            rows: list[dict] = []
+            seen_links: set[str] = set()
+            for item in links:
+                title = str(item.get("text") or "").strip()
+                href = str(item.get("href") or "").strip()
+                if not title or not href:
+                    continue
+                if href in seen_links:
+                    continue
+                seen_links.add(href)
+
+                exam_date = _extract_exam_date_from_text(title)
+                if not exam_date:
+                    continue
+
+                rows.append(
+                    {
+                        "subject_name": title,
+                        "exam_date": exam_date,
+                        "start_time": "",
+                        "end_time": "",
+                        "exam_room": "",
+                        "exam_type": "Announcement",
+                        "notes": f"Exam notice source: {href}",
+                    }
+                )
+
+            return _deduplicate_exam_rows(rows)
+        finally:
+            context.close()
+            browser.close()
+
+
+def _extract_exam_date_from_text(text: str) -> str:
+    """Extract the first DD/MM[/YYYY] token from announcement title as ISO date."""
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+
+    match = re.search(r"(\d{1,2})[\/\.-](\d{1,2})(?:[\/\.-](\d{2,4}))?", cleaned)
+    if not match:
+        return ""
+
+    day = int(match.group(1))
+    month = int(match.group(2))
+    year_text = match.group(3)
+    year = int(year_text) if year_text else local_today().year
+    if year < 100:
+        year += 2000
+
+    try:
+        parsed = datetime.date(year, month, day)
+    except ValueError:
+        return ""
+    return parsed.isoformat()
+
+
+def _parse_exam_table(page) -> list[dict]:
+    """Parse exam rows from any table with exam-like headers on current page/frames."""
+    script = r"""
+        () => {
+            const contexts = [document, ...Array.from(document.querySelectorAll("iframe")).map((f) => {
+                try { return f.contentDocument; } catch { return null; }
+            }).filter(Boolean)];
+
+            const rows = [];
+            const parseDate = (text) => {
+                const m = (text || "").match(/(\d{1,2})[\/\.-](\d{1,2})(?:[\/\.-](\d{2,4}))?/);
+                if (!m) return "";
+                const d = parseInt(m[1], 10);
+                const mo = parseInt(m[2], 10);
+                let y = m[3] ? parseInt(m[3], 10) : (new Date()).getFullYear();
+                if (y < 100) y += 2000;
+                if (!d || !mo || !y) return "";
+                return `${String(y).padStart(4, "0")}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+            };
+            const parseTime = (text) => {
+                const m = (text || "").match(/(\d{1,2})[:h](\d{2})/i);
+                if (!m) return "";
+                return `${String(parseInt(m[1], 10)).padStart(2, "0")}:${m[2]}`;
+            };
+
+            for (const doc of contexts) {
+                for (const table of Array.from(doc.querySelectorAll("table"))) {
+                    const head = Array.from(table.querySelectorAll("tr:first-child th, tr:first-child td"))
+                        .map((c) => (c.innerText || "").trim().toLowerCase());
+                    const allHead = head.join(" ");
+                    const hasSubject = /(môn|mon|subject)/.test(allHead);
+                    const hasDate = /(ngày|ngay|date)/.test(allHead);
+                    const hasTime = /(giờ|gio|time)/.test(allHead);
+                    if (!hasSubject || (!hasDate && !hasTime)) continue;
+
+                    const idxSubject = head.findIndex((h) => /(môn|mon|subject)/.test(h));
+                    const idxDate = head.findIndex((h) => /(ngày|ngay|date)/.test(h));
+                    const idxTime = head.findIndex((h) => /(giờ|gio|time)/.test(h));
+                    const idxRoom = head.findIndex((h) => /(phòng|phong|room)/.test(h));
+                    const idxType = head.findIndex((h) => /(hình thức|hinh thuc|type|loại|loai)/.test(h));
+
+                    const trs = Array.from(table.querySelectorAll("tr")).slice(1);
+                    for (const tr of trs) {
+                        const tds = Array.from(tr.querySelectorAll("td")).map((c) => (c.innerText || "").trim());
+                        if (!tds.length) continue;
+                        const subject = idxSubject >= 0 ? (tds[idxSubject] || "") : "";
+                        if (!subject) continue;
+                        const dateText = idxDate >= 0 ? (tds[idxDate] || "") : tds.join(" ");
+                        const dateIso = parseDate(dateText);
+                        if (!dateIso) continue;
+                        const timeText = idxTime >= 0 ? (tds[idxTime] || "") : tds.join(" ");
+                        const start = parseTime(timeText);
+                        let end = "";
+                        const range = (timeText || "").match(
+                            /(\d{1,2}[:h]\d{2})\s*(?:-|–|—|to|đến|den|->|~)\s*(\d{1,2}[:h]\d{2})/i
+                        );
+                        if (range) {
+                            end = parseTime(range[2]);
+                        }
+                        rows.push({
+                            subject_name: subject,
+                            exam_date: dateIso,
+                            start_time: start,
+                            end_time: end,
+                            exam_room: idxRoom >= 0 ? (tds[idxRoom] || "") : "",
+                            exam_type: idxType >= 0 ? (tds[idxType] || "") : "",
+                            notes: "Crawled from exam schedule",
+                        });
+                    }
+                }
+            }
+            return rows;
+        }
+    """
+    try:
+        rows = page.evaluate(script) or []
+    except Exception:
+        rows = []
+
+    rows.extend(_parse_exam_grid_cells(page))
+    return _deduplicate_exam_rows(rows)
+
+
+def _parse_exam_grid_cells(page) -> list[dict]:
+    """Parse exam rows from grid-style cells containing Ngay thi/Gio thi text."""
+    script = r"""
+        () => {
+            const contexts = [document, ...Array.from(document.querySelectorAll("iframe")).map((f) => {
+                try { return f.contentDocument; } catch { return null; }
+            }).filter(Boolean)];
+
+            const rows = [];
+            const parseDateIso = (text) => {
+                const m = (text || "").match(/(\d{1,2})[\/\.-](\d{1,2})(?:[\/\.-](\d{2,4}))?/);
+                if (!m) return "";
+                const d = parseInt(m[1], 10);
+                const mo = parseInt(m[2], 10);
+                let y = m[3] ? parseInt(m[3], 10) : (new Date()).getFullYear();
+                if (y < 100) y += 2000;
+                if (!d || !mo || !y) return "";
+                return `${String(y).padStart(4, "0")}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+            };
+            const parseTime = (text) => {
+                const m = (text || "").match(/(\d{1,2})[:h](\d{2})/i);
+                if (!m) return "";
+                return `${String(parseInt(m[1], 10)).padStart(2, "0")}:${m[2]}`;
+            };
+
+            for (const doc of contexts) {
+                const cells = Array.from(doc.querySelectorAll("td, div"));
+                for (const cell of cells) {
+                    const text = (cell.innerText || "").trim();
+                    if (!text) continue;
+
+                    const lowered = text.toLowerCase();
+                    if (!/(ngày\s*thi|ngay\s*thi|date\s*:)/i.test(lowered)) continue;
+                    if (!/(giờ\s*thi|gio\s*thi|time\s*:)/i.test(lowered)) continue;
+
+                    const lines = text
+                        .split("\n")
+                        .map((line) => (line || "").trim())
+                        .filter((line) => line.length > 0);
+                    if (!lines.length) continue;
+
+                    const subject = (lines[0] || "").split("|")[0].trim();
+                    if (!subject) continue;
+
+                    const dateLine = lines.find((line) => /(ngày\s*thi|ngay\s*thi|date\s*:)/i.test(line)) || text;
+                    const timeLine = lines.find((line) => /(giờ\s*thi|gio\s*thi|time\s*:)/i.test(line)) || text;
+                    const roomLine = lines.find((line) => /(phòng\s*thi|phong\s*thi|room\s*:)/i.test(line)) || "";
+
+                    const examDate = parseDateIso(dateLine);
+                    if (!examDate) continue;
+
+                    const start = parseTime(timeLine);
+                    let end = "";
+                    const range = (timeLine || "").match(
+                        /(\d{1,2}[:h]\d{2})\s*(?:-|–|—|to|đến|den|->|~)\s*(\d{1,2}[:h]\d{2})/i
+                    );
+                    if (range) {
+                        end = parseTime(range[2]);
+                    }
+
+                    let room = "";
+                    const roomMatch = (roomLine || "").match(/(?:phòng\s*thi|phong\s*thi|room)\s*[:\-]?\s*(.+)$/i);
+                    if (roomMatch) {
+                        room = roomMatch[1].trim();
+                    }
+
+                    rows.push({
+                        subject_name: subject,
+                        exam_date: examDate,
+                        start_time: start,
+                        end_time: end,
+                        exam_room: room,
+                        exam_type: "",
+                        notes: "Crawled from exam grid",
+                    });
+                }
+            }
+
+            return rows;
+        }
+    """
+
+    try:
+        return page.evaluate(script) or []
+    except Exception:
+        return []
+
+
+def _parse_exam_table_with_filters(page) -> list[dict]:
+    """Parse exam rows after selecting current semester and exam type filters."""
+    try:
+        semester_changed = _select_semester_if_available(page)
+    except Exception as exc:
+        logger.debug("Could not auto-select exam semester: %s", exc)
+        semester_changed = False
+
+    button_targets = _resolve_exam_type_button_targets(page)
+    if button_targets:
+        combined_rows: list[dict] = []
+        for target in button_targets:
+            changed = _click_exam_type_by_group(page, target["group"])
+            if changed or semester_changed:
+                page.wait_for_load_state("networkidle", timeout=30_000)
+
+            _scroll_exam_page_to_bottom(page)
+            rows = _parse_exam_table(page)
+            exam_type_text = str(target.get("text") or "").strip()
+            if exam_type_text:
+                for row in rows:
+                    if not str(row.get("exam_type") or "").strip():
+                        row["exam_type"] = exam_type_text
+            combined_rows.extend(rows)
+
+        return _deduplicate_exam_rows(combined_rows)
+
+    type_targets = _resolve_exam_type_targets(page)
+    if not type_targets:
+        if semester_changed:
+            page.wait_for_load_state("networkidle", timeout=30_000)
+        _scroll_exam_page_to_bottom(page)
+        return _parse_exam_table(page)
+
+    combined_rows: list[dict] = []
+    for target in type_targets:
+        changed = _select_exam_type_by_value(page, target["value"])
+        if changed or semester_changed:
+            page.wait_for_load_state("networkidle", timeout=30_000)
+
+        _scroll_exam_page_to_bottom(page)
+        rows = _parse_exam_table(page)
+        exam_type_text = str(target.get("text") or "").strip()
+        if exam_type_text:
+            for row in rows:
+                if not str(row.get("exam_type") or "").strip():
+                    row["exam_type"] = exam_type_text
+        combined_rows.extend(rows)
+
+    return _deduplicate_exam_rows(combined_rows)
+
+
+def _resolve_exam_type_targets(page) -> list[dict]:
+    """Resolve target exam-type dropdown options (midterm/final) to crawl."""
+    desired = _desired_exam_type_groups()
+
+    for select in page.locator("select").all():
+        try:
+            if not select.is_visible():
+                continue
+
+            options = select.locator("option").all()
+            parsed_options: list[dict] = []
+            has_exam_type_option = False
+            for option in options:
+                value = (option.get_attribute("value") or "").strip()
+                text = (option.inner_text() or "").strip()
+                if not value:
+                    continue
+
+                group = _exam_type_group(text)
+                if group is not None:
+                    has_exam_type_option = True
+
+                parsed_options.append(
+                    {
+                        "value": value,
+                        "text": text,
+                        "group": group,
+                    }
+                )
+
+            if not has_exam_type_option:
+                continue
+
+            selected: list[dict] = []
+            for group in desired:
+                match = next((item for item in parsed_options if item["group"] == group), None)
+                if match and all(existing["value"] != match["value"] for existing in selected):
+                    selected.append(match)
+
+            if selected:
+                return selected
+
+            return [item for item in parsed_options if item["group"] is not None]
+        except Exception as exc:
+            logger.debug("Skipping exam type select candidate due to error: %s", exc)
+
+    return []
+
+
+def _resolve_exam_type_button_targets(page) -> list[dict]:
+    """Resolve exam type targets from tab/button controls (midterm/final)."""
+    desired_groups = _desired_exam_type_groups()
+    available = {
+        "midterm": _exam_type_button_exists(page, "midterm"),
+        "final": _exam_type_button_exists(page, "final"),
+    }
+
+    targets: list[dict] = []
+    for group in desired_groups:
+        if not available.get(group):
+            continue
+        label = "Giữa kỳ" if group == "midterm" else "Cuối kỳ"
+        targets.append({"group": group, "text": label})
+
+    if targets:
+        return targets
+
+    for group in ("midterm", "final"):
+        if available.get(group):
+            label = "Giữa kỳ" if group == "midterm" else "Cuối kỳ"
+            targets.append({"group": group, "text": label})
+    return targets
+
+
+def _exam_type_button_exists(page, group: str) -> bool:
+    for selector in _exam_type_button_selectors(group):
+        locator = page.locator(selector)
+        try:
+            if locator.count() == 0:
+                continue
+            for index in range(locator.count()):
+                if locator.nth(index).is_visible():
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def _click_exam_type_by_group(page, group: str) -> bool:
+    """Click exam type control by group if available."""
+    for selector in _exam_type_button_selectors(group):
+        locator = page.locator(selector)
+        try:
+            if locator.count() == 0:
+                continue
+            for index in range(locator.count()):
+                candidate = locator.nth(index)
+                if not candidate.is_visible():
+                    continue
+                candidate.click(timeout=10_000)
+                page.wait_for_load_state("networkidle", timeout=30_000)
+                logger.info("Selected exam type tab/button for group=%s using selector=%s", group, selector)
+                return True
+        except Exception as exc:
+            logger.debug("Exam type button click failed (group=%s selector=%s): %s", group, selector, exc)
+            continue
+
+    return False
+
+
+def _exam_type_button_selectors(group: str) -> list[str]:
+    if group == "midterm":
+        return [
+            "input[type='button'][value*='giữa kỳ' i]",
+            "input[type='button'][value*='giuaky' i]",
+            "input[type='button'][value*='mid' i]",
+            "input[type='submit'][value*='giữa kỳ' i]",
+            "input[type='submit'][value*='giuaky' i]",
+            "input[type='submit'][value*='mid' i]",
+            "button:has-text('giữa kỳ')",
+            "button:has-text('giua ky')",
+            "button:has-text('mid')",
+            "a:has-text('giữa kỳ')",
+            "a:has-text('giua ky')",
+            "a:has-text('mid')",
+        ]
+
+    return [
+        "input[type='button'][value*='cuối kỳ' i]",
+        "input[type='button'][value*='cuoiky' i]",
+        "input[type='button'][value*='final' i]",
+        "input[type='submit'][value*='cuối kỳ' i]",
+        "input[type='submit'][value*='cuoiky' i]",
+        "input[type='submit'][value*='final' i]",
+        "button:has-text('cuối kỳ')",
+        "button:has-text('cuoi ky')",
+        "button:has-text('final')",
+        "a:has-text('cuối kỳ')",
+        "a:has-text('cuoi ky')",
+        "a:has-text('final')",
+    ]
+
+
+def _scroll_exam_page_to_bottom(page) -> None:
+    """Scroll down exam page to reveal full data grids before parsing."""
+    try:
+        page.evaluate(
+            r"""
+            () => {
+                window.scrollTo(0, 0);
+                const step = Math.max(500, Math.floor(window.innerHeight * 0.8));
+                let y = 0;
+                const maxY = Math.max(
+                    document.body ? document.body.scrollHeight : 0,
+                    document.documentElement ? document.documentElement.scrollHeight : 0,
+                );
+                while (y < maxY + step) {
+                    window.scrollTo(0, y);
+                    y += step;
+                }
+                window.scrollTo(0, maxY);
+            }
+            """
+        )
+        page.wait_for_timeout(1200)
+    except Exception as exc:
+        logger.debug("Exam page scroll helper failed: %s", exc)
+
+
+def _select_exam_type_by_value(page, target_value: str) -> bool:
+    """Select an exam type option by value if available."""
+    value = str(target_value or "").strip()
+    if not value:
+        return False
+
+    for select in page.locator("select").all():
+        try:
+            if not select.is_visible():
+                continue
+
+            options = select.locator("option").all()
+            for option in options:
+                option_value = (option.get_attribute("value") or "").strip()
+                if option_value != value:
+                    continue
+
+                current_value = (select.input_value() or "").strip()
+                if current_value == value:
+                    return False
+
+                select.select_option(value)
+                page.wait_for_load_state("networkidle", timeout=30_000)
+                logger.info("Selected exam type option value=%s", value)
+                return True
+        except Exception as exc:
+            logger.debug("Exam type select attempt failed: %s", exc)
+
+    return False
+
+
+def _desired_exam_type_groups() -> list[str]:
+    """Read desired exam groups from env. Defaults to both midterm and final."""
+    raw = (os.environ.get("TARGET_EXAM_TYPES") or "midterm,final").strip()
+    if not raw:
+        return ["midterm", "final"]
+
+    groups: list[str] = []
+    for token in raw.split(","):
+        normalized = token.strip().lower()
+        if not normalized:
+            continue
+        if normalized in {"mid", "midterm", "giua", "giuaky", "giua_ky", "giua-ky", "gk", "giuakythi"}:
+            if "midterm" not in groups:
+                groups.append("midterm")
+            continue
+        if normalized in {"final", "cuoi", "cuoiky", "cuoi_ky", "cuoi-ky", "ck", "cuoikythi"}:
+            if "final" not in groups:
+                groups.append("final")
+            continue
+
+    return groups or ["midterm", "final"]
+
+
+def _exam_type_group(text: str) -> str | None:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return None
+
+    if re.search(r"giữa\s*kỳ|giua\s*ky|midterm", lowered, re.IGNORECASE):
+        return "midterm"
+    if re.search(r"cuối\s*kỳ|cuoi\s*ky|final", lowered, re.IGNORECASE):
+        return "final"
+    return None
+
+
+def _parse_elearning_progress(page) -> list[dict]:
+    """Extract per-course completion percentages from eLearning dashboard page."""
+    script = r"""
+        () => {
+            const selectors = [
+                ".dashboard-card",
+                ".block_myoverview [data-course-id]",
+                ".block_myoverview .dashboard-card",
+                ".block_myoverview .card[data-course-id]",
+                ".coursebox",
+                "li.course",
+                "[data-course-id]"
+            ];
+            const cards = Array.from(document.querySelectorAll(selectors.join(", ")));
+
+            const courseNameById = {};
+            const allCourseLinks = Array.from(document.querySelectorAll("a[href*='/course/view.php?id=']"));
+            for (const link of allCourseLinks) {
+                const href = link.getAttribute("href") || "";
+                const idMatch = href.match(/[?&]id=(\d+)/);
+                if (!idMatch) continue;
+                const courseId = idMatch[1];
+
+                let name = (link.textContent || "").trim().replace(/\s+/g, " ");
+                name = name
+                    .replace(/^course\s*is\s*starred\s*/i, "")
+                    .replace(/^course\s*name\s*/i, "")
+                    .trim();
+                if (!name) continue;
+                if (/^course\s*image$/i.test(name)) continue;
+                if (/^course\s*category$/i.test(name)) continue;
+                if (/^skip\s*course\s*overview$/i.test(name)) continue;
+
+                const existing = courseNameById[courseId] || "";
+                if (!existing || name.length > existing.length) {
+                    courseNameById[courseId] = name;
+                }
+            }
+
+            const clampPercent = (value) => {
+                if (value === null || value === undefined) return null;
+                const n = Number(value);
+                if (!Number.isFinite(n)) return null;
+                return Math.max(0, Math.min(100, Math.round(n)));
+            };
+
+            const parsePercentFromText = (text) => {
+                const m = (text || "").match(/(\d{1,3})\s*%/);
+                if (!m) return null;
+                return clampPercent(parseInt(m[1], 10));
+            };
+
+            const parsePercentFromStyle = (styleValue) => {
+                const m = (styleValue || "").match(/width\s*:\s*(\d{1,3}(?:\.\d+)?)\s*%/i);
+                if (!m) return null;
+                return clampPercent(parseFloat(m[1]));
+            };
+
+            const parseLessonRatio = (text) => {
+                const m = (text || "").match(/(\d+)\s*[\/]\s*(\d+)/);
+                if (!m) return [null, null];
+                return [parseInt(m[1], 10), parseInt(m[2], 10)];
+            };
+
+            const pickCourseName = (card, text) => {
+                const isNoise = (value) => {
+                    const s = (value || "").trim();
+                    if (!s) return true;
+                    return /^(course\s*image|hình\s*ảnh\s*khóa\s*học|course\s*category|skip\s*course\s*overview|show\s*more|show\s*less)$/i.test(s);
+                };
+
+                const candidates = [];
+                const pushText = (value) => {
+                    const s = (value || "").trim();
+                    if (!s) return;
+                    candidates.push(s.replace(/\s+/g, " "));
+                };
+
+                const primaryNodes = card.querySelectorAll(
+                    "a.aalink.coursename, .coursename a, [data-region='course-title'], a[href*='/course/view.php'] .multiline, h3, h4, .multiline"
+                );
+                for (const node of Array.from(primaryNodes)) {
+                    pushText(node.textContent || "");
+                }
+
+                const fallbackLink = card.querySelector("a[href*='/course/view.php']");
+                if (fallbackLink) {
+                    pushText(fallbackLink.textContent || "");
+                }
+
+                const textLines = (text || "")
+                    .split("\n")
+                    .map((line) => line.trim())
+                    .filter((line) => line.length > 0 && !isNoise(line));
+                if (textLines.length > 0) {
+                    pushText(textLines[0]);
+                }
+
+                for (const candidate of candidates) {
+                    if (!isNoise(candidate)) return candidate;
+                }
+                return "";
+            };
+
+            const findPercent = (card, text) => {
+                // 1) Direct text percentage inside card
+                const fromText = parsePercentFromText(text);
+                if (fromText !== null) return fromText;
+
+                // 2) aria-valuenow commonly used by bootstrap progress bars
+                const withAria = card.querySelector("[aria-valuenow]");
+                if (withAria) {
+                    const ariaValue = withAria.getAttribute("aria-valuenow");
+                    const pct = clampPercent(ariaValue);
+                    if (pct !== null) return pct;
+                }
+
+                // 3) data-progress style attrs used by some Moodle themes/plugins
+                const withData = card.querySelector("[data-progress], [data-percentage], [data-percent]");
+                if (withData) {
+                    const raw = withData.getAttribute("data-progress")
+                        || withData.getAttribute("data-percentage")
+                        || withData.getAttribute("data-percent");
+                    const pct = clampPercent(raw);
+                    if (pct !== null) return pct;
+                }
+
+                // 4) width style of progress bar elements
+                const bar = card.querySelector(".progress-bar, [role='progressbar']");
+                if (bar) {
+                    const stylePct = parsePercentFromStyle(bar.getAttribute("style") || "");
+                    if (stylePct !== null) return stylePct;
+                    const ariaNow = clampPercent(bar.getAttribute("aria-valuenow"));
+                    if (ariaNow !== null) return ariaNow;
+                    const titlePct = parsePercentFromText(bar.getAttribute("title") || "");
+                    if (titlePct !== null) return titlePct;
+                }
+
+                return null;
+            };
+
+            const rows = [];
+            for (const card of cards) {
+                const text = (card.innerText || "").trim();
+                const pct = findPercent(card, text);
+                if (pct === null) continue;
+
+                let courseName = pickCourseName(card, text);
+                if (!courseName) continue;
+
+                const courseLink = card.querySelector("a[href*='/course/view.php?id=']");
+                let courseId = "";
+                if (courseLink) {
+                    const href = courseLink.getAttribute("href") || "";
+                    const m = href.match(/[?&]id=(\d+)/);
+                    if (m) courseId = m[1];
+                }
+                if (!courseId) {
+                    const attrId = card.getAttribute("data-course-id") || card.getAttribute("data-courseid") || "";
+                    if (attrId) courseId = attrId.trim();
+                }
+                // Ignore cards that cannot be mapped to a concrete Moodle course.
+                if (!courseId) continue;
+
+                const mappedName = courseNameById[courseId] || "";
+                if (mappedName) {
+                    courseName = mappedName;
+                }
+
+                const [done, total] = parseLessonRatio(text);
+                rows.push({
+                    course_id: courseId,
+                    course_name: courseName,
+                    progress_percent: pct,
+                    lessons_completed: done,
+                    lessons_total: total,
+                });
+            }
+
+            // Fallback: some themes render a table/list without cards.
+            if (!rows.length) {
+                const links = Array.from(document.querySelectorAll("a[href*='/course/view.php?id=']"));
+                for (const link of links) {
+                    const href = link.getAttribute("href") || "";
+                    const idMatch = href.match(/[?&]id=(\d+)/);
+                    const courseId = idMatch ? idMatch[1] : "";
+                    const courseName = (link.textContent || "").trim();
+                    if (!courseName) continue;
+
+                    const container = link.closest("li, tr, .card, .media, .coursebox") || link.parentElement;
+                    const text = (container?.innerText || "").trim();
+                    const pct = parsePercentFromText(text);
+                    if (pct === null) continue;
+
+                    const [done, total] = parseLessonRatio(text);
+                    rows.push({
+                        course_id: courseId,
+                        course_name: courseName,
+                        progress_percent: pct,
+                        lessons_completed: done,
+                        lessons_total: total,
+                    });
+                }
+            }
+
+            return rows;
+        }
+    """
+    try:
+        rows = page.evaluate(script) or []
+    except Exception:
+        rows = []
+    return rows
+
+
+def _deduplicate_exam_rows(rows: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[tuple[str, str, str, str, str, str]] = set()
+    for row in rows:
+        subject = str(row.get("subject_name") or "").strip()
+        exam_date = str(row.get("exam_date") or "").strip()
+        start_time = str(row.get("start_time") or "").strip()
+        end_time = str(row.get("end_time") or "").strip()
+        room = str(row.get("exam_room") or row.get("room") or "").strip()
+        exam_type = str(row.get("exam_type") or "").strip()
+        if not subject or not exam_date:
+            continue
+        key = (subject.lower(), exam_date, start_time, end_time, room.lower(), exam_type.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(
+            {
+                "subject_name": subject,
+                "exam_date": exam_date,
+                "start_time": start_time,
+                "end_time": end_time,
+                "exam_room": room,
+                "exam_type": exam_type or None,
+                "notes": str(row.get("notes") or "").strip() or None,
+            }
+        )
+    return deduped
+
+
+def _deduplicate_progress_rows(rows: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        course_name = _clean_course_name(str(row.get("course_name") or "").strip())
+        course_id = str(row.get("course_id") or "").strip()
+        if not course_name:
+            continue
+        key = course_id.lower() or course_name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(
+            {
+                "course_id": course_id,
+                "course_name": course_name,
+                "progress_percent": row.get("progress_percent") or 0,
+                "lessons_completed": row.get("lessons_completed"),
+                "lessons_total": row.get("lessons_total"),
+            }
+        )
+    return deduped
+
+
+def _clean_course_name(name: str) -> str:
+    """Normalize noisy Moodle card labels to human-readable course names."""
+    text = str(name or "").strip()
+    if not text:
+        return ""
+
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"^course\s*is\s*starred\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^course\s*name\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^course\s*", "", text, flags=re.IGNORECASE)
+    return text.strip(" -:\t")
+
+
+def _build_exam_url(current_url: str) -> str:
+    """Build exam URL with Token/RequestId from authenticated session URL."""
+    parsed = urlparse(current_url)
+    query = parse_qs(parsed.query)
+
+    token = (query.get("Token") or [""])[0]
+    request_id = (query.get("RequestId") or [""])[0]
+
+    if token and request_id:
+        return f"{EXAM_URL_BASE}?Token={token}&RequestId={request_id}"
+    return EXAM_URL_BASE
 
 
 def _capture_week_signature(page) -> str:

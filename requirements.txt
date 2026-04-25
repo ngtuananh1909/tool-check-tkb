@@ -10,3 +10,6 @@ google-auth==2.40.3
 
 # Optional: load .env when running locally (not needed in CI)
 python-dotenv==1.0.1
+
+# Test dependencies
+pytest==9.0.3

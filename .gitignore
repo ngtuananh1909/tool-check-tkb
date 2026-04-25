@@ -20,6 +20,7 @@ __pycache__/
 build/
 dist/
 *.egg
+tests/
 
 # Runtime files
 *.log

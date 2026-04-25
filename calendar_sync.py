@@ -17,7 +17,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 
-from database import get_all_class_sessions, upsert_calendar_sync_state
+from database import get_all_class_sessions, get_upcoming_exams, upsert_calendar_sync_state
 from time_utils import local_today
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,7 @@ BOT_SOURCE_TAG = "tool-check-tkb"
 SYNC_SOURCE_SCHEDULE = "schedule"
 SYNC_SOURCE_CLASS_SESSION = "class_session"
 SYNC_SOURCE_APPOINTMENT = "appointment"
+SYNC_SOURCE_EXAM = "exam"
 DEFAULT_SYNC_WEEKS = 16
 CALENDAR_API_MAX_ATTEMPTS = 4
 CALENDAR_API_RETRY_STATUSES = {429, 500, 502, 503, 504}
@@ -56,40 +57,44 @@ SESSION_STATUS_COLOR_ID: dict[str, str] = {
     "absent": "8",   # Graphite – grey
     "makeup": "7",   # Peacock – blue
 }
+EXAM_EVENT_COLOR_ID = "1"  # Tomato - red
+DEFAULT_EVENT_REMINDER_MINUTES = 60
+EXAM_EVENT_REMINDER_MINUTES = 7 * 24 * 60
 
-# Approximate TDTU period start times.
+# Official TDTU period start times from the provided timetable image.
 PERIOD_START: dict[int, str] = {
-    1: "07:00",
-    2: "07:50",
-    3: "08:40",
+    1: "06:50",
+    2: "07:40",
+    3: "08:30",
     4: "09:30",
     5: "10:20",
     6: "11:10",
-    7: "12:30",
-    8: "13:20",
-    9: "14:10",
-    10: "15:00",
-    11: "15:50",
-    12: "16:40",
-    13: "17:30",
-    14: "18:00",
-    15: "18:50",
-    16: "19:40",
+    7: "12:45",
+    8: "13:35",
+    9: "14:25",
+    10: "15:25",
+    11: "16:15",
+    12: "17:05",
+    13: "18:05",
+    14: "18:55",
+    15: "19:45",
 }
 
 
 def sync_today_to_csv_and_google_calendar(
     classes: list[dict],
     appointments: list[dict],
+    exams: list[dict] | None = None,
     student_id: str | None = None,
 ) -> tuple[str, bool]:
     """Backward-compatible wrapper for full-database Google Calendar sync."""
-    return sync_database_to_csv_and_google_calendar(classes, appointments, student_id=student_id)
+    return sync_database_to_csv_and_google_calendar(classes, appointments, exams=exams, student_id=student_id)
 
 
 def sync_database_to_csv_and_google_calendar(
     schedule_rows: list[dict],
     appointments: list[dict],
+    exams: list[dict] | None = None,
     student_id: str | None = None,
 ) -> tuple[str, bool]:
     """Export all schedule data and sync it to Google Calendar when configured.
@@ -100,6 +105,10 @@ def sync_database_to_csv_and_google_calendar(
         CSV path and whether Google Calendar sync was executed.
     """
     target_date = local_today()
+    exam_rows = exams
+    if exam_rows is None:
+        exam_rows = get_upcoming_exams(student_id=student_id, days_ahead=180)
+
     use_class_sessions = _use_class_sessions_sync()
     class_sessions: list[dict] = []
     if use_class_sessions:
@@ -113,11 +122,11 @@ def sync_database_to_csv_and_google_calendar(
             )
 
     if use_class_sessions and class_sessions:
-        csv_path = _export_csv_sessions(class_sessions, appointments, target_date)
-        sync_items = _build_sync_items_from_sessions(class_sessions, appointments, target_date)
+        csv_path = _export_csv_sessions(class_sessions, appointments, exam_rows, target_date)
+        sync_items = _build_sync_items_from_sessions(class_sessions, appointments, exam_rows, target_date)
     else:
-        csv_path = _export_csv(schedule_rows, appointments, target_date)
-        sync_items = _build_sync_items(schedule_rows, appointments, target_date)
+        csv_path = _export_csv(schedule_rows, appointments, exam_rows, target_date)
+        sync_items = _build_sync_items(schedule_rows, appointments, exam_rows, target_date)
 
     events = [item["payload"] for item in sync_items]
 
@@ -153,7 +162,7 @@ def sync_database_to_csv_and_google_calendar(
     return csv_path, True
 
 
-def _export_csv(schedule_rows: list[dict], appointments: list[dict], target_date: dt.date) -> str:
+def _export_csv(schedule_rows: list[dict], appointments: list[dict], exams: list[dict], target_date: dt.date) -> str:
     os.makedirs("exports", exist_ok=True)
     csv_path = os.path.join("exports", f"schedule_{target_date.strftime('%Y%m%d')}.csv")
 
@@ -209,11 +218,32 @@ def _export_csv(schedule_rows: list[dict], appointments: list[dict], target_date
                 }
             )
 
+        for exam in exams:
+            exam_date = _parse_date(exam.get("exam_date"), target_date)
+            writer.writerow(
+                {
+                    "event_type": "exam",
+                    "title": str(exam.get("subject_name") or "").strip() or "N/A",
+                    "day_of_week": exam_date.strftime("%A"),
+                    "appointment_date": exam_date.isoformat(),
+                    "start_time": _display_time(exam.get("start_time")),
+                    "end_time": _display_time(exam.get("end_time")),
+                    "location": str(exam.get("exam_room") or "").strip(),
+                    "notes": str(exam.get("notes") or "").strip() or "Imported from table exams",
+                    "first_occurrence": exam_date.isoformat(),
+                }
+            )
+
     logger.info("Exported schedule data to CSV: %s", csv_path)
     return csv_path
 
 
-def _export_csv_sessions(class_sessions: list[dict], appointments: list[dict], target_date: dt.date) -> str:
+def _export_csv_sessions(
+    class_sessions: list[dict],
+    appointments: list[dict],
+    exams: list[dict],
+    target_date: dt.date,
+) -> str:
     os.makedirs("exports", exist_ok=True)
     csv_path = os.path.join("exports", f"schedule_{target_date.strftime('%Y%m%d')}.csv")
 
@@ -267,6 +297,22 @@ def _export_csv_sessions(class_sessions: list[dict], appointments: list[dict], t
                 }
             )
 
+        for exam in exams:
+            exam_date = _parse_date(exam.get("exam_date"), target_date)
+            writer.writerow(
+                {
+                    "event_type": "exam",
+                    "title": str(exam.get("subject_name") or "").strip() or "N/A",
+                    "day_of_week": exam_date.strftime("%A"),
+                    "appointment_date": exam_date.isoformat(),
+                    "start_time": _display_time(exam.get("start_time")),
+                    "end_time": _display_time(exam.get("end_time")),
+                    "location": str(exam.get("exam_room") or "").strip(),
+                    "notes": str(exam.get("notes") or "").strip() or "Imported from table exams",
+                    "first_occurrence": exam_date.isoformat(),
+                }
+            )
+
     logger.info("Exported session-based schedule data to CSV: %s", csv_path)
     return csv_path
 
@@ -313,6 +359,12 @@ def _validate_calendar_target(service: Resource, calendar_id: str, service_accou
 
     try:
         service.calendars().get(calendarId=calendar_id).execute()
+    except TimeoutError:
+        logger.warning(
+            "Timed out validating Google Calendar '%s'. Continuing with sync; "
+            "the calendar may still be reachable for event writes.",
+            calendar_id,
+        )
     except HttpError as exc:
         status = getattr(exc.resp, "status", None)
         if status in {403, 404}:
@@ -433,6 +485,7 @@ def _ics_escape(value: str) -> str:
 def _build_sync_items(
     schedule_rows: list[dict],
     appointments: list[dict],
+    exams: list[dict],
     target_date: dt.date,
 ) -> list[dict]:
     timezone = os.environ.get("APP_TIMEZONE", "Asia/Ho_Chi_Minh")
@@ -456,6 +509,7 @@ def _build_sync_items(
             "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
         }
+        _apply_default_reminder(payload)
         if recurrence:
             payload["recurrence"] = recurrence
         source_hash = _sync_hash({
@@ -509,6 +563,7 @@ def _build_sync_items(
                 "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone},
                 "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
             }
+            _apply_default_reminder(payload, minutes=EXAM_EVENT_REMINDER_MINUTES)
         else:
             payload = {
                 "summary": title,
@@ -546,12 +601,78 @@ def _build_sync_items(
             }
         )
 
+    for exam in exams:
+        exam_date = _parse_date(exam.get("exam_date"), target_date)
+        title = _exam_calendar_title(exam)
+        location = str(exam.get("exam_room") or "").strip() or None
+        note = _exam_calendar_description(exam)
+        start_time = _display_time(exam.get("start_time"))
+        end_time = _display_time(exam.get("end_time"))
+        exam_type = str(exam.get("exam_type") or "").strip() or None
+        source_key = _exam_source_key(exam)
+
+        if start_time:
+            start_dt = _to_datetime(exam_date, start_time, timezone)
+            if end_time:
+                end_dt = _to_datetime(exam_date, end_time, timezone)
+            else:
+                end_dt = start_dt + dt.timedelta(hours=2)
+            payload = {
+                "summary": title,
+                "location": location,
+                "description": note,
+                "colorId": EXAM_EVENT_COLOR_ID,
+                "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone},
+                "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
+            }
+            _apply_default_reminder(payload, minutes=EXAM_EVENT_REMINDER_MINUTES)
+        else:
+            payload = {
+                "summary": title,
+                "location": location,
+                "description": note,
+                "colorId": EXAM_EVENT_COLOR_ID,
+                "start": {"date": exam_date.isoformat()},
+                "end": {"date": (exam_date + dt.timedelta(days=1)).isoformat()},
+            }
+
+        source_hash = _sync_hash(
+            {
+                "source_type": SYNC_SOURCE_EXAM,
+                "exam_id": exam.get("id"),
+                "subject_name": title,
+                "exam_date": exam_date.isoformat(),
+                "start_time": start_time,
+                "end_time": end_time,
+                "exam_room": location,
+                "exam_type": exam_type,
+                "payload": payload,
+            }
+        )
+        payload["extendedProperties"] = {
+            "private": {
+                "source": BOT_SOURCE_TAG,
+                "source_type": SYNC_SOURCE_EXAM,
+                "source_key": source_key,
+                "source_hash": source_hash,
+            }
+        }
+        items.append(
+            {
+                "source_type": SYNC_SOURCE_EXAM,
+                "source_key": source_key,
+                "source_hash": source_hash,
+                "payload": payload,
+            }
+        )
+
     return items
 
 
 def _build_sync_items_from_sessions(
     class_sessions: list[dict],
     appointments: list[dict],
+    exams: list[dict],
     target_date: dt.date,
 ) -> list[dict]:
     timezone = os.environ.get("APP_TIMEZONE", "Asia/Ho_Chi_Minh")
@@ -592,6 +713,7 @@ def _build_sync_items_from_sessions(
             "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
         }
+        _apply_default_reminder(payload)
         if color_id:
             payload["colorId"] = color_id
         source_hash = _sync_hash(
@@ -648,6 +770,7 @@ def _build_sync_items_from_sessions(
                 "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone},
                 "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
             }
+            _apply_default_reminder(payload)
         else:
             payload = {
                 "summary": title,
@@ -687,6 +810,71 @@ def _build_sync_items_from_sessions(
             }
         )
 
+    for exam in exams:
+        exam_date = _parse_date(exam.get("exam_date"), target_date)
+        title = _exam_calendar_title(exam)
+        location = str(exam.get("exam_room") or "").strip() or None
+        note = _exam_calendar_description(exam)
+        start_time = _display_time(exam.get("start_time"))
+        end_time = _display_time(exam.get("end_time"))
+        exam_type = str(exam.get("exam_type") or "").strip() or None
+        source_key = _exam_source_key(exam)
+
+        if start_time:
+            start_dt = _to_datetime(exam_date, start_time, timezone)
+            if end_time:
+                end_dt = _to_datetime(exam_date, end_time, timezone)
+            else:
+                end_dt = start_dt + dt.timedelta(hours=2)
+            payload = {
+                "summary": title,
+                "location": location,
+                "description": note,
+                "colorId": EXAM_EVENT_COLOR_ID,
+                "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone},
+                "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
+            }
+            _apply_default_reminder(payload, minutes=EXAM_EVENT_REMINDER_MINUTES)
+        else:
+            payload = {
+                "summary": title,
+                "location": location,
+                "description": note,
+                "colorId": EXAM_EVENT_COLOR_ID,
+                "start": {"date": exam_date.isoformat()},
+                "end": {"date": (exam_date + dt.timedelta(days=1)).isoformat()},
+            }
+
+        source_hash = _sync_hash(
+            {
+                "source_type": SYNC_SOURCE_EXAM,
+                "exam_id": exam.get("id"),
+                "subject_name": title,
+                "exam_date": exam_date.isoformat(),
+                "start_time": start_time,
+                "end_time": end_time,
+                "exam_room": location,
+                "exam_type": exam_type,
+                "payload": payload,
+            }
+        )
+        payload["extendedProperties"] = {
+            "private": {
+                "source": BOT_SOURCE_TAG,
+                "source_type": SYNC_SOURCE_EXAM,
+                "source_key": source_key,
+                "source_hash": source_hash,
+            }
+        }
+        items.append(
+            {
+                "source_type": SYNC_SOURCE_EXAM,
+                "source_key": source_key,
+                "source_hash": source_hash,
+                "payload": payload,
+            }
+        )
+
     return items
 
 
@@ -695,7 +883,7 @@ def _build_calendar_events(
     appointments: list[dict],
     target_date: dt.date,
 ) -> list[dict]:
-    return [item["payload"] for item in _build_sync_items(schedule_rows, appointments, target_date)]
+    return [item["payload"] for item in _build_sync_items(schedule_rows, appointments, [], target_date)]
 
 
 def _replace_bot_events_for_range(
@@ -932,6 +1120,46 @@ def _appointment_source_key(appointment: dict) -> str:
     return f"{SYNC_SOURCE_APPOINTMENT}:{appointment_date}:{start_time}:{end_time}:{title}"
 
 
+def _exam_source_key(exam: dict) -> str:
+    exam_id = str(exam.get("id") or "").strip()
+    if exam_id:
+        return f"{SYNC_SOURCE_EXAM}:{exam_id}"
+
+    subject = _normalize_value(exam.get("subject_name"))
+    exam_date = _parse_date(exam.get("exam_date"), local_today()).isoformat()
+    start_time = _display_time(exam.get("start_time"))
+    end_time = _display_time(exam.get("end_time"))
+    exam_type = _normalize_value(exam.get("exam_type"))
+    return f"{SYNC_SOURCE_EXAM}:{exam_date}:{start_time}:{end_time}:{subject}:{exam_type}"
+
+
+def _exam_calendar_type_label(exam_type: object) -> str:
+    raw = str(exam_type or "").strip().lower()
+    if not raw:
+        return ""
+    if any(token in raw for token in ["giua", "giữa", "mid"]):
+        return "Giua ky"
+    if any(token in raw for token in ["cuoi", "cuối", "final"]):
+        return "Cuoi ky"
+    return str(exam_type).strip()
+
+
+def _exam_calendar_title(exam: dict) -> str:
+    subject = str(exam.get("subject_name") or "").strip() or "Lich thi"
+    label = _exam_calendar_type_label(exam.get("exam_type"))
+    if not label:
+        return f"[Thi] {subject}"
+    return f"[{label}] {subject}"
+
+
+def _exam_calendar_description(exam: dict) -> str:
+    base_note = str(exam.get("notes") or "").strip() or "Lich thi duoc dong bo tu Supabase."
+    label = _exam_calendar_type_label(exam.get("exam_type"))
+    if not label:
+        return base_note
+    return f"Loai thi: {label}. {base_note}"
+
+
 def _sync_hash(payload: dict) -> str:
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -946,6 +1174,29 @@ def _class_recurrence(day_of_week: str, sync_weeks: int) -> list[str]:
     if not code:
         return []
     return [f"RRULE:FREQ=WEEKLY;COUNT={sync_weeks};BYDAY={code}"]
+
+
+def _apply_default_reminder(payload: dict, minutes: int = DEFAULT_EVENT_REMINDER_MINUTES) -> None:
+    """Attach a default popup reminder for timed events.
+
+    Google Calendar supports reminders for events with dateTime fields.
+    """
+    start = payload.get("start") or {}
+    end = payload.get("end") or {}
+    if not isinstance(start, dict) or not isinstance(end, dict):
+        return
+    if "dateTime" not in start or "dateTime" not in end:
+        return
+
+    payload["reminders"] = {
+        "useDefault": False,
+        "overrides": [
+            {
+                "method": "popup",
+                "minutes": max(0, int(minutes)),
+            }
+        ],
+    }
 
 
 def _next_weekday_date(reference_date: dt.date, day_of_week: str) -> dt.date:

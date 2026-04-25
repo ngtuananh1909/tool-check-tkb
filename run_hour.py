@@ -66,7 +66,7 @@ def _handle_error(context: str, exc: Exception) -> None:
 
 
 def run_hourly_sync() -> None:
-    """Execute steps 1-4: crawl, DB sync, and calendar sync."""
+    """Execute hourly crawl, DB sync, and calendar sync pipeline."""
     _load_dotenv()
     
     student_id = os.environ.get("STUDENT_ID")
@@ -74,11 +74,21 @@ def run_hourly_sync() -> None:
     # -------- Step 1: Crawl --------
     logger.info("=== Step 1: Crawling schedule from TDTU portal ===")
     try:
-        from crawler import fetch_schedule
+        from crawler import (
+            fetch_elearning_progress,
+            fetch_exam_schedule,
+            fetch_schedule,
+        )
         weeks_ahead = _resolve_crawler_weeks_ahead()
         logger.info("Crawler will fetch current week + %d future week(s).", weeks_ahead)
         schedule = fetch_schedule(weeks_ahead=weeks_ahead)
         logger.info("Crawler returned %d schedule entries.", len(schedule))
+
+        exams = fetch_exam_schedule(weeks_ahead=weeks_ahead)
+        logger.info("Exam crawler returned %d exam row(s).", len(exams))
+
+        elearning_progress = fetch_elearning_progress()
+        logger.info("eLearning crawler returned %d progress row(s).", len(elearning_progress))
     except Exception as exc:
         _handle_error("Crawler failed", exc)
         return
@@ -88,6 +98,8 @@ def run_hourly_sync() -> None:
     try:
         from database import (
             materialize_class_sessions,
+            upsert_elearning_progress,
+            upsert_exams,
             upsert_actual_class_sessions,
             upsert_schedule,
         )
@@ -98,8 +110,13 @@ def run_hourly_sync() -> None:
                 "Crawler did not return concrete session_date rows; using generated fallback class sessions."
             )
             materialized = materialize_class_sessions(schedule, student_id=student_id)
+
+        exam_rows = upsert_exams(exams, student_id=student_id)
+        progress_rows = upsert_elearning_progress(elearning_progress, student_id=student_id)
         logger.info("Supabase update complete.")
         logger.info("Class sessions materialized: %d row(s).", materialized)
+        logger.info("Exams upserted: %d row(s).", exam_rows)
+        logger.info("eLearning progress upserted: %d row(s).", progress_rows)
     except Exception as exc:
         _handle_error("Database update failed", exc)
         return
@@ -110,6 +127,7 @@ def run_hourly_sync() -> None:
         from database import (
             get_all_appointments,
             get_all_class_sessions,
+            get_upcoming_exams,
             get_all_schedule,
         )
         all_schedule_rows = get_all_class_sessions(student_id=student_id)
@@ -119,8 +137,10 @@ def run_hourly_sync() -> None:
             )
             all_schedule_rows = get_all_schedule(student_id=student_id)
         all_appointments = get_all_appointments(student_id=student_id)
+        all_exams = get_upcoming_exams(student_id=student_id, days_ahead=180)
         logger.info("Full class dataset has %d row(s).", len(all_schedule_rows))
         logger.info("Full appointment set has %d row(s).", len(all_appointments))
+        logger.info("Full exam set has %d row(s).", len(all_exams))
     except Exception as exc:
         _handle_error("Failed to fetch full data", exc)
         return
@@ -133,6 +153,7 @@ def run_hourly_sync() -> None:
         csv_path, did_sync = sync_database_to_csv_and_google_calendar(
             all_schedule_rows,
             all_appointments,
+            exams=all_exams,
             student_id=student_id,
         )
         logger.info("CSV export complete: %s", csv_path)

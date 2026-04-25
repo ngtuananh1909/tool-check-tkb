@@ -21,25 +21,23 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_API_BASE = "https://api.telegram.org/bot{token}/{method}"
 
-# Period → approximate time mapping (TDTU timetable convention)
-# Adjust if your university uses different time slots.
+# Period → official time mapping from the provided TDTU timetable image.
 PERIOD_TIME: dict[int, str] = {
-    1: "07:00",
-    2: "07:50",
-    3: "08:40",
-    4: "09:30",
+    1: "06:50",
+    2: "07:40",
+    3: "08:30",
+    4: "09:20",
     5: "10:20",
     6: "11:10",
-    7: "12:30",
-    8: "13:20",
-    9: "14:10",
-    10: "15:00",
-    11: "15:50",
-    12: "16:40",
-    13: "17:30",
-    14: "18:00",
-    15: "18:50",
-    16: "19:40",
+    7: "12:45",
+    8: "13:35",
+    9: "14:25",
+    10: "15:25",
+    11: "16:15",
+    12: "17:05",
+    13: "18:05",
+    14: "18:55",
+    15: "19:45",
 }
 
 
@@ -91,12 +89,22 @@ def send_today_schedule(classes: list[dict]) -> None:
     _send_message(token, chat_id, message)
 
 
-def send_daily_summary(classes: list[dict], appointments: list[dict]) -> None:
+def send_daily_summary(
+    classes: list[dict],
+    appointments: list[dict],
+    upcoming_exams: list[dict] | None = None,
+    elearning_progress: list[dict] | None = None,
+) -> None:
     """Send one combined message for today's classes and personal appointments."""
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
 
-    message = _build_combined_message(classes, appointments)
+    message = _build_combined_message(
+        classes,
+        appointments,
+        upcoming_exams=upcoming_exams or [],
+        elearning_progress=elearning_progress or [],
+    )
     _send_message(token, chat_id, message)
 
 
@@ -152,11 +160,13 @@ def _build_message(classes: list[dict]) -> str:
             end = cls.get("end_period", 0)
             start_time = _escape(PERIOD_TIME.get(start, str(start)))
             end_time = _escape(PERIOD_TIME.get(end, str(end)))
+            status_label = _escape(_format_class_status(cls.get("status")))
 
             lines += [
                 f"*{_escape(str(idx))}\\.* 📚 {subject}",
                 f"   📍 Phòng: `{room}`",
                 f"   ⏰ Tiết {_escape(str(start))} → {_escape(str(end))}  \\({start_time} \\- {end_time}\\)",
+                f"   🔖 Trạng thái: {status_label}",
                 "",
             ]
 
@@ -164,7 +174,12 @@ def _build_message(classes: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _build_combined_message(classes: list[dict], appointments: list[dict]) -> str:
+def _build_combined_message(
+    classes: list[dict],
+    appointments: list[dict],
+    upcoming_exams: list[dict],
+    elearning_progress: list[dict],
+) -> str:
     """Return a MarkdownV2 summary containing both classes and appointments."""
     today = local_today()
     weekday_name = today.strftime("%A")
@@ -186,11 +201,13 @@ def _build_combined_message(classes: list[dict], appointments: list[dict]) -> st
             end = cls.get("end_period", 0)
             start_time = _escape(PERIOD_TIME.get(start, str(start)))
             end_time = _escape(PERIOD_TIME.get(end, str(end)))
+            status_label = _escape(_format_class_status(cls.get("status")))
 
             lines += [
                 f"{_escape(str(idx))}\\. {subject}",
                 f"   📍 `{room}`",
                 f"   ⏰ Tiết {_escape(str(start))}→{_escape(str(end))} \\({start_time}\\-{end_time}\\)",
+                f"   🔖 Trạng thái: {status_label}",
             ]
         lines.append("")
 
@@ -214,6 +231,48 @@ def _build_combined_message(classes: list[dict], appointments: list[dict]) -> st
                 lines.append(f"   📝 {note}")
         lines.append("")
 
+    lines.append("📝 *Lịch thi sắp tới \\(7 ngày\\)*")
+    if not upcoming_exams:
+        lines += ["Không có lịch thi\\.", ""]
+    else:
+        for idx, exam in enumerate(upcoming_exams[:10], start=1):
+            subject = _escape(exam.get("subject_name") or "N/A")
+            exam_date = _escape(str(exam.get("exam_date") or "N/A"))
+            room = _escape(exam.get("exam_room") or "")
+            start = _escape(_display_time(exam.get("start_time")))
+            end = _escape(_display_time(exam.get("end_time")))
+
+            lines.append(f"{_escape(str(idx))}\\. {subject}")
+            lines.append(f"   📅 {exam_date}")
+            if start or end:
+                time_range = f"{start} \\- {end}" if start and end else (start or end)
+                lines.append(f"   ⏰ {time_range}")
+            if room:
+                lines.append(f"   📍 {room}")
+        lines.append("")
+
+    lines.append("📚 *Tiến độ eLearning theo môn*")
+    if not elearning_progress:
+        lines += ["Chưa có dữ liệu tiến độ\\.", ""]
+    else:
+        for row in elearning_progress[:12]:
+            course_name = _escape(_compact_course_name(row.get("course_name") or "N/A"))
+            percent = row.get("progress_percent")
+            try:
+                percent_text = f"{float(percent):.0f}%"
+            except (TypeError, ValueError):
+                percent_text = "0%"
+            lessons_completed = row.get("lessons_completed")
+            lessons_total = row.get("lessons_total")
+
+            progress_label = _escape(percent_text)
+            detail = ""
+            if lessons_completed is not None and lessons_total is not None:
+                detail = f" ┊ ✅ {_escape(str(lessons_completed))}/{_escape(str(lessons_total))}"
+
+            lines.append(f"• 📘 {course_name} ┊ 📈 *{progress_label}*{detail}")
+        lines.append("")
+
     lines.append("_Hom nay minh luon dong hanh cung ban, co gi can thi nhan minh nha\\!_")
     return "\n".join(lines)
 
@@ -226,6 +285,33 @@ def _display_time(value: str | None) -> str:
     if len(text) >= 5 and text[2] == ":":
         return text[:5]
     return text
+
+
+def _format_class_status(status: object) -> str:
+    """Convert internal class status to human-friendly Vietnamese label."""
+    value = str(status or "").strip().lower()
+    mapping = {
+        "scheduled": "Học bình thường",
+        "makeup": "Học bù",
+        "absent": "Báo vắng",
+        "cancelled": "Nghỉ học",
+        "moved": "Dời lịch",
+    }
+    return mapping.get(value, "Học bình thường")
+
+
+def _compact_course_name(name: object) -> str:
+    """Shorten noisy eLearning course labels for compact Telegram output."""
+    text = str(name or "").strip()
+    if not text:
+        return "N/A"
+
+    text = re.sub(r"\s+", " ", text)
+    text = text.replace("_", " ")
+    text = re.sub(r"^HK\d+\s+\d{4}\s+\d{5,}\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^HK\d+\s+\d{4}\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^course\s*name\s*", "", text, flags=re.IGNORECASE)
+    return text.strip(" -")
 
 
 def _send_message(token: str, chat_id: str, text: str) -> None:

@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 TABLE_NAME = "schedules"
 APPOINTMENTS_TABLE = "appointments"
 CLASS_SESSIONS_TABLE = "class_sessions"
+EXAMS_TABLE = "exams"
+ELEARNING_PROGRESS_TABLE = "elearning_progress"
 CALENDAR_SYNC_STATE_TABLE = "calendar_sync_state"
 _RETRYABLE_NETWORK_ERRORS = (httpx.RequestError, OSError, socket.gaierror)
 
@@ -51,22 +53,21 @@ _VALID_SESSION_STATUSES = {
 _DEFAULT_SESSION_STATUS = "scheduled"
 
 _PERIOD_START: dict[int, str] = {
-    1: "07:00",
-    2: "07:50",
-    3: "08:40",
+    1: "06:50",
+    2: "07:40",
+    3: "08:30",
     4: "09:30",
     5: "10:20",
     6: "11:10",
-    7: "12:30",
-    8: "13:20",
-    9: "14:10",
-    10: "15:00",
-    11: "15:50",
-    12: "16:40",
-    13: "17:30",
-    14: "18:00",
-    15: "18:50",
-    16: "19:40",
+    7: "12:45",
+    8: "13:35",
+    9: "14:25",
+    10: "15:25",
+    11: "16:15",
+    12: "17:05",
+    13: "18:05",
+    14: "18:55",
+    15: "19:45",
 }
 
 _WEEKDAY_TO_INDEX = {
@@ -203,14 +204,32 @@ def upsert_schedule(schedule: list[dict], student_id: str | None = None) -> None
         # Step 2 – Insert fresh schedule rows
         # ---------------------------------------------------------------------
         logger.info("Inserting %d new schedule rows for student_id=%s", len(schedule_rows), sid)
-        insert_resp = _execute_with_retry(
-            "Supabase schedule insert",
-            lambda: (
-                client.table(TABLE_NAME)
-                .insert(schedule_rows)
-                .execute()
-            ),
-        )
+        try:
+            insert_resp = _execute_with_retry(
+                "Supabase schedule insert",
+                lambda: (
+                    client.table(TABLE_NAME)
+                    .insert(schedule_rows)
+                    .execute()
+                ),
+            )
+        except APIError as exc:
+            if not _is_missing_column_error(exc, "status"):
+                raise
+
+            logger.warning(
+                "Column schedules.status is missing. Retrying insert without status values; "
+                "run supabase/init_tables.sql to migrate schema."
+            )
+            legacy_rows = [{k: v for k, v in row.items() if k != "status"} for row in schedule_rows]
+            insert_resp = _execute_with_retry(
+                "Supabase schedule insert (legacy columns)",
+                lambda: (
+                    client.table(TABLE_NAME)
+                    .insert(legacy_rows)
+                    .execute()
+                ),
+            )
         logger.debug("Insert response: %s", insert_resp)
     except APIError as exc:
         detail = str(exc)
@@ -345,19 +364,40 @@ def get_today_schedule(student_id: str | None = None, day_of_week: str | None = 
     logger.info("Querying schedule for student_id=%s, day=%s", sid, day_of_week)
 
     client = _get_client(for_write=False)
-    response = _execute_with_retry(
-        "Supabase schedule query",
-        lambda: (
-            client.table(TABLE_NAME)
-            .select("subject_name, room, day_of_week, start_period, end_period")
-            .eq("student_id", sid)
-            .eq("day_of_week", day_of_week)
-            .order("start_period", desc=False)
-            .execute()
-        ),
-    )
+    try:
+        response = _execute_with_retry(
+            "Supabase schedule query",
+            lambda: (
+                client.table(TABLE_NAME)
+                .select("subject_name, room, day_of_week, start_period, end_period, status")
+                .eq("student_id", sid)
+                .eq("day_of_week", day_of_week)
+                .order("start_period", desc=False)
+                .execute()
+            ),
+        )
+        rows: list[dict] = response.data or []
+    except APIError as exc:
+        if not _is_missing_column_error(exc, "status"):
+            raise
+        logger.warning(
+            "Column schedules.status is missing. Returning rows with default status='scheduled'."
+        )
+        response = _execute_with_retry(
+            "Supabase schedule query (legacy columns)",
+            lambda: (
+                client.table(TABLE_NAME)
+                .select("subject_name, room, day_of_week, start_period, end_period")
+                .eq("student_id", sid)
+                .eq("day_of_week", day_of_week)
+                .order("start_period", desc=False)
+                .execute()
+            ),
+        )
+        rows = response.data or []
+        for row in rows:
+            row["status"] = "scheduled"
 
-    rows: list[dict] = response.data or []
     logger.info("Found %d classes today (%s).", len(rows), day_of_week)
     return rows
 
@@ -371,19 +411,40 @@ def get_all_schedule(student_id: str | None = None) -> list[dict]:
     logger.info("Querying full schedule for student_id=%s", sid)
 
     client = _get_client(for_write=False)
-    response = _execute_with_retry(
-        "Supabase full schedule query",
-        lambda: (
-            client.table(TABLE_NAME)
-            .select("subject_name, room, day_of_week, start_period, end_period")
-            .eq("student_id", sid)
-            .order("day_of_week", desc=False)
-            .order("start_period", desc=False)
-            .execute()
-        ),
-    )
+    try:
+        response = _execute_with_retry(
+            "Supabase full schedule query",
+            lambda: (
+                client.table(TABLE_NAME)
+                .select("subject_name, room, day_of_week, start_period, end_period, status")
+                .eq("student_id", sid)
+                .order("day_of_week", desc=False)
+                .order("start_period", desc=False)
+                .execute()
+            ),
+        )
+        rows: list[dict] = response.data or []
+    except APIError as exc:
+        if not _is_missing_column_error(exc, "status"):
+            raise
+        logger.warning(
+            "Column schedules.status is missing. Returning full schedule rows with default status='scheduled'."
+        )
+        response = _execute_with_retry(
+            "Supabase full schedule query (legacy columns)",
+            lambda: (
+                client.table(TABLE_NAME)
+                .select("subject_name, room, day_of_week, start_period, end_period")
+                .eq("student_id", sid)
+                .order("day_of_week", desc=False)
+                .order("start_period", desc=False)
+                .execute()
+            ),
+        )
+        rows = response.data or []
+        for row in rows:
+            row["status"] = "scheduled"
 
-    rows: list[dict] = response.data or []
     logger.info("Found %d total schedule row(s).", len(rows))
     return rows
 
@@ -522,6 +583,260 @@ def get_all_appointments(student_id: str | None = None) -> list[dict]:
 
     rows: list[dict] = response.data or []
     logger.info("Found %d total appointment(s).", len(rows))
+    return rows
+
+
+def upsert_exams(exam_rows: list[dict], student_id: str | None = None) -> int:
+    """Upsert exam rows from crawler output into the exams table."""
+    sid = student_id or os.environ.get("STUDENT_ID")
+    if not sid:
+        raise ValueError("student_id is required; set STUDENT_ID env var.")
+
+    payload_rows: list[dict] = []
+    signatures: set[str] = set()
+    exam_dates: list[datetime.date] = []
+
+    for row in exam_rows:
+        exam_date = _parse_iso_date(row.get("exam_date") or row.get("session_date"))
+        if exam_date is None:
+            continue
+
+        subject = str(row.get("subject_name") or "").strip()
+        if not subject:
+            continue
+
+        start_time = _normalize_time_value(row.get("start_time"))
+        end_time = _normalize_time_value(row.get("end_time"))
+        room = str(row.get("exam_room") or row.get("room") or "").strip() or None
+        exam_type = str(row.get("exam_type") or "").strip() or None
+        notes = str(row.get("notes") or "").strip() or None
+        signature = str(row.get("source_signature") or "").strip()
+        if not signature:
+            signature = _exam_signature(
+                sid,
+                exam_date,
+                subject,
+                room,
+                start_time,
+                end_time,
+                exam_type,
+                prefix="crawler_exam",
+            )
+
+        payload_rows.append(
+            {
+                "student_id": sid,
+                "subject_name": subject,
+                "exam_date": exam_date.isoformat(),
+                "start_time": start_time,
+                "end_time": end_time,
+                "exam_room": room,
+                "exam_type": exam_type,
+                "source_signature": signature,
+                "notes": notes,
+            }
+        )
+        signatures.add(signature)
+        exam_dates.append(exam_date)
+
+    if not payload_rows:
+        logger.info("No exam rows to upsert.")
+        return 0
+
+    client = _get_client(for_write=True)
+    try:
+        _execute_with_retry(
+            "Supabase exam upsert",
+            lambda: (
+                client.table(EXAMS_TABLE)
+                .upsert(payload_rows, on_conflict="student_id,source_signature")
+                .execute()
+            ),
+        )
+
+        _cleanup_stale_exams(
+            client=client,
+            student_id=sid,
+            signatures=signatures,
+            min_date=min(exam_dates),
+            max_date=max(exam_dates),
+        )
+    except APIError as exc:
+        detail = str(exc)
+        if "PGRST205" in detail or "Could not find the table" in detail:
+            logger.warning(
+                "Table '%s' is not available yet. Run supabase/init_tables.sql to enable exams.",
+                EXAMS_TABLE,
+            )
+            return 0
+        if "42501" in detail or "row-level security" in detail.lower():
+            raise RuntimeError(
+                "Supabase write blocked by RLS for exams. "
+                "Set SUPABASE_SERVICE_ROLE_KEY or create INSERT/UPDATE/DELETE policies on 'exams'."
+            ) from exc
+        raise
+
+    logger.info("Upserted %d exam row(s).", len(payload_rows))
+    return len(payload_rows)
+
+
+def get_upcoming_exams(student_id: str | None = None, days_ahead: int = 7) -> list[dict]:
+    """Return upcoming exams from today to today + days_ahead."""
+    sid = student_id or os.environ.get("STUDENT_ID")
+    if not sid:
+        raise ValueError("student_id is required; set STUDENT_ID env var.")
+
+    range_days = max(days_ahead, 0)
+    start_date = local_today()
+    end_date = start_date + datetime.timedelta(days=range_days)
+
+    client = _get_client(for_write=False)
+    try:
+        response = _execute_with_retry(
+            "Supabase upcoming exams query",
+            lambda: (
+                client.table(EXAMS_TABLE)
+                .select("id, subject_name, exam_date, start_time, end_time, exam_room, exam_type, notes")
+                .eq("student_id", sid)
+                .gte("exam_date", start_date.isoformat())
+                .lte("exam_date", end_date.isoformat())
+                .order("exam_date", desc=False)
+                .order("start_time", desc=False)
+                .execute()
+            ),
+        )
+    except APIError as exc:
+        detail = str(exc)
+        if "PGRST205" in detail or "Could not find the table" in detail:
+            logger.warning(
+                "Table '%s' is not available yet. Run supabase/init_tables.sql to enable exams.",
+                EXAMS_TABLE,
+            )
+            return []
+        raise
+
+    rows: list[dict] = response.data or []
+    logger.info("Found %d upcoming exam(s).", len(rows))
+    return rows
+
+
+def get_today_exams(student_id: str | None = None) -> list[dict]:
+    """Return exams scheduled for today."""
+    return get_upcoming_exams(student_id=student_id, days_ahead=0)
+
+
+def upsert_elearning_progress(progress_rows: list[dict], student_id: str | None = None) -> int:
+    """Upsert eLearning course completion percentages by course."""
+    sid = student_id or os.environ.get("STUDENT_ID")
+    if not sid:
+        raise ValueError("student_id is required; set STUDENT_ID env var.")
+
+    payload_rows: list[dict] = []
+    for row in progress_rows:
+        course_name = str(row.get("course_name") or row.get("subject_name") or "").strip()
+        if not course_name:
+            continue
+
+        course_id = str(row.get("course_id") or "").strip()
+        if not course_id:
+            course_id = hashlib.sha256(course_name.lower().encode("utf-8")).hexdigest()[:16]
+
+        progress_percent = _to_float(row.get("progress_percent"), default=0.0)
+        progress_percent = max(0.0, min(progress_percent, 100.0))
+
+        lessons_completed = _to_optional_int(row.get("lessons_completed"))
+        lessons_total = _to_optional_int(row.get("lessons_total"))
+        if lessons_completed is not None and lessons_total is not None and lessons_completed > lessons_total:
+            lessons_completed = lessons_total
+
+        last_updated = str(row.get("last_updated") or "").strip() or datetime.datetime.now(
+            datetime.timezone.utc
+        ).isoformat()
+        source_signature = str(row.get("source_signature") or "").strip()
+        if not source_signature:
+            source_signature = _elearning_signature(sid, course_id, progress_percent, lessons_completed, lessons_total)
+
+        payload_rows.append(
+            {
+                "student_id": sid,
+                "course_id": course_id,
+                "course_name": course_name,
+                "progress_percent": progress_percent,
+                "lessons_completed": lessons_completed,
+                "lessons_total": lessons_total,
+                "source_signature": source_signature,
+                "last_updated": last_updated,
+            }
+        )
+
+    if not payload_rows:
+        logger.info("No eLearning progress rows to upsert.")
+        return 0
+
+    client = _get_client(for_write=True)
+    try:
+        _execute_with_retry(
+            "Supabase eLearning progress upsert",
+            lambda: (
+                client.table(ELEARNING_PROGRESS_TABLE)
+                .upsert(payload_rows, on_conflict="student_id,course_id")
+                .execute()
+            ),
+        )
+    except APIError as exc:
+        detail = str(exc)
+        if "PGRST205" in detail or "Could not find the table" in detail:
+            logger.warning(
+                "Table '%s' is not available yet. Run supabase/init_tables.sql to enable eLearning progress.",
+                ELEARNING_PROGRESS_TABLE,
+            )
+            return 0
+        if "42501" in detail or "row-level security" in detail.lower():
+            raise RuntimeError(
+                "Supabase write blocked by RLS for eLearning progress. "
+                "Set SUPABASE_SERVICE_ROLE_KEY or create INSERT/UPDATE policies on 'elearning_progress'."
+            ) from exc
+        raise
+
+    logger.info("Upserted %d eLearning progress row(s).", len(payload_rows))
+    return len(payload_rows)
+
+
+def get_latest_elearning_progress(student_id: str | None = None, limit: int = 20) -> list[dict]:
+    """Return latest eLearning progress rows for the student."""
+    sid = student_id or os.environ.get("STUDENT_ID")
+    if not sid:
+        raise ValueError("student_id is required; set STUDENT_ID env var.")
+
+    safe_limit = max(1, min(limit, 100))
+    client = _get_client(for_write=False)
+    try:
+        response = _execute_with_retry(
+            "Supabase eLearning progress query",
+            lambda: (
+                client.table(ELEARNING_PROGRESS_TABLE)
+                .select(
+                    "id, course_id, course_name, progress_percent, lessons_completed, lessons_total, last_updated"
+                )
+                .eq("student_id", sid)
+                .order("progress_percent", desc=False)
+                .order("course_name", desc=False)
+                .limit(safe_limit)
+                .execute()
+            ),
+        )
+    except APIError as exc:
+        detail = str(exc)
+        if "PGRST205" in detail or "Could not find the table" in detail:
+            logger.warning(
+                "Table '%s' is not available yet. Run supabase/init_tables.sql to enable eLearning progress.",
+                ELEARNING_PROGRESS_TABLE,
+            )
+            return []
+        raise
+
+    rows: list[dict] = response.data or []
+    logger.info("Found %d eLearning progress row(s).", len(rows))
     return rows
 
 
@@ -851,9 +1166,15 @@ def _normalize_schedule_rows(schedule_rows: list[dict], student_id: str) -> list
                 "day_of_week": day_of_week,
                 "start_period": _to_int(row.get("start_period")),
                 "end_period": _to_int(row.get("end_period")),
+                "status": _validate_session_status(row.get("status")),
             }
         )
     return normalized
+
+
+def _is_missing_column_error(exc: APIError, column_name: str) -> bool:
+    detail = str(exc).lower()
+    return "42703" in detail or ("column" in detail and str(column_name).lower() in detail)
 
 
 def _parse_iso_date(value: object) -> datetime.date | None:
@@ -908,6 +1229,118 @@ def _cleanup_stale_crawler_sessions(
                 .execute()
             ),
         )
+
+
+def _cleanup_stale_exams(
+    client: Client,
+    student_id: str,
+    signatures: set[str],
+    min_date: datetime.date,
+    max_date: datetime.date,
+) -> None:
+    response = _execute_with_retry(
+        "Supabase exam signature query",
+        lambda: (
+            client.table(EXAMS_TABLE)
+            .select("source_signature")
+            .eq("student_id", student_id)
+            .gte("exam_date", min_date.isoformat())
+            .lte("exam_date", max_date.isoformat())
+            .like("source_signature", "crawler_exam:%")
+            .execute()
+        ),
+    )
+
+    existing_rows: list[dict] = response.data or []
+    existing_signatures = {
+        str(row.get("source_signature") or "").strip() for row in existing_rows if row.get("source_signature")
+    }
+    stale = sorted(existing_signatures - signatures)
+    for signature in stale:
+        _execute_with_retry(
+            "Supabase stale exam delete",
+            lambda signature=signature: (
+                client.table(EXAMS_TABLE)
+                .delete()
+                .eq("student_id", student_id)
+                .eq("source_signature", signature)
+                .execute()
+            ),
+        )
+
+
+def _exam_signature(
+    student_id: str,
+    exam_date: datetime.date,
+    subject_name: str,
+    exam_room: str | None,
+    start_time: str | None,
+    end_time: str | None,
+    exam_type: str | None,
+    prefix: str = "generated_exam",
+) -> str:
+    payload = {
+        "student_id": student_id,
+        "exam_date": exam_date.isoformat(),
+        "subject_name": subject_name,
+        "exam_room": exam_room or "",
+        "start_time": start_time or "",
+        "end_time": end_time or "",
+        "exam_type": exam_type or "",
+    }
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return f"{prefix}:{digest}"
+
+
+def _elearning_signature(
+    student_id: str,
+    course_id: str,
+    progress_percent: float,
+    lessons_completed: int | None,
+    lessons_total: int | None,
+) -> str:
+    payload = {
+        "student_id": student_id,
+        "course_id": course_id,
+        "progress_percent": progress_percent,
+        "lessons_completed": lessons_completed,
+        "lessons_total": lessons_total,
+    }
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return f"elearning:{digest}"
+
+
+def _normalize_time_value(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        if len(text) == 5:
+            parsed = datetime.time.fromisoformat(text)
+        else:
+            parsed = datetime.time.fromisoformat(text[:8])
+        return parsed.strftime("%H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _to_optional_int(value: object) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _to_int(value: object) -> int:
