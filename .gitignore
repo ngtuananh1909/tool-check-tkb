@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Personal contact data
+contact.txt
+
 .venv
 __pycache__/
 *.pyc
@@ -21,7 +24,7 @@ build/
 dist/
 *.egg
 tests/
-
+plan.md 
 # Runtime files
 *.log
 

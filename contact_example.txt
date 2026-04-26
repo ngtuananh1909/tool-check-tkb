@@ -1,0 +1,22 @@
+# ============================================================
+# contact.txt – Danh sách attendee cho lịch theo thời khóa biểu
+# ============================================================
+#
+# File này dùng để khai báo attendee sẽ được tự động thêm vào lịch học.
+# Khi tool sync lên Google Calendar:
+#   - Lịch HỌC / thời khóa biểu: tự động thêm TẤT CẢ contacts
+#   - Lịch CÁ NHÂN: không tự thêm attendee
+#   - Lịch THI: không tự thêm attendee
+#
+# Format mỗi dòng:
+#   tên_viết_tắt - email
+#
+# Quy tắc:
+#   - Dòng trống hoặc bắt đầu bằng # sẽ bị bỏ qua
+#   - Tên viết tắt chỉ dùng để hiển thị trong Calendar attendee list
+#   - Email phải là email hợp lệ
+#
+# Ví dụ:
+# LMH - leminhhieu@gmail.com
+# NVA - nguyenvana@gmail.com
+# TTB - tranthib@gmail.com

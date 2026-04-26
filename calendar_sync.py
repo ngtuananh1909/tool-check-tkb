@@ -11,6 +11,7 @@ import os
 import socket
 import time
 import uuid
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from google.oauth2 import service_account
@@ -57,9 +58,12 @@ SESSION_STATUS_COLOR_ID: dict[str, str] = {
     "absent": "8",   # Graphite – grey
     "makeup": "7",   # Peacock – blue
 }
-EXAM_EVENT_COLOR_ID = "1"  # Tomato - red
+EXAM_EVENT_COLOR_ID = "11"  # Tomato - red (nổi bật)
 DEFAULT_EVENT_REMINDER_MINUTES = 60
 EXAM_EVENT_REMINDER_MINUTES = 7 * 24 * 60
+
+# Path to contact list file for auto-adding attendees to schedule events.
+CONTACT_FILE = "contact.txt"
 
 # Official TDTU period start times from the provided timetable image.
 PERIOD_START: dict[int, str] = {
@@ -79,6 +83,69 @@ PERIOD_START: dict[int, str] = {
     14: "18:55",
     15: "19:45",
 }
+
+
+# ---------------------------------------------------------------------------
+# Contact loading – reads contact.txt for timetable/class-session attendee auto-add
+# ---------------------------------------------------------------------------
+
+def _load_contacts() -> list[dict]:
+    """Load contacts from contact.txt.
+
+    Returns a list of dicts with keys 'name' (str) and 'email' (str).
+    Returns an empty list if the file does not exist or is empty.
+    """
+    contact_path = Path(CONTACT_FILE)
+    if not contact_path.is_file():
+        # Also check relative to this script's directory.
+        contact_path = Path(__file__).resolve().parent / CONTACT_FILE
+        if not contact_path.is_file():
+            return []
+
+    contacts: list[dict] = []
+    try:
+        with open(contact_path, encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # Expected format: name - email
+                if " - " in line:
+                    parts = line.split(" - ", 1)
+                    name = parts[0].strip()
+                    email = parts[1].strip()
+                elif "@" in line:
+                    # Bare email without name
+                    email = line.strip()
+                    name = email.split("@")[0]
+                else:
+                    continue
+
+                if email and "@" in email:
+                    contacts.append({"name": name, "email": email})
+    except Exception as exc:
+        logger.warning("Failed to load contact.txt: %s", exc)
+        return []
+
+    if contacts:
+        logger.info("Loaded %d contact(s) from %s.", len(contacts), contact_path)
+    return contacts
+
+
+def _contacts_to_attendees(contacts: list[dict]) -> list[dict]:
+    """Convert a list of contact dicts to Google Calendar attendee format."""
+    attendees: list[dict] = []
+    seen: set[str] = set()
+    for c in contacts:
+        email = c.get("email", "").strip().lower()
+        if email and email not in seen:
+            seen.add(email)
+            name = c.get("name", "").strip()
+            entry: dict = {"email": email}
+            if name:
+                entry["displayName"] = name
+            attendees.append(entry)
+    return attendees
 
 
 def sync_today_to_csv_and_google_calendar(
@@ -493,6 +560,10 @@ def _build_sync_items(
 
     sync_weeks = _calendar_sync_weeks()
 
+    # Load contacts for attendee auto-add on schedule events.
+    all_contacts = _load_contacts()
+    all_attendees = _contacts_to_attendees(all_contacts)
+
     for cls in schedule_rows:
         subject = str(cls.get("subject_name") or "").strip() or "Lop hoc"
         room = str(cls.get("room") or "").strip() or None
@@ -510,6 +581,8 @@ def _build_sync_items(
             "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
         }
         _apply_default_reminder(payload)
+        if all_attendees:
+            payload["attendees"] = all_attendees
         if recurrence:
             payload["recurrence"] = recurrence
         source_hash = _sync_hash({
@@ -563,7 +636,7 @@ def _build_sync_items(
                 "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone},
                 "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
             }
-            _apply_default_reminder(payload, minutes=EXAM_EVENT_REMINDER_MINUTES)
+            _apply_default_reminder(payload)
         else:
             payload = {
                 "summary": title,
@@ -678,6 +751,10 @@ def _build_sync_items_from_sessions(
     timezone = os.environ.get("APP_TIMEZONE", "Asia/Ho_Chi_Minh")
     items: list[dict] = []
 
+    # Load contacts for attendee auto-add on class session events.
+    all_contacts = _load_contacts()
+    all_attendees = _contacts_to_attendees(all_contacts)
+
     for session in class_sessions:
         subject = str(session.get("subject_name") or "").strip() or "Lop hoc"
         room = str(session.get("room") or "").strip() or None
@@ -714,6 +791,8 @@ def _build_sync_items_from_sessions(
             "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
         }
         _apply_default_reminder(payload)
+        if all_attendees:
+            payload["attendees"] = all_attendees
         if color_id:
             payload["colorId"] = color_id
         source_hash = _sync_hash(
