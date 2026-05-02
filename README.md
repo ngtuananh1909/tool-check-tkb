@@ -8,23 +8,27 @@ A lightweight bot that **crawls the TDTU timetable**, stores data in **Supabase*
 ## 🏗️ Architecture
 ```mermaid
 flowchart TD
-    subgraph Crawl & Store
+    subgraph Crawl_Store [Crawl & Store]
         Crawler[run_hour.py] -->|writes| SupabaseDB[(Supabase DB)]
     end
-    subgraph Sync
-        Sync[calendar_sync.py] -->|reads| SupabaseDB
-        Sync -->|writes| GoogleCalendar[Google Calendar]
+    
+    subgraph Sync_Process [Sync]
+        SyncNode[calendar_sync.py] -->|reads| SupabaseDB
+        SyncNode -->|writes| GoogleCalendar[Google Calendar]
     end
-    subgraph Notify
+    
+    subgraph Notify [Notify]
         Notifier[main.py] -->|reads| SupabaseDB
         Notifier -->|sends| TelegramBot[Telegram Bot]
     end
-    subgraph Interaction
+    
+    subgraph Interaction [Interaction]
         Bot[telegram_mvp_bot.py / webhook_app.py] -->|writes| SupabaseDB
         Bot -->|reads| GoogleCalendar
     end
-    Crawler --> Sync
-    Sync --> Notifier
+    
+    Crawler --> SyncNode
+    SyncNode --> Notifier
 ```
 
 ---
