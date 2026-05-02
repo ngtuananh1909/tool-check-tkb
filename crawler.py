@@ -2132,7 +2132,8 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
             const extractRoom = (text) => {
                 const roomMatch = (text || "").match(/Phòng\|Room:\s*([^\n]+)/i)
                     || (text || "").match(/Room:\s*([^\n]+)/i)
-                    || (text || "").match(/Phòng:\s*([^\n]+)/i);
+                    || (text || "").match(/Phòng:\s*([^\n]+)/i)
+                    || (text || "").match(/[Pp]h[oò]ng\s*([A-Za-z0-9]+)/);
                 return roomMatch ? roomMatch[1].trim() : "";
             };
 
@@ -2153,6 +2154,38 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
                     return "makeup";
                 }
                 return "scheduled";
+            };
+
+            // Split a cell that contains multiple schedule sub-entries into an
+            // array of plain-text segments, one per sub-entry.  Each sub-entry
+            // starts with a non-status <b> node (the subject name).
+            // Returns null when the cell appears to contain a single entry.
+            const splitCellEntries = (cell) => {
+                const isStatusBold = (bText) => {
+                    const s = (bText || "")
+                        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+                        .replace(/\s+/g, " ").trim().toLowerCase();
+                    return /bao\s*vang|gv\s*vang|nghi\s*hoc|nghi\s*tiet|vang\s*tiet|lop\s*nghi|hoc\s*bu|lich\s*bu|day\s*bu|bu\s*hoc|bu\s*tiet|lhb/.test(s);
+                };
+                const groups = [];
+                let current = [];
+                for (const node of Array.from(cell.childNodes)) {
+                    const nodeText = (node.textContent || "").trim();
+                    const isSubjectBold = node.nodeName === "B" && !!nodeText && !isStatusBold(nodeText);
+                    if (isSubjectBold && current.length > 0) {
+                        groups.push(current);
+                        current = [node];
+                    } else {
+                        current.push(node);
+                    }
+                }
+                if (current.length > 0) groups.push(current);
+                if (groups.length <= 1) return null;
+                return groups.map((nodes) => {
+                    const wrap = document.createElement("span");
+                    nodes.forEach((n) => wrap.appendChild(n.cloneNode(true)));
+                    return (wrap.innerText || "").trim();
+                }).filter((t) => t.length > 0);
             };
 
             let target = null;
@@ -2239,18 +2272,20 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
                             if (!dayOfWeek || !text) continue;
                             if (/^(-|x|trống|rong)$/i.test(text)) continue;
 
-                            const subject = cleanSubject(text);
-                            if (!subject) continue;
-
-                            entries.push({
-                                subject_name: subject,
-                                room: extractRoom(text),
-                                day_of_week: dayOfWeek,
-                                session_date: sessionDate,
-                                start_period: rowPeriod,
-                                end_period: rowPeriod + rowSpan - 1,
-                                status: detectStatus(text),
-                            });
+                            const entryTexts = splitCellEntries(cell) || [text];
+                            for (const entryText of entryTexts) {
+                                const subject = cleanSubject(entryText);
+                                if (!subject) continue;
+                                entries.push({
+                                    subject_name: subject,
+                                    room: extractRoom(entryText),
+                                    day_of_week: dayOfWeek,
+                                    session_date: sessionDate,
+                                    start_period: rowPeriod,
+                                    end_period: rowPeriod + rowSpan - 1,
+                                    status: detectStatus(entryText),
+                                });
+                            }
                         }
                     }
 
