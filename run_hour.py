@@ -55,24 +55,24 @@ def _handle_error(context: str, exc: Exception) -> None:
     """Log error and send alert if possible."""
     error_msg = f"{context}: {exc}"
     logger.exception(error_msg)
-    
+
     try:
         from notifier import send_error_alert
         send_error_alert(error_msg)
     except Exception as alert_exc:
         logger.error("Could not send error alert: %s", alert_exc)
-    
+
     sys.exit(1)
 
 
 def run_hourly_sync() -> None:
     """Execute hourly crawl, DB sync, and calendar sync pipeline."""
     _load_dotenv()
-    
+
     student_id = os.environ.get("STUDENT_ID")
-    
+
     # -------- Step 1: Crawl --------
-    logger.info("=== Step 1: Crawling schedule from TDTU portal ===")
+    logger.debug("Step 1: Crawling schedule from TDTU portal")
     try:
         from crawler import (
             fetch_elearning_progress,
@@ -80,21 +80,21 @@ def run_hourly_sync() -> None:
             fetch_schedule,
         )
         weeks_ahead = _resolve_crawler_weeks_ahead()
-        logger.info("Crawler will fetch current week + %d future week(s).", weeks_ahead)
+        logger.debug("Crawler will fetch current week + %d future week(s).", weeks_ahead)
         schedule = fetch_schedule(weeks_ahead=weeks_ahead)
-        logger.info("Crawler returned %d schedule entries.", len(schedule))
+        logger.debug("Crawler returned %d schedule entries.", len(schedule))
 
         exams = fetch_exam_schedule(weeks_ahead=weeks_ahead)
-        logger.info("Exam crawler returned %d exam row(s).", len(exams))
+        logger.debug("Exam crawler returned %d exam row(s).", len(exams))
 
         elearning_progress = fetch_elearning_progress()
-        logger.info("eLearning crawler returned %d progress row(s).", len(elearning_progress))
+        logger.debug("eLearning crawler returned %d progress row(s).", len(elearning_progress))
     except Exception as exc:
         _handle_error("Crawler failed", exc)
         return
-    
+
     # -------- Step 2: DB Sync --------
-    logger.info("=== Step 2: Updating schedule in Supabase ===")
+    logger.debug("Step 2: Updating schedule in Supabase")
     try:
         from database import (
             materialize_class_sessions,
@@ -113,16 +113,16 @@ def run_hourly_sync() -> None:
 
         exam_rows = upsert_exams(exams, student_id=student_id)
         progress_rows = upsert_elearning_progress(elearning_progress, student_id=student_id)
-        logger.info("Supabase update complete.")
-        logger.info("Class sessions materialized: %d row(s).", materialized)
-        logger.info("Exams upserted: %d row(s).", exam_rows)
-        logger.info("eLearning progress upserted: %d row(s).", progress_rows)
+        logger.debug("Supabase update complete.")
+        logger.debug("Class sessions materialized: %d row(s).", materialized)
+        logger.debug("Exams upserted: %d row(s).", exam_rows)
+        logger.debug("eLearning progress upserted: %d row(s).", progress_rows)
     except Exception as exc:
         _handle_error("Database update failed", exc)
         return
-    
+
     # -------- Step 3: Fetch full data --------
-    logger.info("=== Step 3: Fetching full sync data from Supabase ===")
+    logger.debug("Step 3: Fetching full sync data from Supabase")
     try:
         from database import (
             get_all_appointments,
@@ -138,18 +138,18 @@ def run_hourly_sync() -> None:
             all_schedule_rows = get_all_schedule(student_id=student_id)
         all_appointments = get_all_appointments(student_id=student_id)
         all_exams = get_upcoming_exams(student_id=student_id, days_ahead=180)
-        logger.info("Full class dataset has %d row(s).", len(all_schedule_rows))
-        logger.info("Full appointment set has %d row(s).", len(all_appointments))
-        logger.info("Full exam set has %d row(s).", len(all_exams))
+        logger.debug("Full class dataset has %d row(s).", len(all_schedule_rows))
+        logger.debug("Full appointment set has %d row(s).", len(all_appointments))
+        logger.debug("Full exam set has %d row(s).", len(all_exams))
     except Exception as exc:
         _handle_error("Failed to fetch full data", exc)
         return
-    
+
     # -------- Step 4: Calendar sync & CSV export --------
-    logger.info("=== Step 4: Exporting CSV and syncing Google Calendar ===")
+    logger.debug("Step 4: Exporting CSV and syncing Google Calendar")
     try:
         from calendar_sync import sync_database_to_csv_and_google_calendar
-        
+
         csv_path, did_sync = sync_database_to_csv_and_google_calendar(
             all_schedule_rows,
             all_appointments,
@@ -166,7 +166,7 @@ def run_hourly_sync() -> None:
     except Exception as exc:
         _handle_error("CSV export / Google Calendar sync failed", exc)
         return
-    
+
     logger.info("=== Hourly data collection and sync complete. ===")
 
 

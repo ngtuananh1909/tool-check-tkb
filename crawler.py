@@ -377,9 +377,14 @@ def _resolve_weeks_ahead(weeks_ahead: int | None) -> int:
 
 
 def _deduplicate_schedule_rows(rows: list[dict]) -> list[dict]:
-    """Deduplicate rows across all crawled weeks while preserving first-seen order."""
+    """Deduplicate rows across all crawled weeks while preserving first-seen order.
+
+    Keep `status` in the signature so paired rows such as "absent" and
+    "makeup" are not collapsed into a single record when they share the same
+    subject, room, day, date, and period range.
+    """
     deduped: list[dict] = []
-    seen: set[tuple[str, str, str, str, int, int]] = set()
+    seen: set[tuple[str, str, str, str, int, int, str]] = set()
 
     for row in rows:
         signature = (
@@ -389,6 +394,7 @@ def _deduplicate_schedule_rows(rows: list[dict]) -> list[dict]:
             str(row.get("session_date") or "").strip(),
             int(row.get("start_period", 0) or 0),
             int(row.get("end_period", 0) or 0),
+            str(row.get("status") or "").strip().lower(),
         )
         if signature in seen:
             continue
@@ -2167,6 +2173,19 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
                         .replace(/\s+/g, " ").trim().toLowerCase();
                     return /bao\s*vang|gv\s*vang|nghi\s*hoc|nghi\s*tiet|vang\s*tiet|lop\s*nghi|hoc\s*bu|lich\s*bu|day\s*bu|bu\s*hoc|bu\s*tiet|lhb/.test(s);
                 };
+                // If there's an inner table, prefer splitting by its inner <td>
+                // cells (covers the nested-table layout in the portal).
+                const innerTable = cell.querySelector("table");
+                if (innerTable) {
+                    const innerTds = Array.from(innerTable.querySelectorAll("td"));
+                    if (innerTds.length > 1) {
+                        return innerTds
+                            .map((td) => (td.innerText || "").trim())
+                            .filter((t) => t.length > 0);
+                    }
+                }
+
+                // Fallback: split by bold subject markers among direct children.
                 const groups = [];
                 let current = [];
                 for (const node of Array.from(cell.childNodes)) {
@@ -2258,6 +2277,14 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
                     const rowSpan = Math.max(parseInt(cell.getAttribute("rowspan") || "1", 10) || 1, 1);
                     const colSpan = Math.max(parseInt(cell.getAttribute("colspan") || "1", 10) || 1, 1);
                     const text = (cell.innerText || "").trim();
+
+                    // Skip placeholder cells that are styled as `cell` but have
+                    // no rowspan (these represent empty slots in the matrix).
+                    if (cell.classList && cell.classList.contains("cell") && rowSpan === 1) {
+                        // advance logical column and continue
+                        logicalCol += colSpan;
+                        continue;
+                    }
 
                     if (logicalCol === 0) {
                         // Match bare numbers ("1") or prefixed formats ("Tiết 1", "Ca 1", "Period 2")
