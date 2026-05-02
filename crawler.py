@@ -333,6 +333,21 @@ def fetch_schedule(
                 logger.warning("No schedule entries found in the crawled week range.")
             else:
                 logger.info("Parsed %d unique schedule entries across crawled weeks.", len(schedule))
+                logger.info("=== FINAL DEDUPLICATED SCHEDULE ===")
+                for i, entry in enumerate(schedule):
+                    logger.info(
+                        "  [%d] student=%s subject=%r room=%r day=%r date=%r period=%s-%s status=%s",
+                        i + 1,
+                        entry.get("student_id"),
+                        entry.get("subject_name"),
+                        entry.get("room"),
+                        entry.get("day_of_week"),
+                        entry.get("session_date"),
+                        entry.get("start_period"),
+                        entry.get("end_period"),
+                        entry.get("status"),
+                    )
+                logger.info("=== END FINAL SCHEDULE ===")
 
         except PlaywrightTimeoutError as exc:
             raise RuntimeError(f"Playwright timed out: {exc}") from exc
@@ -1874,6 +1889,57 @@ def _build_schedule_url(current_url: str) -> str:
     return SCHEDULE_URL_BASE
 
 
+def _log_all_table_tds(page) -> None:
+    """Log ALL <td> text content from every table on the page (and iframes) for inspection."""
+    script = r"""
+        () => {
+            const contexts = [document, ...Array.from(document.querySelectorAll("iframe")).map((f) => {
+                try { return f.contentDocument; } catch { return null; }
+            }).filter(Boolean)];
+
+            const results = [];
+            contexts.forEach((doc, docIdx) => {
+                const tables = Array.from(doc.querySelectorAll("table"));
+                tables.forEach((tbl, tblIdx) => {
+                    const tds = Array.from(tbl.querySelectorAll("td"));
+                    tds.forEach((td, tdIdx) => {
+                        const text = (td.innerText || "").trim().replace(/\s+/g, " ");
+                        if (text) {
+                            const tr = td.closest("tr");
+                            const rowIdx = tr ? Array.from(tr.parentElement.children).indexOf(tr) : -1;
+                            const colIdx = tr ? Array.from(tr.children).indexOf(td) : -1;
+                            results.push({
+                                doc: docIdx,
+                                table: tblIdx,
+                                row: rowIdx,
+                                col: colIdx,
+                                td: tdIdx,
+                                text: text
+                            });
+                        }
+                    });
+                });
+            });
+            return results;
+        }
+    """
+    try:
+        tds = page.evaluate(script) or []
+        logger.info("=== RAW TABLE TD DUMP: %d non-empty <td> cells found ===", len(tds))
+        for item in tds:
+            logger.info(
+                "  doc[%d] table[%d] row[%d] col[%d]: %s",
+                item.get("doc", 0),
+                item.get("table", -1),
+                item.get("row", -1),
+                item.get("col", -1),
+                item.get("text", ""),
+            )
+        logger.info("=== END RAW TABLE TD DUMP ===")
+    except Exception as exc:
+        logger.warning("Failed to dump raw table <td> cells: %s", exc)
+
+
 def _parse_schedule_table(page, student_id: str) -> list[dict]:
     """
     Locate the first <table> that looks like a schedule table and extract rows.
@@ -1884,11 +1950,28 @@ def _parse_schedule_table(page, student_id: str) -> list[dict]:
     Because the exact column order may vary, we detect column positions by
     inspecting the header row.
     """
+    # Dump all <td> cells for raw inspection before any filtering.
+    _log_all_table_tds(page)
+
     weekly_entries = _parse_weekly_grid_table(page, student_id)
     if weekly_entries is not None:
         # Grid table structure was detected (weekly_entries may be [] for an empty week).
         if weekly_entries:
             logger.info("Parsed %d entries from weekly grid table.", len(weekly_entries))
+            logger.info("=== WEEKLY GRID ENTRIES ===")
+            for i, entry in enumerate(weekly_entries):
+                logger.info(
+                    "  [%d] subject=%r room=%r day=%r date=%r period=%s-%s status=%s",
+                    i + 1,
+                    entry.get("subject_name"),
+                    entry.get("room"),
+                    entry.get("day_of_week"),
+                    entry.get("session_date"),
+                    entry.get("start_period"),
+                    entry.get("end_period"),
+                    entry.get("status"),
+                )
+            logger.info("=== END WEEKLY GRID ENTRIES ===")
         else:
             logger.info("Weekly grid table found but contains no entries for this week.")
         return weekly_entries
@@ -1954,6 +2037,20 @@ def _parse_schedule_table(page, student_id: str) -> list[dict]:
             )
 
         if entries:
+            logger.info("=== COLUMN-BASED TABLE ENTRIES ===")
+            logger.info("  Headers: %s", headers_raw)
+            logger.info("  Column mapping: %s", col)
+            for i, entry in enumerate(entries):
+                logger.info(
+                    "  [%d] subject=%r room=%r day=%r period=%s-%s",
+                    i + 1,
+                    entry.get("subject_name"),
+                    entry.get("room"),
+                    entry.get("day_of_week"),
+                    entry.get("start_period"),
+                    entry.get("end_period"),
+                )
+            logger.info("=== END COLUMN-BASED TABLE ENTRIES ===")
             return entries
 
     raise RuntimeError(
