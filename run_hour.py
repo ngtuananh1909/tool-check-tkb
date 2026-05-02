@@ -14,6 +14,7 @@ This does NOT send Telegram notifications; that's handled separately by main.py.
 import logging
 import os
 import sys
+import time
 
 # -----------------------------------------------------------------------
 # Logging
@@ -65,6 +66,12 @@ def _handle_error(context: str, exc: Exception) -> None:
     sys.exit(1)
 
 
+def _log_step_elapsed(step_name: str, started_at: float) -> None:
+    """Log how long a step took in seconds."""
+    elapsed = time.perf_counter() - started_at
+    logger.info("%s finished in %.2fs", step_name, elapsed)
+
+
 def run_hourly_sync() -> None:
     """Execute hourly crawl, DB sync, and calendar sync pipeline."""
     _load_dotenv()
@@ -72,7 +79,8 @@ def run_hourly_sync() -> None:
     student_id = os.environ.get("STUDENT_ID")
 
     # -------- Step 1: Crawl --------
-    logger.debug("Step 1: Crawling schedule from TDTU portal")
+    step_started = time.perf_counter()
+    logger.info("Step 1: Crawling schedule from TDTU portal")
     try:
         from crawler import (
             fetch_elearning_progress,
@@ -90,11 +98,14 @@ def run_hourly_sync() -> None:
         elearning_progress = fetch_elearning_progress()
         logger.debug("eLearning crawler returned %d progress row(s).", len(elearning_progress))
     except Exception as exc:
+        logger.exception("Step 1 failed after %.2fs", time.perf_counter() - step_started)
         _handle_error("Crawler failed", exc)
         return
+    _log_step_elapsed("Step 1", step_started)
 
     # -------- Step 2: DB Sync --------
-    logger.debug("Step 2: Updating schedule in Supabase")
+    step_started = time.perf_counter()
+    logger.info("Step 2: Updating schedule in Supabase")
     try:
         from database import (
             materialize_class_sessions,
@@ -118,11 +129,14 @@ def run_hourly_sync() -> None:
         logger.debug("Exams upserted: %d row(s).", exam_rows)
         logger.debug("eLearning progress upserted: %d row(s).", progress_rows)
     except Exception as exc:
+        logger.exception("Step 2 failed after %.2fs", time.perf_counter() - step_started)
         _handle_error("Database update failed", exc)
         return
+    _log_step_elapsed("Step 2", step_started)
 
     # -------- Step 3: Fetch full data --------
-    logger.debug("Step 3: Fetching full sync data from Supabase")
+    step_started = time.perf_counter()
+    logger.info("Step 3: Fetching full sync data from Supabase")
     try:
         from database import (
             get_all_appointments,
@@ -142,11 +156,14 @@ def run_hourly_sync() -> None:
         logger.debug("Full appointment set has %d row(s).", len(all_appointments))
         logger.debug("Full exam set has %d row(s).", len(all_exams))
     except Exception as exc:
+        logger.exception("Step 3 failed after %.2fs", time.perf_counter() - step_started)
         _handle_error("Failed to fetch full data", exc)
         return
+    _log_step_elapsed("Step 3", step_started)
 
     # -------- Step 4: Calendar sync & CSV export --------
-    logger.debug("Step 4: Exporting CSV and syncing Google Calendar")
+    step_started = time.perf_counter()
+    logger.info("Step 4: Exporting CSV and syncing Google Calendar")
     try:
         from calendar_sync import sync_database_to_csv_and_google_calendar
 
@@ -164,8 +181,10 @@ def run_hourly_sync() -> None:
                 "Google Calendar sync skipped (missing GOOGLE_CALENDAR_ID or Google service-account credentials)."
             )
     except Exception as exc:
+        logger.exception("Step 4 failed after %.2fs", time.perf_counter() - step_started)
         _handle_error("CSV export / Google Calendar sync failed", exc)
         return
+    _log_step_elapsed("Step 4", step_started)
 
     logger.info("=== Hourly data collection and sync complete. ===")
 

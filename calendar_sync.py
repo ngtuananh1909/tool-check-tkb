@@ -10,7 +10,6 @@ import logging
 import os
 import socket
 import time
-import uuid
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -195,12 +194,8 @@ def sync_database_to_csv_and_google_calendar(
         csv_path = _export_csv(schedule_rows, appointments, exam_rows, target_date)
         sync_items = _build_sync_items(schedule_rows, appointments, exam_rows, target_date)
 
-    events = [item["payload"] for item in sync_items]
-
     calendar_id = os.environ.get("GOOGLE_CALENDAR_ID", "").strip()
-    ics_calendar_name = calendar_id or os.environ.get("GOOGLE_ICS_CALENDAR_NAME", "local-calendar")
-    ics_path = _export_ics(events, target_date, ics_calendar_name)
-    logger.info("Exported schedule data to ICS: %s", ics_path)
+    events = [item["payload"] for item in sync_items]
 
     service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
     service_account_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
@@ -440,113 +435,6 @@ def _validate_calendar_target(service: Resource, calendar_id: str, service_accou
                 "Share this calendar with that service account and grant 'Make changes to events'."
             ) from exc
         raise
-
-
-def _export_ics(events: list[dict], target_date: dt.date, calendar_name: str) -> str:
-    os.makedirs("exports", exist_ok=True)
-    ics_path = os.path.join("exports", f"schedule_{target_date.strftime('%Y%m%d')}.ics")
-
-    timezone = os.environ.get("APP_TIMEZONE", "Asia/Ho_Chi_Minh")
-    lines = [
-        "BEGIN:VCALENDAR",
-        "PRODID:-//tool-check-tkb//Calendar Sync//EN",
-        "VERSION:2.0",
-        "CALSCALE:GREGORIAN",
-        "METHOD:PUBLISH",
-        f"X-WR-CALNAME:{_ics_escape(calendar_name)}",
-        f"X-WR-TIMEZONE:{timezone}",
-    ]
-
-    if timezone == "Asia/Ho_Chi_Minh":
-        lines.extend(
-            [
-                "BEGIN:VTIMEZONE",
-                "TZID:Asia/Ho_Chi_Minh",
-                "X-LIC-LOCATION:Asia/Ho_Chi_Minh",
-                "BEGIN:STANDARD",
-                "TZOFFSETFROM:+0700",
-                "TZOFFSETTO:+0700",
-                "TZNAME:GMT+7",
-                "DTSTART:19700101T000000",
-                "END:STANDARD",
-                "END:VTIMEZONE",
-            ]
-        )
-
-    now_utc = dt.datetime.now(dt.timezone.utc)
-    dtstamp = now_utc.strftime("%Y%m%dT%H%M%SZ")
-
-    for event in events:
-        lines.extend(_event_to_ics_lines(event, timezone, dtstamp))
-
-    lines.append("END:VCALENDAR")
-
-    with open(ics_path, "w", encoding="utf-8", newline="") as file:
-        file.write("\r\n".join(lines) + "\r\n")
-
-    return ics_path
-
-
-def _event_to_ics_lines(event: dict, timezone: str, dtstamp: str) -> list[str]:
-    uid = f"{uuid.uuid4().hex}@tool-check-tkb.local"
-    summary = _ics_escape(str(event.get("summary") or "Untitled"))
-    description = _ics_escape(str(event.get("description") or ""))
-    location = _ics_escape(str(event.get("location") or ""))
-    recurrence = event.get("recurrence") or []
-
-    lines = ["BEGIN:VEVENT"]
-
-    start = event.get("start") or {}
-    end = event.get("end") or {}
-
-    if "dateTime" in start and "dateTime" in end:
-        start_text = _ics_datetime_local(start["dateTime"])
-        end_text = _ics_datetime_local(end["dateTime"])
-        lines.append(f"DTSTART;TZID={timezone}:{start_text}")
-        lines.append(f"DTEND;TZID={timezone}:{end_text}")
-    else:
-        start_date = str(start.get("date") or "")
-        end_date = str(end.get("date") or "")
-        lines.append(f"DTSTART;VALUE=DATE:{start_date.replace('-', '')}")
-        lines.append(f"DTEND;VALUE=DATE:{end_date.replace('-', '')}")
-
-    lines.extend(
-        [
-            f"DTSTAMP:{dtstamp}",
-            f"UID:{uid}",
-            f"CREATED:{dtstamp}",
-            f"LAST-MODIFIED:{dtstamp}",
-            "SEQUENCE:0",
-            "STATUS:CONFIRMED",
-            f"SUMMARY:{summary}",
-            "TRANSP:OPAQUE",
-        ]
-    )
-
-    for rule in recurrence:
-        lines.append(f"RRULE:{rule.replace('RRULE:', '', 1)}")
-
-    if location:
-        lines.append(f"LOCATION:{location}")
-    if description:
-        lines.append(f"DESCRIPTION:{description}")
-
-    lines.append("END:VEVENT")
-    return lines
-
-
-def _ics_datetime_local(iso_text: str) -> str:
-    parsed = dt.datetime.fromisoformat(str(iso_text))
-    return parsed.strftime("%Y%m%dT%H%M%S")
-
-
-def _ics_escape(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\")
-        .replace(";", "\\;")
-        .replace(",", "\\,")
-        .replace("\n", "\\n")
-    )
 
 
 def _build_sync_items(
