@@ -157,7 +157,30 @@ create index if not exists idx_elearning_progress_student_updated
     on public.elearning_progress (student_id, last_updated desc);
 
 -- ---------------------------------------------------------------------------
--- 6) Calendar sync state
+-- 6) eLearning nearest deadlines table
+-- ---------------------------------------------------------------------------
+create table if not exists public.elearning_deadlines (
+    id bigserial primary key,
+    student_id text not null,
+    course_id text not null,
+    course_name text not null,
+    activity_name text not null,
+    due_date timestamptz not null,
+    activity_url text,
+    completion_status text not null default 'incomplete',
+    source_signature text not null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    constraint chk_elearning_deadlines_completion
+        check (completion_status in ('incomplete', 'complete')),
+    constraint uq_elearning_deadlines_course unique (student_id, course_id)
+);
+
+create index if not exists idx_elearning_deadlines_student_due
+    on public.elearning_deadlines (student_id, due_date);
+
+-- ---------------------------------------------------------------------------
+-- 7) Calendar sync state
 -- ---------------------------------------------------------------------------
 create table if not exists public.calendar_sync_state (
     id bigserial primary key,
@@ -179,7 +202,7 @@ create index if not exists idx_calendar_sync_state_student_uploaded
     on public.calendar_sync_state (student_id, uploaded, source_type);
 
 -- ---------------------------------------------------------------------------
--- 7) Notification audit log
+-- 8) Notification audit log
 -- ---------------------------------------------------------------------------
 create table if not exists public.notification_log (
     id bigserial primary key,
@@ -196,7 +219,7 @@ create index if not exists idx_notification_log_student_sent_at
     on public.notification_log (student_id, sent_at desc);
 
 -- ---------------------------------------------------------------------------
--- 8) Triggers for updated_at
+-- 9) Triggers for updated_at
 -- ---------------------------------------------------------------------------
 create or replace function public.set_updated_at()
 returns trigger
@@ -232,6 +255,12 @@ before update on public.elearning_progress
 for each row
 execute function public.set_updated_at();
 
+drop trigger if exists trg_elearning_deadlines_set_updated_at on public.elearning_deadlines;
+create trigger trg_elearning_deadlines_set_updated_at
+before update on public.elearning_deadlines
+for each row
+execute function public.set_updated_at();
+
 drop trigger if exists trg_calendar_sync_state_set_updated_at on public.calendar_sync_state;
 create trigger trg_calendar_sync_state_set_updated_at
 before update on public.calendar_sync_state
@@ -247,6 +276,7 @@ alter table public.appointments enable row level security;
 alter table public.class_sessions enable row level security;
 alter table public.exams enable row level security;
 alter table public.elearning_progress enable row level security;
+alter table public.elearning_deadlines enable row level security;
 alter table public.calendar_sync_state enable row level security;
 alter table public.notification_log enable row level security;
 
@@ -318,6 +348,20 @@ begin
     ) then
         create policy authenticated_read_elearning_progress
             on public.elearning_progress
+            for select
+            to authenticated
+            using (true);
+    end if;
+
+    if not exists (
+        select 1
+        from pg_policies
+        where schemaname = 'public'
+          and tablename = 'elearning_deadlines'
+          and policyname = 'authenticated_read_elearning_deadlines'
+    ) then
+        create policy authenticated_read_elearning_deadlines
+            on public.elearning_deadlines
             for select
             to authenticated
             using (true);

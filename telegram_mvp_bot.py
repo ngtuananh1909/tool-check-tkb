@@ -28,7 +28,12 @@ from requests import RequestException
 
 import requests
 
-from database import create_appointment, get_today_appointments
+from database import (
+    create_appointment,
+    get_nearest_elearning_deadlines,
+    get_today_appointments,
+    get_today_class_sessions,
+)
 from gemini_parser import (
     generate_conversational_reply_with_gemini,
     parse_appointment_with_gemini,
@@ -73,12 +78,20 @@ def _telegram_api(token: str, method: str) -> str:
 
 
 def _send_text(token: str, chat_id: str, text: str) -> None:
+    _send_message_payload(token, {"chat_id": chat_id, "text": text})
+
+
+def _send_text_with_keyboard(token: str, chat_id: str, text: str, keyboard: dict) -> None:
+    _send_message_payload(token, {"chat_id": chat_id, "text": text, "reply_markup": keyboard})
+
+
+def _send_message_payload(token: str, payload: dict) -> None:
     last_exc: Exception | None = None
     for attempt in range(1, 4):
         try:
             resp = requests.post(
                 _telegram_api(token, "sendMessage"),
-                json={"chat_id": chat_id, "text": text},
+                json=payload,
                 timeout=30,
             )
             if not resp.ok:
@@ -103,6 +116,56 @@ def _send_text(token: str, chat_id: str, text: str) -> None:
 
 def _normalize_chat_id(chat_id: str | int | None) -> str:
     return str(chat_id or "").strip()
+
+
+def _parse_schedule_day_arg(arg: str | None, today: dt.date | None = None) -> dt.date:
+    base = today or local_today()
+    value = re.sub(r"\s+", " ", str(arg or "").strip().lower())
+    if not value or value in {"hôm nay", "hom nay", "today"}:
+        return base
+    if value in {"mai", "ngày mai", "ngay mai", "tomorrow"}:
+        return base + dt.timedelta(days=1)
+
+    weekdays = {
+        "thứ 2": 0, "thu 2": 0, "thứ hai": 0, "thu hai": 0, "t2": 0,
+        "thứ 3": 1, "thu 3": 1, "thứ ba": 1, "thu ba": 1, "t3": 1,
+        "thứ 4": 2, "thu 4": 2, "thứ tư": 2, "thu tu": 2, "t4": 2,
+        "thứ 5": 3, "thu 5": 3, "thứ năm": 3, "thu nam": 3, "t5": 3,
+        "thứ 6": 4, "thu 6": 4, "thứ sáu": 4, "thu sau": 4, "t6": 4,
+        "thứ 7": 5, "thu 7": 5, "thứ bảy": 5, "thu bay": 5, "t7": 5,
+        "chủ nhật": 6, "chu nhat": 6, "cn": 6,
+    }
+    if value in weekdays:
+        delta = (weekdays[value] - base.weekday()) % 7
+        return base + dt.timedelta(days=delta or 7)
+
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})(?:/(\d{4}))?", value)
+    if m:
+        day, month, year = m.groups()
+        return dt.date(int(year or base.year), int(month), int(day))
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return dt.date.fromisoformat(value)
+    raise ValueError("Không đọc được ngày. Dùng: hôm nay, mai, thứ 2..CN, DD/MM hoặc YYYY-MM-DD.")
+
+
+def _parse_add_fields(text: str) -> dict[str, str | None]:
+    fields = {"time": None, "job": None, "where": None}
+    labels = {
+        "thời gian": "time", "thoi gian": "time", "time": "time",
+        "job": "job", "việc": "job", "viec": "job",
+        "where": "where", "địa điểm": "where", "dia diem": "where", "location": "where",
+    }
+    for line in str(text or "").splitlines():
+        if ":" not in line:
+            continue
+        label, raw_value = line.split(":", 1)
+        key = labels.get(label.strip().lower())
+        if key:
+            value = raw_value.strip()
+            fields[key] = value or None
+    if not any(fields.values()):
+        raise ValueError("Bạn cần nhập ít nhất một mục: thời gian, job hoặc where.")
+    return fields
 
 
 def _parse_input(text: str) -> tuple[str, dt.date, str, str | None]:
@@ -258,6 +321,97 @@ def _validate_hhmm(hour: int, minute: int) -> str:
     return f"{hour:02d}:{minute:02d}"
 
 
+def _build_schedule_text(rows: list[dict], target_date: dt.date) -> str:
+    lines = [f"Lịch học ngày {target_date.strftime('%d/%m/%Y')}:"]
+    if not rows:
+        lines.append("- Không có lịch học.")
+        return "\n".join(lines)
+    for idx, row in enumerate(rows, start=1):
+        subject = row.get("subject_name") or "Môn học"
+        start = str(row.get("start_time") or "").strip()[:5]
+        end = str(row.get("end_time") or "").strip()[:5]
+        room = row.get("room") or ""
+        time_text = f"{start}-{end}" if start and end else "chưa rõ giờ"
+        line = f"{idx}. {time_text} - {subject}"
+        if room:
+            line += f" @ {room}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _deadline_callback_key(row: dict) -> str:
+    return str(row.get("course_id") or row.get("id") or "").strip()
+
+
+def _build_deadline_keyboard(rows: list[dict]) -> dict:
+    from course_aliases import shorten_course_name
+
+    buttons = []
+    for row in rows:
+        key = _deadline_callback_key(row)
+        if not key:
+            continue
+        buttons.append([{"text": shorten_course_name(str(row.get("course_name") or "")), "callback_data": f"deadline:{key}"}])
+    return {"inline_keyboard": buttons}
+
+
+def _build_deadline_list_text(rows: list[dict]) -> str:
+    if not rows:
+        return "Không tìm thấy deadline chưa hoàn thành sắp tới."
+    lines = [f"Có {len(rows)} môn có deadline gần nhất:"]
+    from course_aliases import shorten_course_name
+
+    for row in rows:
+        course = shorten_course_name(str(row.get("course_name") or ""))
+        activity = row.get("activity_name") or "Deadline"
+        due = _format_deadline_due(row.get("due_date"))
+        lines.append(f"- {course}: {activity} ({due})")
+    return "\n".join(lines)
+
+
+def _build_deadline_detail_text(row: dict | None) -> str:
+    if not row:
+        return "Không tìm thấy deadline cho môn này."
+    lines = [
+        f"Môn: {row.get('course_name') or 'Môn học'}",
+        f"Deadline: {row.get('activity_name') or 'Deadline'}",
+        f"Hạn nộp: {_format_deadline_due(row.get('due_date'))}",
+    ]
+    if row.get("activity_url"):
+        lines.append(str(row["activity_url"]))
+    return "\n".join(lines)
+
+
+def _format_deadline_due(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "chưa rõ"
+    try:
+        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed.strftime("%d/%m/%Y %H:%M")
+    except ValueError:
+        return text[:16]
+
+
+def _parse_add_appointment_payload(text: str) -> tuple[str, dt.date, str | None, str | None]:
+    fields = _parse_add_fields(text)
+    job = fields["job"] or "Lịch cá nhân"
+    where = fields["where"]
+    if fields["time"]:
+        appt_date, hhmm = _parse_time_field(fields["time"])
+        return job, appt_date, f"{hhmm}:00", where
+    return job, local_today(), None, where
+
+
+def _build_appointment_confirmation(title: str, appt_date: dt.date, start_time: str | None, location: str | None) -> str:
+    conf = f"{CONFIRM_PREFIX} {title} - {appt_date.isoformat()}"
+    if start_time:
+        conf += f" {start_time[:5]}"
+    if location:
+        conf += f" - {location}"
+    return conf + "\nMình đã lưu giúp bạn rồi nè."
+
+
 def _build_today_appointments_text(rows: list[dict]) -> str:
     today = local_today().strftime("%d/%m/%Y")
     lines = [f"Lich hen hom nay ({today}):"]
@@ -349,8 +503,40 @@ def run() -> None:
                     _send_text(token, chat_id, _build_today_appointments_text(rows))
                     continue
 
+                if lowered == "/deadline":
+                    rows = get_nearest_elearning_deadlines()
+                    keyboard = _build_deadline_keyboard(rows)
+                    if rows and keyboard["inline_keyboard"]:
+                        _send_text_with_keyboard(token, chat_id, _build_deadline_list_text(rows), keyboard)
+                    else:
+                        _send_text(token, chat_id, _build_deadline_list_text(rows))
+                    continue
+
+                if lowered.startswith("/schedule") or lowered.startswith("/scheduel"):
+                    parts = text.split(maxsplit=1)
+                    try:
+                        target_date = _parse_schedule_day_arg(parts[1] if len(parts) > 1 else None)
+                    except ValueError as exc:
+                        _send_text(token, chat_id, str(exc))
+                        continue
+                    rows = get_today_class_sessions(target_date=target_date)
+                    _send_text(token, chat_id, _build_schedule_text(rows, target_date))
+                    continue
+
+                if lowered == "/add":
+                    _send_text(token, chat_id, "Nhập lịch theo mẫu:\nThời gian: \nJob: \nWhere: ")
+                    continue
+
                 try:
-                    gemini_payload = parse_appointment_with_gemini(text)
+                    structured_add = any(label in lowered for label in ("thời gian:", "thoi gian:", "time:", "job:", "where:", "địa điểm:", "dia diem:"))
+                    gemini_payload = None
+                    if structured_add:
+                        title, appt_date, start_time, location = _parse_add_appointment_payload(text)
+                        end_time = None
+                        note = None
+                        confidence = None
+                    else:
+                        gemini_payload = parse_appointment_with_gemini(text)
                     if gemini_payload:
                         if gemini_payload.get("needs_clarification", False):
                             question = gemini_payload.get("clarification_question") or (
@@ -368,7 +554,7 @@ def run() -> None:
                             note,
                             confidence,
                         ) = _normalize_gemini_payload(gemini_payload)
-                    else:
+                    elif not structured_add:
                         try:
                             title, appt_date, start_time, location = _parse_input(text)
                         except ValueError:
@@ -388,11 +574,7 @@ def run() -> None:
                         raw_user_input=text,
                         gemini_confidence=confidence,
                     )
-                    conf = f"{CONFIRM_PREFIX} {title} - {appt_date.isoformat()} {start_time[:5]}"
-                    if location:
-                        conf += f" - {location}"
-                    conf += "\nMình đã lưu giúp bạn rồi nè."
-                    _send_text(token, chat_id, conf)
+                    _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
                 except Exception as exc:
                     _send_text(token, chat_id, f"{CREATE_ERROR_PREFIX}: {exc}. Ban thu gui lai giup minh nhe.")
 

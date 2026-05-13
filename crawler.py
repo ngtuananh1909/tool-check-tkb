@@ -1503,6 +1503,174 @@ def _deduplicate_progress_rows(rows: list[dict]) -> list[dict]:
     return deduped
 
 
+def fetch_elearning_deadlines(
+    username: str | None = None,
+    password: str | None = None,
+) -> list[dict]:
+    """Login to eLearning and return nearest incomplete deadline per course."""
+    user = username or os.environ.get("STUDENT_ID")
+    pwd = password or os.environ.get("PASSWORD")
+    if not user or not pwd:
+        raise ValueError("eLearning credentials missing. Set STUDENT_ID and PASSWORD.")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        )
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+        )
+        page = context.new_page()
+        try:
+            page.goto(ELEARNING_LOGIN_URL, wait_until="networkidle", timeout=60_000)
+            page.wait_for_selector(ELEARNING_SELECTOR_USERNAME, state="visible", timeout=30_000)
+            page.fill(ELEARNING_SELECTOR_USERNAME, user)
+            page.fill(ELEARNING_SELECTOR_PASSWORD, pwd)
+            page.locator(ELEARNING_SELECTOR_SUBMIT).first.click(timeout=10_000)
+            page.wait_for_load_state("networkidle", timeout=30_000)
+            if "login" in page.url.lower():
+                raise RuntimeError("eLearning login failed while fetching deadlines.")
+
+            page.goto(ELEARNING_MY_URL, wait_until="networkidle", timeout=60_000)
+            courses = _parse_elearning_courses(page)
+            deadlines: list[dict] = []
+            for course in courses:
+                url = course.get("course_url")
+                if not url:
+                    continue
+                page.goto(url, wait_until="networkidle", timeout=60_000)
+                for row in _parse_elearning_deadlines_on_course(page, course):
+                    deadlines.append(row)
+            return _nearest_deadline_per_course(deadlines)
+        finally:
+            context.close()
+            browser.close()
+
+
+def _parse_elearning_courses(page) -> list[dict]:
+    return page.evaluate(
+        r'''
+        () => Array.from(document.querySelectorAll('a[href*="/course/view.php"]'))
+            .map((a) => ({
+                course_url: a.href,
+                course_name: (a.innerText || a.textContent || '').trim(),
+                course_id: new URL(a.href, window.location.href).searchParams.get('id') || ''
+            }))
+            .filter((row) => row.course_url && row.course_name)
+        '''
+    )
+
+
+def _parse_elearning_deadlines_on_course(page, course: dict) -> list[dict]:
+    raw_rows = page.evaluate(
+        r'''
+        () => {
+            const rows = [];
+            const icons = Array.from(document.querySelectorAll('img[alt*="Not completed"], img[title*="Not completed"], img[src*="completion-manual-n"]'));
+            for (const icon of icons) {
+                const label = icon.getAttribute('alt') || icon.getAttribute('title') || '';
+                const match = label.match(/Not completed:\s*(.+?)(?:\.\s*Select|$)/i);
+                const activityName = match ? match[1].trim() : '';
+                const activity = icon.closest('li.activity, div.activity, div.activity-item, tr, .modtype_assign, .modtype_quiz') || icon.parentElement;
+                const link = activity ? activity.querySelector('a[href*="/mod/"]') : null;
+                rows.push({ activity_name: activityName, activity_url: link ? link.href : '' });
+            }
+            return rows;
+        }
+        '''
+    )
+    deadlines: list[dict] = []
+    seen_urls: set[str] = set()
+    for raw in raw_rows:
+        activity_url = str(raw.get("activity_url") or "").strip()
+        activity_name = str(raw.get("activity_name") or "").strip()
+        if not activity_url or activity_url in seen_urls:
+            continue
+        seen_urls.add(activity_url)
+        try:
+            page.goto(activity_url, wait_until="networkidle", timeout=60_000)
+            due_text = _extract_elearning_due_date_text(page)
+        except Exception as exc:
+            logger.debug("Could not inspect deadline activity %s: %s", activity_url, exc)
+            continue
+        due_date = _parse_elearning_due_date(due_text)
+        if not due_date:
+            continue
+        deadlines.append(
+            {
+                "course_id": str(course.get("course_id") or "").strip(),
+                "course_name": _clean_course_name(str(course.get("course_name") or "")),
+                "activity_name": activity_name or page.title(),
+                "due_date": due_date.isoformat(),
+                "activity_url": activity_url,
+                "completion_status": "incomplete",
+            }
+        )
+    return deadlines
+
+
+def _extract_elearning_due_date_text(page) -> str:
+    return page.evaluate(
+        r'''
+        () => {
+            const cells = Array.from(document.querySelectorAll('th, td, div, span'));
+            for (const cell of cells) {
+                const text = (cell.innerText || cell.textContent || '').trim();
+                if (/^Due date$/i.test(text)) {
+                    const next = cell.nextElementSibling;
+                    if (next) return (next.innerText || next.textContent || '').trim();
+                    const row = cell.closest('tr');
+                    if (row) {
+                        const rowCells = Array.from(row.querySelectorAll('th, td'));
+                        const idx = rowCells.indexOf(cell);
+                        if (idx >= 0 && rowCells[idx + 1]) return (rowCells[idx + 1].innerText || '').trim();
+                    }
+                }
+            }
+            const body = document.body ? document.body.innerText : '';
+            const match = body.match(/Due date\s*\n\s*([^\n]+)/i);
+            return match ? match[1].trim() : '';
+        }
+        '''
+    )
+
+
+def _parse_elearning_due_date(text: str) -> datetime.datetime | None:
+    value = re.sub(r"\s+", " ", str(text or "").strip())
+    if not value:
+        return None
+    value = re.sub(r"^[A-Za-z]+,\s*", "", value)
+    for fmt in ("%d %B %Y, %I:%M %p", "%d %b %Y, %I:%M %p", "%d/%m/%Y, %H:%M", "%d/%m/%Y %H:%M"):
+        try:
+            parsed = datetime.datetime.strptime(value, fmt)
+            return parsed.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=7)))
+        except ValueError:
+            continue
+    return None
+
+
+def _nearest_deadline_per_course(rows: list[dict]) -> list[dict]:
+    now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=7)))
+    nearest: dict[str, dict] = {}
+    for row in rows:
+        try:
+            due_date = datetime.datetime.fromisoformat(str(row.get("due_date")))
+        except ValueError:
+            continue
+        if due_date < now:
+            continue
+        key = str(row.get("course_id") or row.get("course_name") or "").strip()
+        current = nearest.get(key)
+        if current is None or due_date.isoformat() < str(current.get("due_date")):
+            nearest[key] = row
+    return sorted(nearest.values(), key=lambda item: str(item.get("due_date")))
+
+
 def _clean_course_name(name: str) -> str:
     """Normalize noisy Moodle card labels to human-readable course names."""
     text = str(name or "").strip()

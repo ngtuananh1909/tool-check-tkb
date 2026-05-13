@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: tool-check-tkb-webhook
+    env: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: APP_TIMEZONE
+        value: Asia/Ho_Chi_Minh
+      - key: PORT
+        value: 8000
+      - key: STUDENT_ID
+        sync: false
+      - key: PASSWORD
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: TELEGRAM_WEBHOOK_URL
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        generateValue: true
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GOOGLE_CALENDAR_ID
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false

@@ -1,4 +1,5 @@
 {
+  "note": "Legacy Railway config. Render deployment uses render.yaml.",
   "$schema": "https://railway.app/schema.json",
   "build": {
     "builder": "dockerfile",

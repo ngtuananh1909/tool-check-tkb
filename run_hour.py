@@ -83,6 +83,7 @@ def run_hourly_sync() -> None:
     logger.info("Step 1: Crawling schedule from TDTU portal")
     try:
         from crawler import (
+            fetch_elearning_deadlines,
             fetch_elearning_progress,
             fetch_exam_schedule,
             fetch_schedule,
@@ -97,6 +98,9 @@ def run_hourly_sync() -> None:
 
         elearning_progress = fetch_elearning_progress()
         logger.debug("eLearning crawler returned %d progress row(s).", len(elearning_progress))
+
+        elearning_deadlines = fetch_elearning_deadlines()
+        logger.debug("eLearning deadline crawler returned %d row(s).", len(elearning_deadlines))
     except Exception as exc:
         logger.exception("Step 1 failed after %.2fs", time.perf_counter() - step_started)
         _handle_error("Crawler failed", exc)
@@ -109,6 +113,7 @@ def run_hourly_sync() -> None:
     try:
         from database import (
             materialize_class_sessions,
+            upsert_elearning_deadlines,
             upsert_elearning_progress,
             upsert_exams,
             upsert_actual_class_sessions,
@@ -124,10 +129,12 @@ def run_hourly_sync() -> None:
 
         exam_rows = upsert_exams(exams, student_id=student_id)
         progress_rows = upsert_elearning_progress(elearning_progress, student_id=student_id)
+        deadline_rows = upsert_elearning_deadlines(elearning_deadlines, student_id=student_id)
         logger.debug("Supabase update complete.")
         logger.debug("Class sessions materialized: %d row(s).", materialized)
         logger.debug("Exams upserted: %d row(s).", exam_rows)
         logger.debug("eLearning progress upserted: %d row(s).", progress_rows)
+        logger.debug("eLearning deadlines upserted: %d row(s).", deadline_rows)
     except Exception as exc:
         logger.exception("Step 2 failed after %.2fs", time.perf_counter() - step_started)
         _handle_error("Database update failed", exc)

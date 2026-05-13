@@ -40,6 +40,7 @@ APPOINTMENTS_TABLE = "appointments"
 CLASS_SESSIONS_TABLE = "class_sessions"
 EXAMS_TABLE = "exams"
 ELEARNING_PROGRESS_TABLE = "elearning_progress"
+ELEARNING_DEADLINES_TABLE = "elearning_deadlines"
 CALENDAR_SYNC_STATE_TABLE = "calendar_sync_state"
 _RETRYABLE_NETWORK_ERRORS = (httpx.RequestError, OSError, socket.gaierror)
 
@@ -802,6 +803,108 @@ def upsert_elearning_progress(progress_rows: list[dict], student_id: str | None 
     return len(payload_rows)
 
 
+def upsert_elearning_deadlines(deadline_rows: list[dict], student_id: str | None = None) -> int:
+    """Upsert nearest incomplete eLearning deadline rows by course."""
+    sid = student_id or os.environ.get("STUDENT_ID")
+    if not sid:
+        raise ValueError("student_id is required; set STUDENT_ID env var.")
+
+    nearest_by_course: dict[str, dict] = {}
+    for row in deadline_rows:
+        course_name = str(row.get("course_name") or row.get("subject_name") or "").strip()
+        activity_name = str(row.get("activity_name") or "").strip()
+        due_date = str(row.get("due_date") or "").strip()
+        if not course_name or not activity_name or not due_date:
+            continue
+
+        course_id = str(row.get("course_id") or "").strip()
+        if not course_id:
+            course_id = hashlib.sha256(course_name.lower().encode("utf-8")).hexdigest()[:16]
+
+        source_signature = str(row.get("source_signature") or "").strip()
+        if not source_signature:
+            source_signature = _elearning_deadline_signature(sid, course_id, activity_name, due_date)
+
+        payload = {
+            "student_id": sid,
+            "course_id": course_id,
+            "course_name": course_name,
+            "activity_name": activity_name,
+            "due_date": due_date,
+            "activity_url": str(row.get("activity_url") or "").strip() or None,
+            "completion_status": "incomplete",
+            "source_signature": source_signature,
+        }
+        current = nearest_by_course.get(course_id)
+        if current is None or payload["due_date"] < current["due_date"]:
+            nearest_by_course[course_id] = payload
+
+    payload_rows = list(nearest_by_course.values())
+    if not payload_rows:
+        logger.info("No eLearning deadline rows to upsert.")
+        return 0
+
+    client = _get_client(for_write=True)
+    try:
+        _execute_with_retry(
+            "Supabase eLearning deadline upsert",
+            lambda: (
+                client.table(ELEARNING_DEADLINES_TABLE)
+                .upsert(payload_rows, on_conflict="student_id,course_id")
+                .execute()
+            ),
+        )
+    except APIError as exc:
+        detail = str(exc)
+        if "PGRST205" in detail or "Could not find the table" in detail:
+            logger.warning(
+                "Table '%s' is not available yet. Run supabase/init_tables.sql to enable eLearning deadlines.",
+                ELEARNING_DEADLINES_TABLE,
+            )
+            return 0
+        if "42501" in detail or "row-level security" in detail.lower():
+            raise RuntimeError(
+                "Supabase write blocked by RLS for eLearning deadlines. "
+                "Set SUPABASE_SERVICE_ROLE_KEY or create INSERT/UPDATE policies on 'elearning_deadlines'."
+            ) from exc
+        raise
+
+    logger.info("Upserted %d eLearning deadline row(s).", len(payload_rows))
+    return len(payload_rows)
+
+
+def get_nearest_elearning_deadlines(student_id: str | None = None) -> list[dict]:
+    """Return nearest incomplete eLearning deadline per course for Telegram."""
+    sid = student_id or os.environ.get("STUDENT_ID")
+    if not sid:
+        raise ValueError("student_id is required; set STUDENT_ID env var.")
+
+    client = _get_client(for_write=False)
+    try:
+        response = _execute_with_retry(
+            "Supabase eLearning deadline query",
+            lambda: (
+                client.table(ELEARNING_DEADLINES_TABLE)
+                .select("id, course_id, course_name, activity_name, due_date, activity_url, completion_status")
+                .eq("student_id", sid)
+                .eq("completion_status", "incomplete")
+                .order("due_date", desc=False)
+                .execute()
+            ),
+        )
+    except APIError as exc:
+        detail = str(exc)
+        if "PGRST205" in detail or "Could not find the table" in detail:
+            logger.warning(
+                "Table '%s' is not available yet. Run supabase/init_tables.sql to enable eLearning deadlines.",
+                ELEARNING_DEADLINES_TABLE,
+            )
+            return []
+        raise
+
+    return response.data or []
+
+
 def get_latest_elearning_progress(student_id: str | None = None, limit: int = 20) -> list[dict]:
     """Return latest eLearning progress rows for the student."""
     sid = student_id or os.environ.get("STUDENT_ID")
@@ -1310,6 +1413,23 @@ def _elearning_signature(
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
     return f"elearning:{digest}"
+
+
+def _elearning_deadline_signature(
+    student_id: str,
+    course_id: str,
+    activity_name: str,
+    due_date: str,
+) -> str:
+    payload = {
+        "student_id": student_id,
+        "course_id": course_id,
+        "activity_name": activity_name,
+        "due_date": due_date,
+    }
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return f"deadline:{digest}"
 
 
 def _normalize_time_value(value: object) -> str | None:

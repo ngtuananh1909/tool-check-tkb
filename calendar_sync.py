@@ -464,7 +464,7 @@ def _build_sync_items(
         payload = {
             "summary": subject,
             "location": room,
-            "description": "Lich hoc duoc dong bo tu Supabase.",
+            "description": _class_session_status_description(cls),
             "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
         }
@@ -630,6 +630,18 @@ def _build_sync_items(
     return items
 
 
+def _class_session_status_description(session: dict) -> str:
+    labels = {
+        "scheduled": "Học bình thường",
+        "absent": "Báo vắng",
+        "makeup": "Học bù",
+        "cancelled": "Đã hủy",
+        "moved": "Đã chuyển lịch",
+    }
+    status = str(session.get("status") or "scheduled").strip().lower()
+    return labels.get(status, "Học bình thường")
+
+
 def _build_sync_items_from_sessions(
     class_sessions: list[dict],
     appointments: list[dict],
@@ -646,7 +658,7 @@ def _build_sync_items_from_sessions(
     for session in class_sessions:
         subject = str(session.get("subject_name") or "").strip() or "Lop hoc"
         room = str(session.get("room") or "").strip() or None
-        notes = str(session.get("notes") or "").strip() or "Lich hoc thuc te tu class_sessions."
+        notes = _class_session_status_description(session)
         session_date = _parse_date(session.get("session_date"), target_date)
         session_id = str(session.get("id") or "").strip()
 

@@ -1,16 +1,18 @@
-# Environment files
+# Environment files and secrets
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*service-account*.json
+amazing-smile-441004-j1-58a596defc04.json
 
 # Personal contact data
 contact.txt
 
-.venv
-__pycache__/
-*.pyc
-*service-account*.json
-amazing-smile-441004-j1-58a596defc04.json
+# Virtual environments
+.venv/
+venv/
 
 # Python caches and artifacts
 __pycache__/
@@ -23,8 +25,8 @@ __pycache__/
 build/
 dist/
 *.egg
-tests/
-plan.md 
+plan.md
+
 # Runtime files
 *.log
 

@@ -22,16 +22,30 @@ from contextlib import asynccontextmanager
 import requests
 from fastapi import FastAPI, Header, HTTPException, Request
 
-from database import create_appointment, get_today_appointments
+from database import (
+    create_appointment,
+    get_nearest_elearning_deadlines,
+    get_today_appointments,
+    get_today_class_sessions,
+)
 from gemini_parser import parse_appointment_with_gemini
 from telegram_mvp_bot import (
     _build_conversational_reply,
+    _build_appointment_confirmation,
+    _build_deadline_detail_text,
+    _build_deadline_keyboard,
+    _build_deadline_list_text,
+    _build_schedule_text,
     _build_today_appointments_text,
+    _deadline_callback_key,
     _looks_like_appointment_message,
     _normalize_chat_id,
     _normalize_gemini_payload,
+    _parse_add_appointment_payload,
     _parse_input,
+    _parse_schedule_day_arg,
     _send_text,
+    _send_text_with_keyboard,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,7 +77,7 @@ def _load_env() -> tuple[str, str, str, str | None]:
 def _register_webhook(token: str, webhook_url: str, webhook_secret: str | None) -> None:
     payload: dict[str, object] = {
         "url": webhook_url,
-        "allowed_updates": ["message"],
+        "allowed_updates": ["message", "callback_query"],
         "drop_pending_updates": True,
     }
     if webhook_secret:
@@ -142,6 +156,26 @@ async def telegram_webhook(
         raise HTTPException(status_code=401, detail="Invalid webhook secret token")
 
     payload = await request.json()
+    callback_query = payload.get("callback_query") or {}
+    if callback_query:
+        message = callback_query.get("message") or {}
+        chat_id = _normalize_chat_id((message.get("chat") or {}).get("id"))
+        if allowed_chat_id and chat_id != allowed_chat_id:
+            logger.info("Ignore callback from unauthorized chat_id=%s", chat_id)
+            return {"ok": True}
+        data = str(callback_query.get("data") or "")
+        if data.startswith("deadline:"):
+            key = data.split(":", 1)[1]
+            rows = get_nearest_elearning_deadlines()
+            selected = next((row for row in rows if _deadline_callback_key(row) == key), None)
+            requests.post(
+                _telegram_api(token, "answerCallbackQuery"),
+                json={"callback_query_id": callback_query.get("id")},
+                timeout=10,
+            )
+            _send_text(token, chat_id, _build_deadline_detail_text(selected))
+        return {"ok": True}
+
     message = payload.get("message") or {}
     text = (message.get("text") or "").strip()
     chat_id = _normalize_chat_id((message.get("chat") or {}).get("id"))
@@ -173,7 +207,32 @@ async def telegram_webhook(
             _send_text(token, chat_id, _build_today_appointments_text(rows))
             return {"ok": True}
 
-        gemini_payload = parse_appointment_with_gemini(text)
+        if lowered == "/deadline":
+            rows = get_nearest_elearning_deadlines()
+            keyboard = _build_deadline_keyboard(rows)
+            if rows and keyboard["inline_keyboard"]:
+                _send_text_with_keyboard(token, chat_id, _build_deadline_list_text(rows), keyboard)
+            else:
+                _send_text(token, chat_id, _build_deadline_list_text(rows))
+            return {"ok": True}
+
+        if lowered.startswith("/schedule") or lowered.startswith("/scheduel"):
+            parts = text.split(maxsplit=1)
+            try:
+                target_date = _parse_schedule_day_arg(parts[1] if len(parts) > 1 else None)
+            except ValueError as exc:
+                _send_text(token, chat_id, str(exc))
+                return {"ok": True}
+            rows = get_today_class_sessions(target_date=target_date)
+            _send_text(token, chat_id, _build_schedule_text(rows, target_date))
+            return {"ok": True}
+
+        if lowered == "/add":
+            _send_text(token, chat_id, "Nhập lịch theo mẫu:\nThời gian: \nJob: \nWhere: ")
+            return {"ok": True}
+
+        structured_add = any(label in lowered for label in ("thời gian:", "thoi gian:", "time:", "job:", "where:", "địa điểm:", "dia diem:"))
+        gemini_payload = None if structured_add else parse_appointment_with_gemini(text)
         if gemini_payload:
             if gemini_payload.get("needs_clarification", False):
                 if _looks_like_appointment_message(text):
@@ -194,6 +253,15 @@ async def telegram_webhook(
                 note,
                 confidence,
             ) = _normalize_gemini_payload(gemini_payload)
+        elif structured_add:
+            try:
+                title, appt_date, start_time, location = _parse_add_appointment_payload(text)
+            except ValueError as exc:
+                _send_text(token, chat_id, str(exc))
+                return {"ok": True}
+            end_time = None
+            note = None
+            confidence = None
         else:
             try:
                 title, appt_date, start_time, location = _parse_input(text)
@@ -215,11 +283,7 @@ async def telegram_webhook(
             gemini_confidence=confidence,
         )
 
-        conf = f"OK. Da tao lich hen: {title} - {appt_date.isoformat()} {start_time[:5]}"
-        if location:
-            conf += f" - {location}"
-        conf += "\nMình đã lưu giúp bạn rồi nè."
-        _send_text(token, chat_id, conf)
+        _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
         return {"ok": True}
     except Exception as exc:
         logger.exception("Webhook processing failed: %s", exc)
