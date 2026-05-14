@@ -57,7 +57,6 @@ def main() -> None:
     logger.info("=== Fetching today's schedule and appointments ===")
     try:
         from database import (
-            get_latest_elearning_progress,
             get_today_appointments,
             get_today_class_sessions,
             get_today_schedule,
@@ -72,11 +71,9 @@ def main() -> None:
 
         today_appointments = get_today_appointments(student_id=student_id)
         upcoming_exams = get_upcoming_exams(student_id=student_id, days_ahead=7)
-        elearning_progress = get_latest_elearning_progress(student_id=student_id, limit=20)
         logger.info("Today has %d class(es).", len(today_classes))
         logger.info("Today has %d appointment(s).", len(today_appointments))
         logger.info("Upcoming exam set has %d row(s).", len(upcoming_exams))
-        logger.info("eLearning progress set has %d row(s).", len(elearning_progress))
     except Exception as exc:
         _handle_fatal("Failed to fetch today's data", exc)
         return
@@ -91,7 +88,6 @@ def main() -> None:
             today_classes,
             today_appointments,
             upcoming_exams=upcoming_exams,
-            elearning_progress=elearning_progress,
         )
         logger.info("Telegram notification sent successfully.")
     except Exception as exc:

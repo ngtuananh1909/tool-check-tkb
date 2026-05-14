@@ -2,7 +2,13 @@ import datetime as dt
 import unittest
 
 from course_aliases import shorten_course_name
-from telegram_mvp_bot import _parse_add_fields, _parse_schedule_day_arg
+from telegram_mvp_bot import (
+    _build_deadline_detail_text,
+    _build_deadline_list_text,
+    _format_deadline_due,
+    _parse_add_fields,
+    _parse_schedule_day_arg,
+)
 
 
 class BotHelperTests(unittest.TestCase):
@@ -16,6 +22,36 @@ class BotHelperTests(unittest.TestCase):
             shorten_course_name("503071 - Lập trình Web nâng cao - Nhóm 01"),
             "Lập trình Web nâng cao",
         )
+
+    def test_course_name_auto_removes_moodle_prefix_but_keeps_group_suffix(self) -> None:
+        self.assertEqual(
+            shorten_course_name("HK2_2025_501032_Đại số tuyến tính cho Công nghệ thông tin_N02"),
+            "Đại số tuyến tính cho Công nghệ thông tin_N02",
+        )
+
+    def test_format_deadline_due_uses_vietnam_local_time(self) -> None:
+        self.assertEqual(_format_deadline_due("2026-05-20T00:00:00+07:00"), "20/05/2026 00:00")
+        self.assertEqual(_format_deadline_due("2026-05-19T17:00:00+00:00"), "20/05/2026 00:00")
+
+    def test_deadline_text_includes_progress_when_present(self) -> None:
+        rows = [
+            {
+                "course_id": "501032",
+                "course_name": "HK2_2025_501032_Đại số tuyến tính cho Công nghệ thông tin_N02",
+                "activity_name": "Bài tập cuối kỳ",
+                "due_date": "2026-05-20T00:00:00+07:00",
+                "progress_percent": 75,
+                "lessons_completed": 15,
+                "lessons_total": 20,
+            }
+        ]
+
+        list_text = _build_deadline_list_text(rows)
+        detail_text = _build_deadline_detail_text(rows[0])
+
+        self.assertIn("Đại số tuyến tính cho Công nghệ thông tin_N02", list_text)
+        self.assertIn("75%", list_text)
+        self.assertIn("Tiến độ: 75% (15/20 bài)", detail_text)
 
     def test_parse_schedule_day_arg_supports_vietnamese_relative_and_weekday(self) -> None:
         today = dt.date(2026, 5, 13)

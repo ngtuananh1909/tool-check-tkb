@@ -901,7 +901,17 @@ def get_nearest_elearning_deadlines(student_id: str | None = None) -> list[dict]
             return []
         raise
 
-    return response.data or []
+    rows = response.data or []
+    progress_rows = get_latest_elearning_progress(student_id=sid, limit=100)
+    progress_by_course = {str(row.get("course_id") or ""): row for row in progress_rows}
+    for row in rows:
+        progress = progress_by_course.get(str(row.get("course_id") or ""))
+        if not progress:
+            continue
+        row["progress_percent"] = progress.get("progress_percent")
+        row["lessons_completed"] = progress.get("lessons_completed")
+        row["lessons_total"] = progress.get("lessons_total")
+    return rows
 
 
 def get_latest_elearning_progress(student_id: str | None = None, limit: int = 20) -> list[dict]:

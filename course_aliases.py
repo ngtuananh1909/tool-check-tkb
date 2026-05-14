@@ -16,9 +16,10 @@ def shorten_course_name(full_name: str, aliases: dict[str, str] | None = None) -
     if name in merged_aliases:
         return merged_aliases[name]
 
-    text = re.sub(r"^[A-Z0-9_.-]{3,}\s*[-–:]\s*", "", name, flags=re.IGNORECASE)
+    text = re.sub(r"^HK\d+_\d{4}_\d{5,}_", "", name, flags=re.IGNORECASE)
+    text = re.sub(r"^[A-Z0-9_.-]{3,}\s*[-–:]\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*[-–:]\s*(nhóm|nhom|group|lớp|lop)\s*\w+\s*$", "", text, flags=re.IGNORECASE)
     text = text.strip(" -–:")
-    if len(text) <= 28:
+    if len(text) <= 64:
         return text
-    return text[:25].rstrip() + "..."
+    return text[:61].rstrip() + "..."

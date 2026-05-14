@@ -104,6 +104,15 @@ class WebhookAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()["api_key_set"])
 
+    def test_register_command_menu_sets_telegram_commands(self) -> None:
+        with patch.object(webhook_app, "_telegram_post", return_value={"ok": True}) as telegram_post:
+            webhook_app._register_command_menu("test-token")
+
+        telegram_post.assert_called_once()
+        self.assertEqual(telegram_post.call_args.args[1], "setMyCommands")
+        commands = telegram_post.call_args.args[2]["commands"]
+        self.assertEqual([command["command"] for command in commands], ["start", "today", "schedule", "deadline", "add"])
+
 
 if __name__ == "__main__":
     unittest.main()

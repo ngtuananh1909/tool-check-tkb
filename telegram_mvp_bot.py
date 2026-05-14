@@ -47,13 +47,15 @@ logging.basicConfig(
 )
 
 HELP_TEXT = (
-    "Hi ban, minh san sang ghi lich cho ban ne.\n"
-    "Nhap theo mau:\n"
-    "tieude-thoigian-diadiem(optional)\n\n"
-    "Vi du:\n"
-    "hop nhom-15/04 14:00-B402\n"
-    "di kham-2026-04-16 09:30\n"
-    "gym-18:00"
+    "Hi ban, minh san sang ho tro ban ne.\n\n"
+    "Lenh co san:\n"
+    "/today - Xem lich hen hom nay\n"
+    "/schedule - Xem lich hoc\n"
+    "/deadline - Xem deadline eLearning\n"
+    "/add - Them lich hen theo mau\n\n"
+    "Nhap lich nhanh theo mau:\n"
+    "tieude-thoigian-diadiem(optional)\n"
+    "Vi du: hop nhom-15/04 14:00-B402"
 )
 
 CLARIFICATION_FALLBACK_TEXT = (
@@ -355,6 +357,21 @@ def _build_deadline_keyboard(rows: list[dict]) -> dict:
     return {"inline_keyboard": buttons}
 
 
+def _format_progress(row: dict) -> str:
+    percent = row.get("progress_percent")
+    if percent is None:
+        return ""
+    try:
+        percent_text = f"{float(percent):.0f}%"
+    except (TypeError, ValueError):
+        return ""
+    completed = row.get("lessons_completed")
+    total = row.get("lessons_total")
+    if completed is not None and total is not None:
+        return f"{percent_text} ({completed}/{total} bài)"
+    return percent_text
+
+
 def _build_deadline_list_text(rows: list[dict]) -> str:
     if not rows:
         return "Không tìm thấy deadline chưa hoàn thành sắp tới."
@@ -365,18 +382,25 @@ def _build_deadline_list_text(rows: list[dict]) -> str:
         course = shorten_course_name(str(row.get("course_name") or ""))
         activity = row.get("activity_name") or "Deadline"
         due = _format_deadline_due(row.get("due_date"))
-        lines.append(f"- {course}: {activity} ({due})")
+        progress = _format_progress(row)
+        suffix = f" - {progress}" if progress else ""
+        lines.append(f"- {course}: {activity} ({due}){suffix}")
     return "\n".join(lines)
 
 
 def _build_deadline_detail_text(row: dict | None) -> str:
     if not row:
         return "Không tìm thấy deadline cho môn này."
+    from course_aliases import shorten_course_name
+
     lines = [
-        f"Môn: {row.get('course_name') or 'Môn học'}",
+        f"Môn: {shorten_course_name(str(row.get('course_name') or 'Môn học'))}",
         f"Deadline: {row.get('activity_name') or 'Deadline'}",
         f"Hạn nộp: {_format_deadline_due(row.get('due_date'))}",
     ]
+    progress = _format_progress(row)
+    if progress:
+        lines.append(f"Tiến độ: {progress}")
     if row.get("activity_url"):
         lines.append(str(row["activity_url"]))
     return "\n".join(lines)
@@ -386,8 +410,13 @@ def _format_deadline_due(value: object) -> str:
     text = str(value or "").strip()
     if not text:
         return "chưa rõ"
+    vietnam_tz = dt.timezone(dt.timedelta(hours=7))
     try:
         parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=vietnam_tz)
+        else:
+            parsed = parsed.astimezone(vietnam_tz)
         return parsed.strftime("%d/%m/%Y %H:%M")
     except ValueError:
         return text[:16]

@@ -75,6 +75,14 @@ class CrawlerParserTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["course_name"], "HK2_2025_501032_Đại số tuyến tính cho Công nghệ thông tin_N02")
 
+    def test_parse_elearning_due_date_treats_midnight_as_local_time(self) -> None:
+        from crawler import _parse_elearning_due_date
+
+        parsed = _parse_elearning_due_date("Wednesday, 20 May 2026, 12:00 AM")
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.isoformat(), "2026-05-20T00:00:00+07:00")
+
     def test_parse_elearning_dashboard_deadlines_extracts_timeline_items(self) -> None:
         self.page.set_content(
             """

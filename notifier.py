@@ -251,28 +251,6 @@ def _build_combined_message(
                 lines.append(f"   📍 {room}")
         lines.append("")
 
-    lines.append("📚 *Tiến độ eLearning theo môn*")
-    if not elearning_progress:
-        lines += ["Chưa có dữ liệu tiến độ\\.", ""]
-    else:
-        for row in elearning_progress[:12]:
-            course_name = _escape(_compact_course_name(row.get("course_name") or "N/A"))
-            percent = row.get("progress_percent")
-            try:
-                percent_text = f"{float(percent):.0f}%"
-            except (TypeError, ValueError):
-                percent_text = "0%"
-            lessons_completed = row.get("lessons_completed")
-            lessons_total = row.get("lessons_total")
-
-            progress_label = _escape(percent_text)
-            detail = ""
-            if lessons_completed is not None and lessons_total is not None:
-                detail = f" ┊ ✅ {_escape(str(lessons_completed))}/{_escape(str(lessons_total))}"
-
-            lines.append(f"• 📘 {course_name} ┊ 📈 *{progress_label}*{detail}")
-        lines.append("")
-
     lines.append("_Hom nay minh luon dong hanh cung ban, co gi can thi nhan minh nha\\!_")
     return "\n".join(lines)
 
@@ -302,16 +280,13 @@ def _format_class_status(status: object) -> str:
 
 def _compact_course_name(name: object) -> str:
     """Shorten noisy eLearning course labels for compact Telegram output."""
+    from course_aliases import shorten_course_name
+
     text = str(name or "").strip()
     if not text:
         return "N/A"
-
-    text = re.sub(r"\s+", " ", text)
-    text = text.replace("_", " ")
-    text = re.sub(r"^HK\d+\s+\d{4}\s+\d{5,}\s+", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^HK\d+\s+\d{4}\s+", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^course\s*name\s*", "", text, flags=re.IGNORECASE)
-    return text.strip(" -")
+    return shorten_course_name(text)
 
 
 def _send_message(token: str, chat_id: str, text: str) -> None:

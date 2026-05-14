@@ -143,6 +143,20 @@ def _register_webhook(token: str, webhook_url: str, webhook_secret: str | None) 
         logger.warning("Could not fetch Telegram webhook info after registration: %s", exc)
 
 
+def _register_command_menu(token: str) -> None:
+    commands = [
+        {"command": "start", "description": "Hướng dẫn sử dụng bot"},
+        {"command": "today", "description": "Xem lịch hẹn hôm nay"},
+        {"command": "schedule", "description": "Xem lịch học"},
+        {"command": "deadline", "description": "Xem deadline eLearning"},
+        {"command": "add", "description": "Thêm lịch hẹn theo mẫu"},
+    ]
+    result = _telegram_post(token, "setMyCommands", {"commands": commands})
+    if not result.get("ok"):
+        raise RuntimeError(f"Failed to register Telegram command menu: {result}")
+    logger.info("Telegram command menu registered with %d command(s).", len(commands))
+
+
 def _delete_webhook(token: str) -> None:
     try:
         response = requests.post(
@@ -167,6 +181,11 @@ async def lifespan(app: FastAPI):
             logger.warning("Webhook auto-registration failed: %s", exc)
     else:
         logger.info("TELEGRAM_WEBHOOK_URL not set; webhook auto-registration skipped.")
+
+    try:
+        _register_command_menu(token)
+    except Exception as exc:
+        logger.warning("Command menu registration failed: %s", exc)
 
     yield
 
