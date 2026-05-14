@@ -147,7 +147,9 @@ def _resolve_supabase_key(for_write: bool) -> str:
 
 def _get_client(for_write: bool = False) -> Client:
     """Create and return a Supabase client using env vars."""
-    url = os.environ["SUPABASE_URL"]
+    url = os.environ["SUPABASE_URL"].rstrip("/")
+    if url.endswith("/rest/v1"):
+        url = url[: -len("/rest/v1")]
     key = _resolve_supabase_key(for_write=for_write)
     return create_client(url, key)
 
@@ -804,12 +806,12 @@ def upsert_elearning_progress(progress_rows: list[dict], student_id: str | None 
 
 
 def upsert_elearning_deadlines(deadline_rows: list[dict], student_id: str | None = None) -> int:
-    """Upsert nearest incomplete eLearning deadline rows by course."""
+    """Upsert incomplete eLearning deadline rows by activity."""
     sid = student_id or os.environ.get("STUDENT_ID")
     if not sid:
         raise ValueError("student_id is required; set STUDENT_ID env var.")
 
-    nearest_by_course: dict[str, dict] = {}
+    payload_rows: list[dict] = []
     for row in deadline_rows:
         course_name = str(row.get("course_name") or row.get("subject_name") or "").strip()
         activity_name = str(row.get("activity_name") or "").strip()
@@ -825,21 +827,18 @@ def upsert_elearning_deadlines(deadline_rows: list[dict], student_id: str | None
         if not source_signature:
             source_signature = _elearning_deadline_signature(sid, course_id, activity_name, due_date)
 
-        payload = {
-            "student_id": sid,
-            "course_id": course_id,
-            "course_name": course_name,
-            "activity_name": activity_name,
-            "due_date": due_date,
-            "activity_url": str(row.get("activity_url") or "").strip() or None,
-            "completion_status": "incomplete",
-            "source_signature": source_signature,
-        }
-        current = nearest_by_course.get(course_id)
-        if current is None or payload["due_date"] < current["due_date"]:
-            nearest_by_course[course_id] = payload
-
-    payload_rows = list(nearest_by_course.values())
+        payload_rows.append(
+            {
+                "student_id": sid,
+                "course_id": course_id,
+                "course_name": course_name,
+                "activity_name": activity_name,
+                "due_date": due_date,
+                "activity_url": str(row.get("activity_url") or "").strip() or None,
+                "completion_status": "incomplete",
+                "source_signature": source_signature,
+            }
+        )
     if not payload_rows:
         logger.info("No eLearning deadline rows to upsert.")
         return 0
@@ -850,7 +849,7 @@ def upsert_elearning_deadlines(deadline_rows: list[dict], student_id: str | None
             "Supabase eLearning deadline upsert",
             lambda: (
                 client.table(ELEARNING_DEADLINES_TABLE)
-                .upsert(payload_rows, on_conflict="student_id,course_id")
+                .upsert(payload_rows, on_conflict="student_id,source_signature")
                 .execute()
             ),
         )

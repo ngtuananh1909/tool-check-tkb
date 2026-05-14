@@ -19,5 +19,8 @@ def _load_dotenv_file(path: Path = Path(".env")) -> None:
 if __name__ == "__main__":
     _load_dotenv_file()
     rows = fetch_elearning_deadlines()
+    output_path = Path("subject_deadlines.json")
+    output_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(rows, ensure_ascii=False, indent=2))
     print(f"Nearest incomplete deadlines: {len(rows)}")
+    print(f"Wrote subject deadlines to {output_path}")

@@ -157,7 +157,7 @@ create index if not exists idx_elearning_progress_student_updated
     on public.elearning_progress (student_id, last_updated desc);
 
 -- ---------------------------------------------------------------------------
--- 6) eLearning nearest deadlines table
+-- 6) eLearning deadlines table
 -- ---------------------------------------------------------------------------
 create table if not exists public.elearning_deadlines (
     id bigserial primary key,
@@ -173,8 +173,28 @@ create table if not exists public.elearning_deadlines (
     updated_at timestamptz not null default now(),
     constraint chk_elearning_deadlines_completion
         check (completion_status in ('incomplete', 'complete')),
-    constraint uq_elearning_deadlines_course unique (student_id, course_id)
+    constraint uq_elearning_deadlines_signature unique (student_id, source_signature)
 );
+
+alter table public.elearning_deadlines
+    drop constraint if exists uq_elearning_deadlines_course;
+
+alter table public.elearning_deadlines
+    drop constraint if exists uq_elearning_deadlines;
+
+do $$
+begin
+    if not exists (
+        select 1
+        from pg_constraint
+        where conname = 'uq_elearning_deadlines_signature'
+          and conrelid = 'public.elearning_deadlines'::regclass
+    ) then
+        alter table public.elearning_deadlines
+            add constraint uq_elearning_deadlines_signature
+            unique (student_id, source_signature);
+    end if;
+end $$;
 
 create index if not exists idx_elearning_deadlines_student_due
     on public.elearning_deadlines (student_id, due_date);

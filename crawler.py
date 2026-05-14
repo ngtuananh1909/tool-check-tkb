@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import datetime
+import hashlib
 from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
@@ -1537,19 +1538,110 @@ def fetch_elearning_deadlines(
                 raise RuntimeError("eLearning login failed while fetching deadlines.")
 
             page.goto(ELEARNING_MY_URL, wait_until="networkidle", timeout=60_000)
+            dashboard_deadlines = _parse_elearning_dashboard_deadlines(page)
             courses = _parse_elearning_courses(page)
-            deadlines: list[dict] = []
-            for course in courses:
-                url = course.get("course_url")
-                if not url:
-                    continue
-                page.goto(url, wait_until="networkidle", timeout=60_000)
-                for row in _parse_elearning_deadlines_on_course(page, course):
-                    deadlines.append(row)
-            return _nearest_deadline_per_course(deadlines)
+            return _deduplicate_elearning_deadlines(
+                dashboard_deadlines + _collect_elearning_course_deadlines(page, courses)
+            )
         finally:
             context.close()
             browser.close()
+
+
+def _collect_elearning_course_deadlines(page, courses: list[dict], parse_course=None) -> list[dict]:
+    if parse_course is None:
+        parse_course = _parse_elearning_deadlines_on_course
+    deadlines: list[dict] = []
+    for course in courses:
+        url = course.get("course_url")
+        if not url:
+            continue
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+        except PlaywrightTimeoutError:
+            logger.warning("Skipped eLearning course after navigation timeout: %s (%s)", course.get("course_name"), url)
+            continue
+        for row in parse_course(page, course):
+            deadlines.append(row)
+    return deadlines
+
+
+def _deduplicate_elearning_deadlines(rows: list[dict]) -> list[dict]:
+    deduped: dict[str, dict] = {}
+    for row in rows:
+        activity_url = str(row.get("activity_url") or "").strip()
+        key = activity_url or "|".join(
+            str(row.get(field) or "").strip()
+            for field in ("course_id", "activity_name", "due_date")
+        )
+        if not key:
+            continue
+        current = deduped.get(key)
+        if current is None:
+            deduped[key] = row
+            continue
+        current_name = str(current.get("course_name") or "").strip().lower()
+        candidate_name = str(row.get("course_name") or "").strip().lower()
+        if current_name in {"", "image"} and candidate_name not in {"", "image"}:
+            deduped[key] = row
+    return sorted(deduped.values(), key=lambda item: str(item.get("due_date") or ""))
+
+
+def _parse_elearning_dashboard_deadlines(page) -> list[dict]:
+    raw_rows = page.evaluate(
+        r'''
+        () => {
+            const rows = [];
+            const containers = Array.from(document.querySelectorAll('[data-event-id], .event, .timeline-event, .block-timeline .list-group-item, [data-region="event-list-item"]'));
+            for (const item of containers) {
+                const text = (item.innerText || item.textContent || '').trim();
+                const activityLink = item.querySelector('a[href*="/mod/"]');
+                if (!activityLink) continue;
+
+                const courseLink = item.querySelector('a[href*="/course/view.php"]');
+                const timeNode = item.querySelector('time[datetime]');
+                const dueTextMatch = text.match(/Due date\s*:?\s*([^\n]+)/i) || text.match(/Due\s*:?\s*([^\n]+)/i);
+                rows.push({
+                    course_id: courseLink ? new URL(courseLink.href, window.location.href).searchParams.get('id') || '' : '',
+                    course_name: courseLink ? (courseLink.innerText || courseLink.textContent || '').trim() : '',
+                    activity_name: (activityLink.innerText || activityLink.textContent || '').trim(),
+                    activity_url: activityLink.href,
+                    due_text: timeNode ? timeNode.getAttribute('datetime') || '' : (dueTextMatch ? dueTextMatch[1].trim() : '')
+                });
+            }
+            return rows;
+        }
+        '''
+    )
+    deadlines: list[dict] = []
+    seen_urls: set[str] = set()
+    for raw in raw_rows:
+        activity_url = str(raw.get("activity_url") or "").strip()
+        activity_name = str(raw.get("activity_name") or "").strip()
+        due_text = str(raw.get("due_text") or "").strip()
+        if not activity_url or activity_url in seen_urls:
+            continue
+        due_date = _parse_elearning_due_date(due_text)
+        if not due_date:
+            continue
+        seen_urls.add(activity_url)
+        course_name = _clean_course_name(str(raw.get("course_name") or "").strip())
+        if not course_name:
+            course_name = "eLearning"
+        course_id = str(raw.get("course_id") or "").strip()
+        if not course_id:
+            course_id = hashlib.sha256(course_name.lower().encode("utf-8")).hexdigest()[:16]
+        deadlines.append(
+            {
+                "course_id": course_id,
+                "course_name": course_name,
+                "activity_name": activity_name,
+                "due_date": due_date.isoformat(),
+                "activity_url": activity_url,
+                "completion_status": "incomplete",
+            }
+        )
+    return deadlines
 
 
 def _parse_elearning_courses(page) -> list[dict]:
@@ -1593,7 +1685,7 @@ def _parse_elearning_deadlines_on_course(page, course: dict) -> list[dict]:
             continue
         seen_urls.add(activity_url)
         try:
-            page.goto(activity_url, wait_until="networkidle", timeout=60_000)
+            page.goto(activity_url, wait_until="domcontentloaded", timeout=60_000)
             due_text = _extract_elearning_due_date_text(page)
         except Exception as exc:
             logger.debug("Could not inspect deadline activity %s: %s", activity_url, exc)
@@ -1644,6 +1736,13 @@ def _parse_elearning_due_date(text: str) -> datetime.datetime | None:
     value = re.sub(r"\s+", " ", str(text or "").strip())
     if not value:
         return None
+    try:
+        parsed_iso = datetime.datetime.fromisoformat(value)
+        if parsed_iso.tzinfo is None:
+            parsed_iso = parsed_iso.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=7)))
+        return parsed_iso
+    except ValueError:
+        pass
     value = re.sub(r"^[A-Za-z]+,\s*", "", value)
     for fmt in ("%d %B %Y, %I:%M %p", "%d %b %Y, %I:%M %p", "%d/%m/%Y, %H:%M", "%d/%m/%Y %H:%M"):
         try:

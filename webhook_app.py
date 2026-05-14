@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 import requests
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -56,6 +57,8 @@ logging.basicConfig(
 
 WEBHOOK_PATH = "/telegram/webhook"
 HEALTH_PATH = "/health"
+WEBHOOK_INFO_PATH = "/telegram/webhook/info"
+GEMINI_HEALTH_PATH = "/gemini/health"
 
 
 def _telegram_api(token: str, method: str) -> str:
@@ -74,6 +77,46 @@ def _load_env() -> tuple[str, str, str, str | None]:
     return token, allowed_chat_id, webhook_url, webhook_secret
 
 
+def _safe_url_label(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return "<invalid-url>"
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+
+def _telegram_post(token: str, method: str, payload: dict[str, object] | None = None) -> dict[str, object]:
+    response = requests.post(
+        _telegram_api(token, method),
+        json=payload or {},
+        timeout=30,
+    )
+    try:
+        result = response.json()
+    except ValueError:
+        result = {"ok": False, "raw": response.text}
+
+    if not response.ok:
+        raise RuntimeError(
+            f"Telegram {method} failed: status={response.status_code}, body={result}"
+        )
+    return result
+
+
+def _get_webhook_info(token: str) -> dict[str, object]:
+    return _telegram_post(token, "getWebhookInfo")
+
+
+def _sanitize_webhook_info(info: dict[str, object]) -> dict[str, object]:
+    result = info.get("result") if isinstance(info.get("result"), dict) else {}
+    assert isinstance(result, dict)
+    return {
+        "ok": bool(info.get("ok")),
+        "url": result.get("url") or None,
+        "pending_update_count": result.get("pending_update_count", 0),
+        "last_error_message": result.get("last_error_message") or None,
+    }
+
+
 def _register_webhook(token: str, webhook_url: str, webhook_secret: str | None) -> None:
     payload: dict[str, object] = {
         "url": webhook_url,
@@ -83,26 +126,21 @@ def _register_webhook(token: str, webhook_url: str, webhook_secret: str | None) 
     if webhook_secret:
         payload["secret_token"] = webhook_secret
 
-    response = requests.post(
-        _telegram_api(token, "setWebhook"),
-        json=payload,
-        timeout=30,
+    logger.info(
+        "Registering Telegram webhook url=%s secret_set=%s",
+        _safe_url_label(webhook_url),
+        bool(webhook_secret),
     )
-    result: dict[str, object]
-    try:
-        result = response.json()
-    except ValueError:
-        result = {"ok": False, "raw": response.text}
-
-    if not response.ok:
-        raise RuntimeError(
-            f"Telegram setWebhook failed: status={response.status_code}, body={result}"
-        )
+    result = _telegram_post(token, "setWebhook", payload)
 
     if not result.get("ok"):
         raise RuntimeError(f"Failed to register webhook: {result}")
 
-    logger.info("Telegram webhook registered at %s", webhook_url)
+    logger.info("Telegram webhook registered: %s", result.get("description") or "ok")
+    try:
+        logger.info("Telegram webhook info: %s", _sanitize_webhook_info(_get_webhook_info(token)))
+    except Exception as exc:
+        logger.warning("Could not fetch Telegram webhook info after registration: %s", exc)
 
 
 def _delete_webhook(token: str) -> None:
@@ -145,6 +183,25 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get(WEBHOOK_INFO_PATH)
+def webhook_info() -> dict[str, object]:
+    token, _, _, _ = _load_env()
+    return _sanitize_webhook_info(_get_webhook_info(token))
+
+
+@app.get(GEMINI_HEALTH_PATH)
+def gemini_health() -> dict[str, object]:
+    api_key_set = bool(os.environ.get("GEMINI_API_KEY", "").strip())
+    sdk_available = False
+    error: str | None = None
+    try:
+        import google.generativeai  # noqa: F401
+        sdk_available = True
+    except Exception as exc:
+        error = str(exc)
+    return {"api_key_set": api_key_set, "sdk_available": sdk_available, "error": error}
+
+
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(
     request: Request,
@@ -160,6 +217,7 @@ async def telegram_webhook(
     if callback_query:
         message = callback_query.get("message") or {}
         chat_id = _normalize_chat_id((message.get("chat") or {}).get("id"))
+        logger.info("Telegram callback received chat_id=%s data_prefix=%s", chat_id, str(callback_query.get("data") or "").split(":", 1)[0])
         if allowed_chat_id and chat_id != allowed_chat_id:
             logger.info("Ignore callback from unauthorized chat_id=%s", chat_id)
             return {"ok": True}
@@ -188,6 +246,7 @@ async def telegram_webhook(
         return {"ok": True}
 
     lowered = text.lower()
+    logger.info("Telegram message received chat_id=%s command=%s", chat_id, text.split(maxsplit=1)[0] if text.startswith("/") else "<text>")
     try:
         if lowered in {"/start", "/help"}:
             _send_text(

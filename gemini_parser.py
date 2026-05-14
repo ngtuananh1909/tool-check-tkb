@@ -33,12 +33,13 @@ def parse_appointment_with_gemini(text: str, *, reference_date: dt.date | None =
     """
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
+        logger.info("Gemini appointment parse skipped: GEMINI_API_KEY is not set.")
         return None
 
     try:
         import google.generativeai as genai
     except Exception as exc:
-        logger.warning("Gemini SDK is not available: %s", exc)
+        logger.warning("Gemini appointment parse skipped: SDK unavailable: %s", exc)
         return None
 
     ref_date = reference_date or local_today()
@@ -101,12 +102,13 @@ def generate_conversational_reply_with_gemini(text: str) -> str | None:
     """Generate a natural Vietnamese chat reply with a warm, moderate tone."""
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
+        logger.info("Gemini conversational reply skipped: GEMINI_API_KEY is not set.")
         return None
 
     try:
         import google.generativeai as genai
     except Exception as exc:
-        logger.warning("Gemini SDK is not available: %s", exc)
+        logger.warning("Gemini conversational reply skipped: SDK unavailable: %s", exc)
         return None
 
     genai.configure(api_key=api_key)
