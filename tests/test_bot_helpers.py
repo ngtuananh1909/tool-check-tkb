@@ -4,7 +4,9 @@ import unittest
 from course_aliases import shorten_course_name
 from telegram_mvp_bot import (
     _build_deadline_detail_text,
+    _build_deadline_keyboard,
     _build_deadline_list_text,
+    _deadline_callback_key,
     _format_deadline_due,
     _parse_add_fields,
     _parse_schedule_day_arg,
@@ -52,6 +54,46 @@ class BotHelperTests(unittest.TestCase):
         self.assertIn("Đại số tuyến tính cho Công nghệ thông tin_N02", list_text)
         self.assertIn("75%", list_text)
         self.assertIn("Tiến độ: 75% (15/20 bài)", detail_text)
+
+    def test_deadline_callback_key_is_unique_per_deadline_activity(self) -> None:
+        row_a = {
+            "course_id": "501032",
+            "activity_name": "Bài tập 1",
+            "activity_url": "https://example.test/mod/assign/view.php?id=11",
+            "due_date": "2026-05-20T00:00:00+07:00",
+        }
+        row_b = {
+            "course_id": "501032",
+            "activity_name": "Bài tập 2",
+            "activity_url": "https://example.test/mod/quiz/view.php?id=22",
+            "due_date": "2026-05-21T00:00:00+07:00",
+        }
+
+        self.assertNotEqual(_deadline_callback_key(row_a), _deadline_callback_key(row_b))
+
+    def test_deadline_keyboard_uses_distinct_callback_data_for_same_course(self) -> None:
+        rows = [
+            {
+                "course_id": "501032",
+                "course_name": "HK2_2025_501032_Đại số tuyến tính cho Công nghệ thông tin_N02",
+                "activity_name": "Bài tập 1",
+                "activity_url": "https://example.test/mod/assign/view.php?id=11",
+                "due_date": "2026-05-20T00:00:00+07:00",
+            },
+            {
+                "course_id": "501032",
+                "course_name": "HK2_2025_501032_Đại số tuyến tính cho Công nghệ thông tin_N02",
+                "activity_name": "Bài tập 2",
+                "activity_url": "https://example.test/mod/quiz/view.php?id=22",
+                "due_date": "2026-05-21T00:00:00+07:00",
+            },
+        ]
+
+        keyboard = _build_deadline_keyboard(rows)
+        callbacks = [btn[0]["callback_data"] for btn in keyboard["inline_keyboard"]]
+
+        self.assertEqual(len(callbacks), 2)
+        self.assertEqual(len(set(callbacks)), 2)
 
     def test_parse_schedule_day_arg_supports_vietnamese_relative_and_weekday(self) -> None:
         today = dt.date(2026, 5, 13)

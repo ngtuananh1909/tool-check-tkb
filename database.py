@@ -811,12 +811,18 @@ def upsert_elearning_deadlines(deadline_rows: list[dict], student_id: str | None
     if not sid:
         raise ValueError("student_id is required; set STUDENT_ID env var.")
 
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
     payload_rows: list[dict] = []
+    signatures: set[str] = set()
     for row in deadline_rows:
         course_name = str(row.get("course_name") or row.get("subject_name") or "").strip()
         activity_name = str(row.get("activity_name") or "").strip()
         due_date = str(row.get("due_date") or "").strip()
         if not course_name or not activity_name or not due_date:
+            continue
+
+        due_dt = _parse_iso_datetime(due_date)
+        if due_dt is None or due_dt < now_utc:
             continue
 
         course_id = str(row.get("course_id") or "").strip()
@@ -839,34 +845,35 @@ def upsert_elearning_deadlines(deadline_rows: list[dict], student_id: str | None
                 "source_signature": source_signature,
             }
         )
-    if not payload_rows:
-        logger.info("No eLearning deadline rows to upsert.")
-        return 0
+        signatures.add(source_signature)
 
     client = _get_client(for_write=True)
-    try:
-        _execute_with_retry(
-            "Supabase eLearning deadline upsert",
-            lambda: (
-                client.table(ELEARNING_DEADLINES_TABLE)
-                .upsert(payload_rows, on_conflict="student_id,source_signature")
-                .execute()
-            ),
-        )
-    except APIError as exc:
-        detail = str(exc)
-        if "PGRST205" in detail or "Could not find the table" in detail:
-            logger.warning(
-                "Table '%s' is not available yet. Run supabase/init_tables.sql to enable eLearning deadlines.",
-                ELEARNING_DEADLINES_TABLE,
+    if payload_rows:
+        try:
+            _execute_with_retry(
+                "Supabase eLearning deadline upsert",
+                lambda: (
+                    client.table(ELEARNING_DEADLINES_TABLE)
+                    .upsert(payload_rows, on_conflict="student_id,source_signature")
+                    .execute()
+                ),
             )
-            return 0
-        if "42501" in detail or "row-level security" in detail.lower():
-            raise RuntimeError(
-                "Supabase write blocked by RLS for eLearning deadlines. "
-                "Set SUPABASE_SERVICE_ROLE_KEY or create INSERT/UPDATE policies on 'elearning_deadlines'."
-            ) from exc
-        raise
+        except APIError as exc:
+            detail = str(exc)
+            if "PGRST205" in detail or "Could not find the table" in detail:
+                logger.warning(
+                    "Table '%s' is not available yet. Run supabase/init_tables.sql to enable eLearning deadlines.",
+                    ELEARNING_DEADLINES_TABLE,
+                )
+                return 0
+            if "42501" in detail or "row-level security" in detail.lower():
+                raise RuntimeError(
+                    "Supabase write blocked by RLS for eLearning deadlines. "
+                    "Set SUPABASE_SERVICE_ROLE_KEY or create INSERT/UPDATE policies on 'elearning_deadlines'."
+                ) from exc
+            raise
+
+    _cleanup_stale_elearning_deadlines(client, sid, signatures)
 
     logger.info("Upserted %d eLearning deadline row(s).", len(payload_rows))
     return len(payload_rows)
@@ -878,15 +885,17 @@ def get_nearest_elearning_deadlines(student_id: str | None = None) -> list[dict]
     if not sid:
         raise ValueError("student_id is required; set STUDENT_ID env var.")
 
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
     client = _get_client(for_write=False)
     try:
         response = _execute_with_retry(
             "Supabase eLearning deadline query",
             lambda: (
                 client.table(ELEARNING_DEADLINES_TABLE)
-                .select("id, course_id, course_name, activity_name, due_date, activity_url, completion_status")
+                .select("id, course_id, course_name, activity_name, due_date, activity_url, completion_status, source_signature")
                 .eq("student_id", sid)
                 .eq("completion_status", "incomplete")
+                .gte("due_date", now_utc.isoformat())
                 .order("due_date", desc=False)
                 .execute()
             ),
@@ -901,7 +910,7 @@ def get_nearest_elearning_deadlines(student_id: str | None = None) -> list[dict]
             return []
         raise
 
-    rows = response.data or []
+    rows = [row for row in (response.data or []) if (_parse_iso_datetime(row.get("due_date")) or now_utc) >= now_utc]
     progress_rows = get_latest_elearning_progress(student_id=sid, limit=100)
     progress_by_course = {str(row.get("course_id") or ""): row for row in progress_rows}
     for row in rows:
@@ -1203,6 +1212,37 @@ def _cleanup_stale_class_sessions(client: Client, student_id: str, signatures: s
         )
 
 
+def _cleanup_stale_elearning_deadlines(client: Client, student_id: str, signatures: set[str]) -> None:
+    response = _execute_with_retry(
+        "Supabase eLearning deadline signature query",
+        lambda: (
+            client.table(ELEARNING_DEADLINES_TABLE)
+            .select("source_signature, due_date")
+            .eq("student_id", student_id)
+            .eq("completion_status", "incomplete")
+            .execute()
+        ),
+    )
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    for row in response.data or []:
+        signature = str(row.get("source_signature") or "").strip()
+        due_dt = _parse_iso_datetime(row.get("due_date"))
+        if not signature:
+            continue
+        if signature in signatures and due_dt is not None and due_dt >= now_utc:
+            continue
+        _execute_with_retry(
+            "Supabase eLearning deadline stale delete",
+            lambda signature=signature: (
+                client.table(ELEARNING_DEADLINES_TABLE)
+                .delete()
+                .eq("student_id", student_id)
+                .eq("source_signature", signature)
+                .execute()
+            ),
+        )
+
+
 def _resolve_session_weeks_ahead() -> int:
     raw = os.environ.get("CLASS_SESSION_WEEKS_AHEAD", "10")
     try:
@@ -1297,6 +1337,19 @@ def _parse_iso_date(value: object) -> datetime.date | None:
         return datetime.date.fromisoformat(text)
     except ValueError:
         return None
+
+
+def _parse_iso_datetime(value: object) -> datetime.datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
 
 
 def _validate_session_status(status: object) -> str:

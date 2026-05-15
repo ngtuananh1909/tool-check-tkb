@@ -342,7 +342,20 @@ def _build_schedule_text(rows: list[dict], target_date: dt.date) -> str:
 
 
 def _deadline_callback_key(row: dict) -> str:
-    return str(row.get("course_id") or row.get("id") or "").strip()
+    for field in ("id", "source_signature"):
+        value = str(row.get(field) or "").strip()
+        if value:
+            return value
+    activity_url = str(row.get("activity_url") or "").strip()
+    if activity_url:
+        return activity_url
+    return "|".join(
+        [
+            str(row.get("course_id") or "").strip(),
+            str(row.get("activity_name") or "").strip(),
+            str(row.get("due_date") or "").strip(),
+        ]
+    ).strip("|")
 
 
 def _build_deadline_keyboard(rows: list[dict]) -> dict:
@@ -375,7 +388,7 @@ def _format_progress(row: dict) -> str:
 def _build_deadline_list_text(rows: list[dict]) -> str:
     if not rows:
         return "Không tìm thấy deadline chưa hoàn thành sắp tới."
-    lines = [f"Có {len(rows)} môn có deadline gần nhất:"]
+    lines = [f"Có {len(rows)} deadline sắp tới:"]
     from course_aliases import shorten_course_name
 
     for row in rows:
