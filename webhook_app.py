@@ -31,6 +31,13 @@ from database import (
 )
 from gemini_parser import parse_appointment_with_gemini
 from telegram_mvp_bot import (
+    ADD_FORM_CANCEL_CALLBACK,
+    ADD_FORM_DONE_CALLBACK,
+    _advance_add_form_state,
+    _build_add_appointment_from_form,
+    _build_add_form_keyboard,
+    _build_add_form_prompt,
+    _build_add_form_raw_input,
     _build_conversational_reply,
     _build_appointment_confirmation,
     _build_deadline_detail_text,
@@ -42,6 +49,7 @@ from telegram_mvp_bot import (
     _looks_like_appointment_message,
     _normalize_chat_id,
     _normalize_gemini_payload,
+    _new_add_form_state,
     _parse_add_appointment_payload,
     _parse_input,
     _parse_schedule_day_arg,
@@ -59,6 +67,7 @@ WEBHOOK_PATH = "/telegram/webhook"
 HEALTH_PATH = "/health"
 WEBHOOK_INFO_PATH = "/telegram/webhook/info"
 GEMINI_HEALTH_PATH = "/gemini/health"
+_ADD_FORM_STATES: dict[str, dict[str, object]] = {}
 
 
 def _telegram_api(token: str, method: str) -> str:
@@ -251,6 +260,40 @@ async def telegram_webhook(
                 timeout=10,
             )
             _send_text(token, chat_id, _build_deadline_detail_text(selected))
+        elif data == ADD_FORM_CANCEL_CALLBACK:
+            _ADD_FORM_STATES.pop(chat_id, None)
+            requests.post(
+                _telegram_api(token, "answerCallbackQuery"),
+                json={"callback_query_id": callback_query.get("id")},
+                timeout=10,
+            )
+            _send_text(token, chat_id, "Đã hủy form thêm lịch.")
+        elif data == ADD_FORM_DONE_CALLBACK:
+            state = _ADD_FORM_STATES.get(chat_id)
+            requests.post(
+                _telegram_api(token, "answerCallbackQuery"),
+                json={"callback_query_id": callback_query.get("id")},
+                timeout=10,
+            )
+            if not state:
+                _send_text(token, chat_id, "Form đã hết hạn. Bạn dùng /add để tạo lại nhé.")
+                return {"ok": True}
+            if not bool(state.get("awaiting_confirm")):
+                _send_text(token, chat_id, "Bạn chưa điền xong form. " + _build_add_form_prompt(state))
+                return {"ok": True}
+            title, appt_date, start_time, location = _build_add_appointment_from_form(state)
+            create_appointment(
+                title=title,
+                appointment_date=appt_date,
+                start_time=start_time,
+                end_time=None,
+                location=location,
+                note=None,
+                raw_user_input=_build_add_form_raw_input(state),
+                gemini_confidence=None,
+            )
+            _ADD_FORM_STATES.pop(chat_id, None)
+            _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
         return {"ok": True}
 
     message = payload.get("message") or {}
@@ -265,8 +308,41 @@ async def telegram_webhook(
         return {"ok": True}
 
     lowered = text.lower()
+    form_state = _ADD_FORM_STATES.get(chat_id)
     logger.info("Telegram message received chat_id=%s command=%s", chat_id, text.split(maxsplit=1)[0] if text.startswith("/") else "<text>")
     try:
+        if lowered == "/cancel" and form_state:
+            _ADD_FORM_STATES.pop(chat_id, None)
+            _send_text(token, chat_id, "Đã hủy form thêm lịch.")
+            return {"ok": True}
+
+        if lowered == "/done" and form_state:
+            if not bool(form_state.get("awaiting_confirm")):
+                _send_text(token, chat_id, "Bạn chưa điền xong form. " + _build_add_form_prompt(form_state))
+                return {"ok": True}
+            title, appt_date, start_time, location = _build_add_appointment_from_form(form_state)
+            create_appointment(
+                title=title,
+                appointment_date=appt_date,
+                start_time=start_time,
+                end_time=None,
+                location=location,
+                note=None,
+                raw_user_input=_build_add_form_raw_input(form_state),
+                gemini_confidence=None,
+            )
+            _ADD_FORM_STATES.pop(chat_id, None)
+            _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
+            return {"ok": True}
+
+        if form_state and (not lowered.startswith("/") or lowered in {"/skip", "skip"}):
+            reply = _advance_add_form_state(form_state, text)
+            if bool(form_state.get("awaiting_confirm")):
+                _send_text_with_keyboard(token, chat_id, reply, _build_add_form_keyboard())
+            else:
+                _send_text(token, chat_id, reply)
+            return {"ok": True}
+
         if lowered in {"/start", "/help"}:
             _send_text(
                 token,
@@ -306,7 +382,9 @@ async def telegram_webhook(
             return {"ok": True}
 
         if lowered == "/add":
-            _send_text(token, chat_id, "Nhập lịch theo mẫu:\nThời gian: \nJob: \nWhere: ")
+            state = _new_add_form_state()
+            _ADD_FORM_STATES[chat_id] = state
+            _send_text(token, chat_id, "Bắt đầu form thêm lịch.\n" + _build_add_form_prompt(state))
             return {"ok": True}
 
         structured_add = any(label in lowered for label in ("thời gian:", "thoi gian:", "time:", "job:", "where:", "địa điểm:", "dia diem:"))

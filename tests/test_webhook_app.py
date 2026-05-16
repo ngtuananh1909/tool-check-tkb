@@ -21,6 +21,7 @@ class WebhookAppTests(unittest.TestCase):
             clear=False,
         )
         self.env.start()
+        webhook_app._ADD_FORM_STATES.clear()
         self.client = TestClient(webhook_app.app)
 
     def tearDown(self) -> None:
@@ -112,6 +113,58 @@ class WebhookAppTests(unittest.TestCase):
         self.assertEqual(telegram_post.call_args.args[1], "setMyCommands")
         commands = telegram_post.call_args.args[2]["commands"]
         self.assertEqual([command["command"] for command in commands], ["start", "today", "schedule", "deadline", "add"])
+
+    def test_add_form_flow_with_done_text_creates_appointment(self) -> None:
+        with patch.object(webhook_app, "create_appointment") as create_appointment, patch.object(
+            webhook_app, "_send_text"
+        ) as send_text, patch.object(webhook_app, "_send_text_with_keyboard") as send_text_with_keyboard:
+            for text in ("/add", "2026-05-20 09:00", "Họp nhóm", "B402", "/done"):
+                response = self.client.post(
+                    "/telegram/webhook",
+                    json={"message": {"text": text, "chat": {"id": 123}}},
+                    headers={"x-telegram-bot-api-secret-token": "secret-token"},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), {"ok": True})
+
+        create_appointment.assert_called_once()
+        self.assertEqual(create_appointment.call_args.kwargs["title"], "Họp nhóm")
+        self.assertEqual(create_appointment.call_args.kwargs["start_time"], "09:00:00")
+        self.assertEqual(create_appointment.call_args.kwargs["location"], "B402")
+        send_text_with_keyboard.assert_called_once()
+        self.assertTrue(send_text.call_count >= 3)
+
+    def test_add_form_callback_done_creates_appointment(self) -> None:
+        with patch.object(webhook_app, "create_appointment") as create_appointment, patch.object(
+            webhook_app, "_send_text"
+        ) as send_text, patch.object(webhook_app, "_send_text_with_keyboard"), patch.object(
+            webhook_app.requests, "post"
+        ):
+            for text in ("/add", "2026-05-20 09:00", "Họp nhóm", "B402"):
+                response = self.client.post(
+                    "/telegram/webhook",
+                    json={"message": {"text": text, "chat": {"id": 123}}},
+                    headers={"x-telegram-bot-api-secret-token": "secret-token"},
+                )
+                self.assertEqual(response.status_code, 200)
+
+            callback_response = self.client.post(
+                "/telegram/webhook",
+                json={
+                    "callback_query": {
+                        "id": "cbq-1",
+                        "data": webhook_app.ADD_FORM_DONE_CALLBACK,
+                        "message": {"chat": {"id": 123}},
+                    }
+                },
+                headers={"x-telegram-bot-api-secret-token": "secret-token"},
+            )
+
+        self.assertEqual(callback_response.status_code, 200)
+        self.assertEqual(callback_response.json(), {"ok": True})
+        create_appointment.assert_called_once()
+        self.assertEqual(create_appointment.call_args.kwargs["title"], "Họp nhóm")
+        self.assertTrue(send_text.called)
 
 
 if __name__ == "__main__":
