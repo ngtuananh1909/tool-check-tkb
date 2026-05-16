@@ -3,9 +3,12 @@ import unittest
 
 from course_aliases import shorten_course_name
 from telegram_mvp_bot import (
+    _advance_add_form_state,
+    _build_add_appointment_from_form,
     _build_deadline_detail_text,
     _build_deadline_keyboard,
     _build_deadline_list_text,
+    _new_add_form_state,
     _deadline_callback_key,
     _format_deadline_due,
     _parse_add_fields,
@@ -108,6 +111,21 @@ class BotHelperTests(unittest.TestCase):
         self.assertEqual(parsed, {"time": "20/05 09:00", "job": None, "where": "B402"})
         with self.assertRaises(ValueError):
             _parse_add_fields("Thời gian: \nJob: \nWhere: ")
+
+    def test_add_form_state_collects_values_and_builds_payload(self) -> None:
+        state = _new_add_form_state()
+        _advance_add_form_state(state, "2026-05-20 09:00")
+        _advance_add_form_state(state, "Họp nhóm")
+        review = _advance_add_form_state(state, "B402")
+
+        self.assertTrue(state["awaiting_confirm"])
+        self.assertIn("Done", review)
+        title, appointment_date, start_time, location = _build_add_appointment_from_form(state)
+
+        self.assertEqual(title, "Họp nhóm")
+        self.assertEqual(appointment_date, dt.date(2026, 5, 20))
+        self.assertEqual(start_time, "09:00:00")
+        self.assertEqual(location, "B402")
 
 
 if __name__ == "__main__":

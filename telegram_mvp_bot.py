@@ -65,6 +65,13 @@ CLARIFICATION_FALLBACK_TEXT = (
 
 CONFIRM_PREFIX = "Xong roi ne, minh da ghi lich cho ban:"
 CREATE_ERROR_PREFIX = "Minh chua tao duoc lich hen luc nay"
+ADD_FORM_DONE_CALLBACK = "addform:done"
+ADD_FORM_CANCEL_CALLBACK = "addform:cancel"
+_ADD_FORM_STEPS: tuple[tuple[str, str], ...] = (
+    ("time", "Thời gian"),
+    ("job", "Job"),
+    ("where", "Where"),
+)
 
 
 def _load_dotenv() -> None:
@@ -445,6 +452,92 @@ def _parse_add_appointment_payload(text: str) -> tuple[str, dt.date, str | None,
     return job, local_today(), None, where
 
 
+def _new_add_form_state() -> dict[str, object]:
+    return {"step": 0, "time": None, "job": None, "where": None, "awaiting_confirm": False}
+
+
+def _build_add_form_prompt(state: dict[str, object]) -> str:
+    step = int(state.get("step") or 0)
+    key, label = _ADD_FORM_STEPS[step]
+    value = str(state.get(key) or "").strip()
+    lines = [f"{step + 1}/{len(_ADD_FORM_STEPS)} - {label}:"]
+    if key == "time":
+        lines.append("Ví dụ: 2026-05-20 09:00 hoặc 20/05 09:00")
+    if value:
+        lines.append(f"Giá trị hiện tại: {value}")
+    lines.append("Gõ /skip để bỏ qua mục này.")
+    lines.append("Gõ /cancel để hủy form.")
+    return "\n".join(lines)
+
+
+def _format_add_form_value(value: object) -> str:
+    text = str(value or "").strip()
+    return text if text else "(bỏ trống)"
+
+
+def _build_add_form_review_text(state: dict[str, object]) -> str:
+    return (
+        "Mình đã nhận form:\n"
+        f"- Thời gian: {_format_add_form_value(state.get('time'))}\n"
+        f"- Job: {_format_add_form_value(state.get('job'))}\n"
+        f"- Where: {_format_add_form_value(state.get('where'))}\n\n"
+        "Nếu ổn thì bấm Done (hoặc gửi /done) để lưu.\n"
+        "Muốn bỏ thì bấm Cancel (hoặc gửi /cancel)."
+    )
+
+
+def _build_add_form_keyboard() -> dict[str, list[list[dict[str, str]]]]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Done", "callback_data": ADD_FORM_DONE_CALLBACK},
+                {"text": "❌ Cancel", "callback_data": ADD_FORM_CANCEL_CALLBACK},
+            ]
+        ]
+    }
+
+
+def _advance_add_form_state(state: dict[str, object], user_text: str) -> str:
+    step = int(state.get("step") or 0)
+    if step >= len(_ADD_FORM_STEPS):
+        state["awaiting_confirm"] = True
+        return _build_add_form_review_text(state)
+
+    key, _ = _ADD_FORM_STEPS[step]
+    value = str(user_text or "").strip()
+    lowered = value.lower()
+    state[key] = None if lowered in {"/skip", "skip"} else value
+    state["step"] = step + 1
+
+    if int(state.get("step") or 0) >= len(_ADD_FORM_STEPS):
+        state["awaiting_confirm"] = True
+        return _build_add_form_review_text(state)
+    return _build_add_form_prompt(state)
+
+
+def _build_add_appointment_from_form(state: dict[str, object]) -> tuple[str, dt.date, str | None, str | None]:
+    time_value = str(state.get("time") or "").strip()
+    if time_value:
+        appt_date, hhmm = _parse_time_field(time_value)
+        start_time = f"{hhmm}:00"
+    else:
+        appt_date = local_today()
+        start_time = None
+
+    title = str(state.get("job") or "").strip() or "Lịch cá nhân"
+    location = _normalize_optional_text(state.get("where"))
+    return title, appt_date, start_time, location
+
+
+def _build_add_form_raw_input(state: dict[str, object]) -> str:
+    return (
+        "FORM_ADD\n"
+        f"Thời gian: {_format_add_form_value(state.get('time'))}\n"
+        f"Job: {_format_add_form_value(state.get('job'))}\n"
+        f"Where: {_format_add_form_value(state.get('where'))}"
+    )
+
+
 def _build_appointment_confirmation(title: str, appt_date: dt.date, start_time: str | None, location: str | None) -> str:
     conf = f"{CONFIRM_PREFIX} {title} - {appt_date.isoformat()}"
     if start_time:
@@ -506,6 +599,7 @@ def run() -> None:
 
     logger.info("Telegram MVP bot started (long polling).")
     offset: int | None = None
+    add_form_states: dict[str, dict[str, object]] = {}
 
     while True:
         try:
@@ -536,6 +630,40 @@ def run() -> None:
                     continue
 
                 lowered = text.lower()
+                form_state = add_form_states.get(chat_id)
+
+                if lowered == "/cancel" and form_state:
+                    add_form_states.pop(chat_id, None)
+                    _send_text(token, chat_id, "Đã hủy form thêm lịch.")
+                    continue
+
+                if lowered == "/done" and form_state:
+                    if not bool(form_state.get("awaiting_confirm")):
+                        _send_text(token, chat_id, "Bạn chưa điền xong form. " + _build_add_form_prompt(form_state))
+                        continue
+                    title, appt_date, start_time, location = _build_add_appointment_from_form(form_state)
+                    create_appointment(
+                        title=title,
+                        appointment_date=appt_date,
+                        start_time=start_time,
+                        end_time=None,
+                        location=location,
+                        note=None,
+                        raw_user_input=_build_add_form_raw_input(form_state),
+                        gemini_confidence=None,
+                    )
+                    add_form_states.pop(chat_id, None)
+                    _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
+                    continue
+
+                if form_state and (not lowered.startswith("/") or lowered in {"/skip", "skip"}):
+                    reply = _advance_add_form_state(form_state, text)
+                    if bool(form_state.get("awaiting_confirm")):
+                        _send_text_with_keyboard(token, chat_id, reply, _build_add_form_keyboard())
+                    else:
+                        _send_text(token, chat_id, reply)
+                    continue
+
                 if lowered in {"/start", "/help"}:
                     _send_text(token, chat_id, HELP_TEXT)
                     continue
@@ -566,7 +694,9 @@ def run() -> None:
                     continue
 
                 if lowered == "/add":
-                    _send_text(token, chat_id, "Nhập lịch theo mẫu:\nThời gian: \nJob: \nWhere: ")
+                    state = _new_add_form_state()
+                    add_form_states[chat_id] = state
+                    _send_text(token, chat_id, "Bắt đầu form thêm lịch.\n" + _build_add_form_prompt(state))
                     continue
 
                 try:
