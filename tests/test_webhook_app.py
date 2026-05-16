@@ -83,10 +83,10 @@ class WebhookAppTests(unittest.TestCase):
             {"ok": True, "url": "https://example.test/telegram/webhook", "pending_update_count": 0, "last_error_message": None},
         )
 
-    def test_gemini_unavailable_chat_uses_fallback_reply(self) -> None:
-        with patch.object(webhook_app, "parse_appointment_with_gemini", return_value=None), patch.object(
-            webhook_app, "_send_text"
-        ) as send_text:
+    def test_non_command_message_guides_user_to_add_form(self) -> None:
+        with patch.object(webhook_app, "_send_text") as send_text, patch.object(
+            webhook_app, "create_appointment"
+        ) as create_appointment:
             response = self.client.post(
                 "/telegram/webhook",
                 json={"message": {"text": "chào bạn", "chat": {"id": 123}}},
@@ -96,8 +96,38 @@ class WebhookAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"ok": True})
         send_text.assert_called_once()
-        self.assertIsInstance(send_text.call_args.args[2], str)
-        self.assertTrue(send_text.call_args.args[2].strip())
+        self.assertEqual(send_text.call_args.args[2], webhook_app.ADD_ONLY_GUIDANCE_TEXT)
+        create_appointment.assert_not_called()
+
+    def test_start_command_mentions_add_form(self) -> None:
+        with patch.object(webhook_app, "_send_text") as send_text:
+            response = self.client.post(
+                "/telegram/webhook",
+                json={"message": {"text": "/start", "chat": {"id": 123}}},
+                headers={"x-telegram-bot-api-secret-token": "secret-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"ok": True})
+        send_text.assert_called_once()
+        self.assertIn("/add", send_text.call_args.args[2])
+        self.assertIn("Mở form thêm lịch", send_text.call_args.args[2])
+
+    def test_free_text_appointment_does_not_create_appointment(self) -> None:
+        with patch.object(webhook_app, "_send_text") as send_text, patch.object(
+            webhook_app, "create_appointment"
+        ) as create_appointment:
+            response = self.client.post(
+                "/telegram/webhook",
+                json={"message": {"text": "Họp nhóm-2026-05-20 09:00-B402", "chat": {"id": 123}}},
+                headers={"x-telegram-bot-api-secret-token": "secret-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"ok": True})
+        send_text.assert_called_once()
+        self.assertEqual(send_text.call_args.args[2], webhook_app.ADD_ONLY_GUIDANCE_TEXT)
+        create_appointment.assert_not_called()
 
     def test_gemini_health_reports_missing_key_without_calling_api(self) -> None:
         response = self.client.get("/gemini/health")

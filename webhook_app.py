@@ -2,7 +2,7 @@
 
 This is the production-friendly replacement for long polling:
 - Telegram sends updates to POST /telegram/webhook
-- The app parses the message (Gemini JSON first, rule-based fallback)
+- The app creates appointments only through the /add form flow
 - The appointment is stored in Supabase
 
 Environment variables:
@@ -10,7 +10,7 @@ Environment variables:
     TELEGRAM_CHAT_ID (optional; if set, only accept this chat)
     TELEGRAM_WEBHOOK_URL (optional; public HTTPS URL for auto-register)
     TELEGRAM_WEBHOOK_SECRET (optional; secret token checked on incoming requests)
-    GEMINI_API_KEY (optional)
+    GEMINI_API_KEY (optional; only used by /gemini/health)
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ from database import (
     get_today_appointments,
     get_today_class_sessions,
 )
-from gemini_parser import parse_appointment_with_gemini
 from telegram_mvp_bot import (
     ADD_FORM_CANCEL_CALLBACK,
     ADD_FORM_DONE_CALLBACK,
@@ -38,7 +37,6 @@ from telegram_mvp_bot import (
     _build_add_form_keyboard,
     _build_add_form_prompt,
     _build_add_form_raw_input,
-    _build_conversational_reply,
     _build_appointment_confirmation,
     _build_deadline_detail_text,
     _build_deadline_keyboard,
@@ -46,12 +44,8 @@ from telegram_mvp_bot import (
     _build_schedule_text,
     _build_today_appointments_text,
     _deadline_callback_key,
-    _looks_like_appointment_message,
     _normalize_chat_id,
-    _normalize_gemini_payload,
     _new_add_form_state,
-    _parse_add_appointment_payload,
-    _parse_input,
     _parse_schedule_day_arg,
     _send_text,
     _send_text_with_keyboard,
@@ -68,6 +62,15 @@ HEALTH_PATH = "/health"
 WEBHOOK_INFO_PATH = "/telegram/webhook/info"
 GEMINI_HEALTH_PATH = "/gemini/health"
 _ADD_FORM_STATES: dict[str, dict[str, object]] = {}
+ADD_ONLY_GUIDANCE_TEXT = "Để thêm lịch, bạn dùng /add rồi điền form từng bước nhé."
+START_HELP_TEXT = (
+    "Bot hiện hỗ trợ các lệnh sau:\n"
+    "/today - Xem lịch hẹn hôm nay\n"
+    "/schedule - Xem lịch học\n"
+    "/deadline - Xem deadline eLearning\n"
+    "/add - Mở form thêm lịch\n\n"
+    "Muốn tạo lịch mới thì dùng /add."
+)
 
 
 def _telegram_api(token: str, method: str) -> str:
@@ -344,16 +347,7 @@ async def telegram_webhook(
             return {"ok": True}
 
         if lowered in {"/start", "/help"}:
-            _send_text(
-                token,
-                chat_id,
-                "MVP format:\n"
-                "tieude-thoigian-diadiem(optional)\n\n"
-                "Vi du:\n"
-                "họp nhóm-15/04 14:00-B402\n"
-                "đi khám-2026-04-16 09:30\n"
-                "gym-18:00",
-            )
+            _send_text(token, chat_id, START_HELP_TEXT)
             return {"ok": True}
 
         if lowered == "/today":
@@ -386,60 +380,7 @@ async def telegram_webhook(
             _ADD_FORM_STATES[chat_id] = state
             _send_text(token, chat_id, "Bắt đầu form thêm lịch.\n" + _build_add_form_prompt(state))
             return {"ok": True}
-
-        structured_add = any(label in lowered for label in ("thời gian:", "thoi gian:", "time:", "job:", "where:", "địa điểm:", "dia diem:"))
-        gemini_payload = None if structured_add else parse_appointment_with_gemini(text)
-        if gemini_payload:
-            if gemini_payload.get("needs_clarification", False):
-                if _looks_like_appointment_message(text):
-                    question = gemini_payload.get("clarification_question") or (
-                        "Mình chưa hiểu rõ lịch hẹn này, bạn gửi lại giúp mình theo format: tiêu đề-thời gian-địa điểm(optional) nhé."
-                    )
-                    _send_text(token, chat_id, str(question))
-                else:
-                    _send_text(token, chat_id, _build_conversational_reply(text))
-                return {"ok": True}
-
-            (
-                title,
-                appt_date,
-                start_time,
-                end_time,
-                location,
-                note,
-                confidence,
-            ) = _normalize_gemini_payload(gemini_payload)
-        elif structured_add:
-            try:
-                title, appt_date, start_time, location = _parse_add_appointment_payload(text)
-            except ValueError as exc:
-                _send_text(token, chat_id, str(exc))
-                return {"ok": True}
-            end_time = None
-            note = None
-            confidence = None
-        else:
-            try:
-                title, appt_date, start_time, location = _parse_input(text)
-            except ValueError:
-                _send_text(token, chat_id, _build_conversational_reply(text))
-                return {"ok": True}
-            end_time = None
-            note = None
-            confidence = None
-
-        create_appointment(
-            title=title,
-            appointment_date=appt_date,
-            start_time=start_time,
-            end_time=end_time,
-            location=location,
-            note=note,
-            raw_user_input=text,
-            gemini_confidence=confidence,
-        )
-
-        _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
+        _send_text(token, chat_id, ADD_ONLY_GUIDANCE_TEXT)
         return {"ok": True}
     except Exception as exc:
         logger.exception("Webhook processing failed: %s", exc)

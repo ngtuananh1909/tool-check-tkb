@@ -1,13 +1,7 @@
 """
 telegram_mvp_bot.py - MVP Telegram listener for creating appointments.
 
-Message format (plain text):
-    tieude-thoigian-diadiem(optional)
-
-Examples:
-    họp nhóm-15/04 14:00-B402
-    đi khám-2026-04-16 09:30
-    gym-18:00
+Appointments are created only through the /add form flow.
 
 Time parsing rules (MVP):
     - YYYY-MM-DD HH:MM
@@ -34,10 +28,7 @@ from database import (
     get_today_appointments,
     get_today_class_sessions,
 )
-from gemini_parser import (
-    generate_conversational_reply_with_gemini,
-    parse_appointment_with_gemini,
-)
+from gemini_parser import generate_conversational_reply_with_gemini
 from time_utils import local_now, local_today
 
 logger = logging.getLogger(__name__)
@@ -52,16 +43,11 @@ HELP_TEXT = (
     "/today - Xem lich hen hom nay\n"
     "/schedule - Xem lich hoc\n"
     "/deadline - Xem deadline eLearning\n"
-    "/add - Them lich hen theo mau\n\n"
-    "Nhap lich nhanh theo mau:\n"
-    "tieude-thoigian-diadiem(optional)\n"
-    "Vi du: hop nhom-15/04 14:00-B402"
+    "/add - Mo form them lich\n\n"
+    "Muon tao lich moi thi dung /add."
 )
 
-CLARIFICATION_FALLBACK_TEXT = (
-    "Tin nhan cua ban chua du ro de minh tao lich. "
-    "Ban gui lai theo mau: tieude-thoigian-diadiem(optional) nha."
-)
+ADD_ONLY_GUIDANCE_TEXT = "De them lich, ban dung /add roi dien form tung buoc nhe."
 
 CONFIRM_PREFIX = "Xong roi ne, minh da ghi lich cho ban:"
 CREATE_ERROR_PREFIX = "Minh chua tao duoc lich hen luc nay"
@@ -595,7 +581,7 @@ def run() -> None:
     if not token:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN.")
     if not os.environ.get("GEMINI_API_KEY", "").strip():
-        logger.info("GEMINI_API_KEY not set; fallback parser will be used.")
+        logger.info("GEMINI_API_KEY not set; /add form flow remains available.")
 
     logger.info("Telegram MVP bot started (long polling).")
     offset: int | None = None
@@ -699,56 +685,7 @@ def run() -> None:
                     _send_text(token, chat_id, "Bắt đầu form thêm lịch.\n" + _build_add_form_prompt(state))
                     continue
 
-                try:
-                    structured_add = any(label in lowered for label in ("thời gian:", "thoi gian:", "time:", "job:", "where:", "địa điểm:", "dia diem:"))
-                    gemini_payload = None
-                    if structured_add:
-                        title, appt_date, start_time, location = _parse_add_appointment_payload(text)
-                        end_time = None
-                        note = None
-                        confidence = None
-                    else:
-                        gemini_payload = parse_appointment_with_gemini(text)
-                    if gemini_payload:
-                        if gemini_payload.get("needs_clarification", False):
-                            question = gemini_payload.get("clarification_question") or (
-                                CLARIFICATION_FALLBACK_TEXT
-                            )
-                            _send_text(token, chat_id, str(question))
-                            continue
-
-                        (
-                            title,
-                            appt_date,
-                            start_time,
-                            end_time,
-                            location,
-                            note,
-                            confidence,
-                        ) = _normalize_gemini_payload(gemini_payload)
-                    elif not structured_add:
-                        try:
-                            title, appt_date, start_time, location = _parse_input(text)
-                        except ValueError:
-                            _send_text(token, chat_id, _build_conversational_reply(text))
-                            continue
-                        end_time = None
-                        note = None
-                        confidence = None
-
-                    create_appointment(
-                        title=title,
-                        appointment_date=appt_date,
-                        start_time=start_time,
-                        end_time=end_time,
-                        location=location,
-                        note=note,
-                        raw_user_input=text,
-                        gemini_confidence=confidence,
-                    )
-                    _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
-                except Exception as exc:
-                    _send_text(token, chat_id, f"{CREATE_ERROR_PREFIX}: {exc}. Ban thu gui lai giup minh nhe.")
+                _send_text(token, chat_id, ADD_ONLY_GUIDANCE_TEXT)
 
         except Exception as exc:
             logger.error("Polling error: %s", exc)
