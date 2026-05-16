@@ -32,23 +32,26 @@ from database import (
 from telegram_mvp_bot import (
     ADD_FORM_CANCEL_CALLBACK,
     ADD_FORM_DONE_CALLBACK,
+    ADD_FORM_SKIP_WHERE_CALLBACK,
     _advance_add_form_state,
     _build_add_appointment_from_form,
     _build_add_form_keyboard,
-    _build_add_form_prompt,
     _build_add_form_raw_input,
     _build_appointment_confirmation,
     _build_deadline_detail_text,
     _build_deadline_keyboard,
     _build_deadline_list_text,
+    _is_add_form_complete,
     _build_schedule_text,
     _build_today_appointments_text,
     _deadline_callback_key,
     _normalize_chat_id,
     _new_add_form_state,
     _parse_schedule_day_arg,
+    _send_add_form_step,
     _send_text,
     _send_text_with_keyboard,
+    _skip_add_form_optional_step,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,14 +65,14 @@ HEALTH_PATH = "/health"
 WEBHOOK_INFO_PATH = "/telegram/webhook/info"
 GEMINI_HEALTH_PATH = "/gemini/health"
 _ADD_FORM_STATES: dict[str, dict[str, object]] = {}
-ADD_ONLY_GUIDANCE_TEXT = "Để thêm lịch, bạn dùng /add để nhận mẫu form rồi điền trong 1 tin nhắn nhé."
+ADD_ONLY_GUIDANCE_TEXT = "Để thêm lịch, bạn dùng /add. Bot sẽ hỏi lần lượt từng mục để bạn nhập nhanh hơn nhé."
 START_HELP_TEXT = (
     "Bot hiện hỗ trợ các lệnh sau:\n"
     "/today - Xem lịch hẹn hôm nay\n"
     "/schedule - Xem lịch học\n"
     "/deadline - Xem deadline eLearning\n"
     "/add - Mở form thêm lịch\n\n"
-    "Muốn tạo lịch mới thì dùng /add và điền đủ Ngày, Giờ, Làm gì, Ở đâu trong 1 tin nhắn."
+    "Muốn tạo lịch mới thì dùng /add, bot sẽ hỏi lần lượt Ngày, Giờ, Làm gì, Ở đâu."
 )
 
 
@@ -281,8 +284,8 @@ async def telegram_webhook(
             if not state:
                 _send_text(token, chat_id, "Form đã hết hạn. Bạn dùng /add để tạo lại nhé.")
                 return {"ok": True}
-            if not bool(state.get("awaiting_confirm")):
-                _send_text(token, chat_id, "Bạn chưa điền xong form. " + _build_add_form_prompt(state))
+            if not _is_add_form_complete(state):
+                _send_add_form_step(token, chat_id, state, prefix="Bạn chưa điền xong form.")
                 return {"ok": True}
             title, appt_date, start_time, location = _build_add_appointment_from_form(state)
             create_appointment(
@@ -297,6 +300,22 @@ async def telegram_webhook(
             )
             _ADD_FORM_STATES.pop(chat_id, None)
             _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
+        elif data == ADD_FORM_SKIP_WHERE_CALLBACK:
+            state = _ADD_FORM_STATES.get(chat_id)
+            requests.post(
+                _telegram_api(token, "answerCallbackQuery"),
+                json={"callback_query_id": callback_query.get("id")},
+                timeout=10,
+            )
+            if not state:
+                _send_text(token, chat_id, "Form đã hết hạn. Bạn dùng /add để tạo lại nhé.")
+                return {"ok": True}
+            try:
+                reply = _skip_add_form_optional_step(state)
+            except ValueError as exc:
+                _send_text(token, chat_id, str(exc))
+                return {"ok": True}
+            _send_text_with_keyboard(token, chat_id, reply, _build_add_form_keyboard())
         return {"ok": True}
 
     message = payload.get("message") or {}
@@ -320,8 +339,8 @@ async def telegram_webhook(
             return {"ok": True}
 
         if lowered == "/done" and form_state:
-            if not bool(form_state.get("awaiting_confirm")):
-                _send_text(token, chat_id, "Bạn chưa điền xong form. " + _build_add_form_prompt(form_state))
+            if not _is_add_form_complete(form_state):
+                _send_add_form_step(token, chat_id, form_state, prefix="Bạn chưa điền xong form.")
                 return {"ok": True}
             title, appt_date, start_time, location = _build_add_appointment_from_form(form_state)
             create_appointment(
@@ -342,12 +361,12 @@ async def telegram_webhook(
             try:
                 reply = _advance_add_form_state(form_state, text)
             except ValueError as exc:
-                _send_text(token, chat_id, f"{exc}\n\n{_build_add_form_prompt(form_state)}")
+                _send_add_form_step(token, chat_id, form_state, prefix=str(exc))
                 return {"ok": True}
-            if bool(form_state.get("awaiting_confirm")):
+            if _is_add_form_complete(form_state):
                 _send_text_with_keyboard(token, chat_id, reply, _build_add_form_keyboard())
             else:
-                _send_text(token, chat_id, reply)
+                _send_add_form_step(token, chat_id, form_state)
             return {"ok": True}
 
         if lowered in {"/start", "/help"}:
@@ -382,7 +401,7 @@ async def telegram_webhook(
         if lowered == "/add":
             state = _new_add_form_state()
             _ADD_FORM_STATES[chat_id] = state
-            _send_text(token, chat_id, "Bắt đầu form thêm lịch.\n" + _build_add_form_prompt(state))
+            _send_add_form_step(token, chat_id, state, prefix="Bắt đầu form thêm lịch.")
             return {"ok": True}
         _send_text(token, chat_id, ADD_ONLY_GUIDANCE_TEXT)
         return {"ok": True}
