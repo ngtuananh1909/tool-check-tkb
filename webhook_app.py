@@ -62,14 +62,14 @@ HEALTH_PATH = "/health"
 WEBHOOK_INFO_PATH = "/telegram/webhook/info"
 GEMINI_HEALTH_PATH = "/gemini/health"
 _ADD_FORM_STATES: dict[str, dict[str, object]] = {}
-ADD_ONLY_GUIDANCE_TEXT = "Để thêm lịch, bạn dùng /add rồi điền form từng bước nhé."
+ADD_ONLY_GUIDANCE_TEXT = "Để thêm lịch, bạn dùng /add để nhận mẫu form rồi điền trong 1 tin nhắn nhé."
 START_HELP_TEXT = (
     "Bot hiện hỗ trợ các lệnh sau:\n"
     "/today - Xem lịch hẹn hôm nay\n"
     "/schedule - Xem lịch học\n"
     "/deadline - Xem deadline eLearning\n"
     "/add - Mở form thêm lịch\n\n"
-    "Muốn tạo lịch mới thì dùng /add."
+    "Muốn tạo lịch mới thì dùng /add và điền đủ Ngày, Giờ, Làm gì, Ở đâu trong 1 tin nhắn."
 )
 
 
@@ -338,8 +338,12 @@ async def telegram_webhook(
             _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
             return {"ok": True}
 
-        if form_state and (not lowered.startswith("/") or lowered in {"/skip", "skip"}):
-            reply = _advance_add_form_state(form_state, text)
+        if form_state and not lowered.startswith("/"):
+            try:
+                reply = _advance_add_form_state(form_state, text)
+            except ValueError as exc:
+                _send_text(token, chat_id, f"{exc}\n\n{_build_add_form_prompt(form_state)}")
+                return {"ok": True}
             if bool(form_state.get("awaiting_confirm")):
                 _send_text_with_keyboard(token, chat_id, reply, _build_add_form_keyboard())
             else:

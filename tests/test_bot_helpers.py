@@ -106,24 +106,27 @@ class BotHelperTests(unittest.TestCase):
         self.assertEqual(_parse_schedule_day_arg("20/05", today=today), dt.date(2026, 5, 20))
 
     def test_parse_add_fields_accepts_missing_values_but_rejects_all_blank(self) -> None:
-        parsed = _parse_add_fields("Thời gian: 20/05 09:00\nJob: \nWhere: B402")
+        parsed = _parse_add_fields("Ngày: 16/5\nGiờ: 9:00\nLàm gì: Họp nhóm\nỞ đâu: B402")
 
-        self.assertEqual(parsed, {"time": "20/05 09:00", "job": None, "where": "B402"})
+        self.assertEqual(parsed, {"date": "16/5", "time": "9:00", "job": "Họp nhóm", "where": "B402"})
         with self.assertRaises(ValueError):
-            _parse_add_fields("Thời gian: \nJob: \nWhere: ")
+            _parse_add_fields("Ngày: \nGiờ: 9:00\nLàm gì: Họp nhóm\nỞ đâu: ")
 
     def test_add_form_state_collects_values_and_builds_payload(self) -> None:
         state = _new_add_form_state()
-        _advance_add_form_state(state, "2026-05-20 09:00")
-        _advance_add_form_state(state, "Họp nhóm")
-        review = _advance_add_form_state(state, "B402")
+        review = _advance_add_form_state(
+            state,
+            "Ngày: 16/5\nGiờ: 9:00\nLàm gì: Họp nhóm\nỞ đâu: B402",
+        )
 
         self.assertTrue(state["awaiting_confirm"])
+        self.assertEqual(state["date"], "16/5")
+        self.assertEqual(state["time"], "9:00")
         self.assertIn("Done", review)
         title, appointment_date, start_time, location = _build_add_appointment_from_form(state)
 
         self.assertEqual(title, "Họp nhóm")
-        self.assertEqual(appointment_date, dt.date(2026, 5, 20))
+        self.assertEqual(appointment_date, dt.date(dt.date.today().year, 5, 16))
         self.assertEqual(start_time, "09:00:00")
         self.assertEqual(location, "B402")
 

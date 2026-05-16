@@ -112,6 +112,7 @@ class WebhookAppTests(unittest.TestCase):
         send_text.assert_called_once()
         self.assertIn("/add", send_text.call_args.args[2])
         self.assertIn("Mở form thêm lịch", send_text.call_args.args[2])
+        self.assertIn("Ngày, Giờ, Làm gì, Ở đâu", send_text.call_args.args[2])
 
     def test_free_text_appointment_does_not_create_appointment(self) -> None:
         with patch.object(webhook_app, "_send_text") as send_text, patch.object(
@@ -148,7 +149,11 @@ class WebhookAppTests(unittest.TestCase):
         with patch.object(webhook_app, "create_appointment") as create_appointment, patch.object(
             webhook_app, "_send_text"
         ) as send_text, patch.object(webhook_app, "_send_text_with_keyboard") as send_text_with_keyboard:
-            for text in ("/add", "2026-05-20 09:00", "Họp nhóm", "B402", "/done"):
+            for text in (
+                "/add",
+                "Ngày: 16/5\nGiờ: 9:00\nLàm gì: Họp nhóm\nỞ đâu: B402",
+                "/done",
+            ):
                 response = self.client.post(
                     "/telegram/webhook",
                     json={"message": {"text": text, "chat": {"id": 123}}},
@@ -161,8 +166,9 @@ class WebhookAppTests(unittest.TestCase):
         self.assertEqual(create_appointment.call_args.kwargs["title"], "Họp nhóm")
         self.assertEqual(create_appointment.call_args.kwargs["start_time"], "09:00:00")
         self.assertEqual(create_appointment.call_args.kwargs["location"], "B402")
+        self.assertTrue(str(create_appointment.call_args.kwargs["appointment_date"]).endswith("-05-16"))
         send_text_with_keyboard.assert_called_once()
-        self.assertTrue(send_text.call_count >= 3)
+        self.assertTrue(send_text.call_count >= 2)
 
     def test_add_form_callback_done_creates_appointment(self) -> None:
         with patch.object(webhook_app, "create_appointment") as create_appointment, patch.object(
@@ -170,7 +176,10 @@ class WebhookAppTests(unittest.TestCase):
         ) as send_text, patch.object(webhook_app, "_send_text_with_keyboard"), patch.object(
             webhook_app.requests, "post"
         ):
-            for text in ("/add", "2026-05-20 09:00", "Họp nhóm", "B402"):
+            for text in (
+                "/add",
+                "Ngày: 16/5\nGiờ: 9:00\nLàm gì: Họp nhóm\nỞ đâu: B402",
+            ):
                 response = self.client.post(
                     "/telegram/webhook",
                     json={"message": {"text": text, "chat": {"id": 123}}},
@@ -195,6 +204,23 @@ class WebhookAppTests(unittest.TestCase):
         create_appointment.assert_called_once()
         self.assertEqual(create_appointment.call_args.kwargs["title"], "Họp nhóm")
         self.assertTrue(send_text.called)
+
+    def test_add_form_invalid_submission_returns_prompt_with_error(self) -> None:
+        with patch.object(webhook_app, "_send_text") as send_text, patch.object(
+            webhook_app, "create_appointment"
+        ) as create_appointment:
+            for text in ("/add", "Ngày: 16/5\nGiờ: 9:00\nỞ đâu: B402"):
+                response = self.client.post(
+                    "/telegram/webhook",
+                    json={"message": {"text": text, "chat": {"id": 123}}},
+                    headers={"x-telegram-bot-api-secret-token": "secret-token"},
+                )
+                self.assertEqual(response.status_code, 200)
+
+        self.assertEqual(send_text.call_count, 2)
+        self.assertIn("Thiếu mục 'Làm gì'.", send_text.call_args.args[2])
+        self.assertIn("Điền form theo mẫu", send_text.call_args.args[2])
+        create_appointment.assert_not_called()
 
 
 if __name__ == "__main__":

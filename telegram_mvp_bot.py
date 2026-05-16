@@ -44,20 +44,15 @@ HELP_TEXT = (
     "/schedule - Xem lich hoc\n"
     "/deadline - Xem deadline eLearning\n"
     "/add - Mo form them lich\n\n"
-    "Muon tao lich moi thi dung /add."
+    "Muon tao lich moi thi dung /add va dien day du Ngay, Gio, Lam gi, O dau trong 1 tin nhan."
 )
 
-ADD_ONLY_GUIDANCE_TEXT = "De them lich, ban dung /add roi dien form tung buoc nhe."
+ADD_ONLY_GUIDANCE_TEXT = "De them lich, ban dung /add de nhan mau form roi dien trong 1 tin nhan nhe."
 
 CONFIRM_PREFIX = "Xong roi ne, minh da ghi lich cho ban:"
 CREATE_ERROR_PREFIX = "Minh chua tao duoc lich hen luc nay"
 ADD_FORM_DONE_CALLBACK = "addform:done"
 ADD_FORM_CANCEL_CALLBACK = "addform:cancel"
-_ADD_FORM_STEPS: tuple[tuple[str, str], ...] = (
-    ("time", "Thời gian"),
-    ("job", "Job"),
-    ("where", "Where"),
-)
 
 
 def _load_dotenv() -> None:
@@ -144,11 +139,13 @@ def _parse_schedule_day_arg(arg: str | None, today: dt.date | None = None) -> dt
 
 
 def _parse_add_fields(text: str) -> dict[str, str | None]:
-    fields = {"time": None, "job": None, "where": None}
+    fields = {"date": None, "time": None, "job": None, "where": None}
     labels = {
+        "ngày": "date", "ngay": "date", "date": "date",
         "thời gian": "time", "thoi gian": "time", "time": "time",
-        "job": "job", "việc": "job", "viec": "job",
-        "where": "where", "địa điểm": "where", "dia diem": "where", "location": "where",
+        "giờ": "time", "gio": "time",
+        "job": "job", "việc": "job", "viec": "job", "làm gì": "job", "lam gi": "job",
+        "where": "where", "địa điểm": "where", "dia diem": "where", "location": "where", "ở đâu": "where", "o dau": "where",
     }
     for line in str(text or "").splitlines():
         if ":" not in line:
@@ -158,8 +155,12 @@ def _parse_add_fields(text: str) -> dict[str, str | None]:
         if key:
             value = raw_value.strip()
             fields[key] = value or None
-    if not any(fields.values()):
-        raise ValueError("Bạn cần nhập ít nhất một mục: thời gian, job hoặc where.")
+    if not fields["date"]:
+        raise ValueError("Thiếu mục 'Ngày'.")
+    if not fields["time"]:
+        raise ValueError("Thiếu mục 'Giờ'.")
+    if not fields["job"]:
+        raise ValueError("Thiếu mục 'Làm gì'.")
     return fields
 
 
@@ -284,22 +285,22 @@ def _parse_time_field(raw: str) -> tuple[dt.date, str]:
     value = raw.strip()
     now = local_now()
 
-    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})", value)
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})", value)
     if m:
         y, mo, d, h, mi = map(int, m.groups())
         return dt.date(y, mo, d), _validate_hhmm(h, mi)
 
-    m = re.fullmatch(r"(\d{2})/(\d{2})/(\d{4})\s+(\d{2}):(\d{2})", value)
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2}):(\d{2})", value)
     if m:
         d, mo, y, h, mi = map(int, m.groups())
         return dt.date(y, mo, d), _validate_hhmm(h, mi)
 
-    m = re.fullmatch(r"(\d{2})/(\d{2})\s+(\d{2}):(\d{2})", value)
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})\s+(\d{1,2}):(\d{2})", value)
     if m:
         d, mo, h, mi = map(int, m.groups())
         return dt.date(now.year, mo, d), _validate_hhmm(h, mi)
 
-    m = re.fullmatch(r"(\d{2}):(\d{2})", value)
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", value)
     if m:
         h, mi = map(int, m.groups())
         return now.date(), _validate_hhmm(h, mi)
@@ -314,6 +315,35 @@ def _validate_hhmm(hour: int, minute: int) -> str:
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         raise ValueError("Giờ không hợp lệ.")
     return f"{hour:02d}:{minute:02d}"
+
+
+def _parse_date_field(raw: str, *, reference_date: dt.date | None = None) -> dt.date:
+    """Return date from flexible user input."""
+    value = str(raw or "").strip()
+    base = reference_date or local_today()
+
+    if not value:
+        raise ValueError("Ngày không được để trống.")
+
+    if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", value):
+        year, month, day = map(int, value.split("-"))
+        return dt.date(year, month, day)
+
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})(?:/(\d{4}))?", value)
+    if m:
+        day, month, year = m.groups()
+        return dt.date(int(year or base.year), int(month), int(day))
+
+    raise ValueError("Không đọc được ngày. Dùng YYYY-MM-DD hoặc DD/MM hoặc DD/MM/YYYY.")
+
+
+def _parse_clock_field(raw: str) -> str:
+    value = str(raw or "").strip()
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", value)
+    if not m:
+        raise ValueError("Không đọc được giờ. Dùng HH:MM, ví dụ 9:00 hoặc 09:00.")
+    hour, minute = map(int, m.groups())
+    return f"{_validate_hhmm(hour, minute)}:00"
 
 
 def _build_schedule_text(rows: list[dict], target_date: dt.date) -> str:
@@ -432,26 +462,35 @@ def _parse_add_appointment_payload(text: str) -> tuple[str, dt.date, str | None,
     fields = _parse_add_fields(text)
     job = fields["job"] or "Lịch cá nhân"
     where = fields["where"]
-    if fields["time"]:
-        appt_date, hhmm = _parse_time_field(fields["time"])
-        return job, appt_date, f"{hhmm}:00", where
-    return job, local_today(), None, where
+    appointment_date = _parse_date_field(fields["date"] or "")
+    start_time = _parse_clock_field(fields["time"] or "")
+    return job, appointment_date, start_time, where
 
 
 def _new_add_form_state() -> dict[str, object]:
-    return {"step": 0, "time": None, "job": None, "where": None, "awaiting_confirm": False}
+    return {
+        "awaiting_form_text": True,
+        "awaiting_confirm": False,
+        "date": None,
+        "time": None,
+        "job": None,
+        "where": None,
+    }
 
 
 def _build_add_form_prompt(state: dict[str, object]) -> str:
-    step = int(state.get("step") or 0)
-    key, label = _ADD_FORM_STEPS[step]
-    value = str(state.get(key) or "").strip()
-    lines = [f"{step + 1}/{len(_ADD_FORM_STEPS)} - {label}:"]
-    if key == "time":
-        lines.append("Ví dụ: 2026-05-20 09:00 hoặc 20/05 09:00")
-    if value:
-        lines.append(f"Giá trị hiện tại: {value}")
-    lines.append("Gõ /skip để bỏ qua mục này.")
+    lines = [
+        "Điền form theo mẫu rồi gửi lại trong 1 tin nhắn:",
+        "Ngày: 16/5 hoặc 2026-05-16",
+        "Giờ: 9:00 hoặc 09:00",
+        "Làm gì: Họp nhóm",
+        "Ở đâu: B402",
+    ]
+    current_job = str(state.get("job") or "").strip()
+    if current_job and bool(state.get("awaiting_confirm")):
+        lines.append("")
+        lines.append("Form hiện tại đã hợp lệ, bạn có thể sửa nội dung rồi gửi lại.")
+    lines.append("")
     lines.append("Gõ /cancel để hủy form.")
     return "\n".join(lines)
 
@@ -464,9 +503,10 @@ def _format_add_form_value(value: object) -> str:
 def _build_add_form_review_text(state: dict[str, object]) -> str:
     return (
         "Mình đã nhận form:\n"
-        f"- Thời gian: {_format_add_form_value(state.get('time'))}\n"
-        f"- Job: {_format_add_form_value(state.get('job'))}\n"
-        f"- Where: {_format_add_form_value(state.get('where'))}\n\n"
+        f"- Ngày: {_format_add_form_value(state.get('date'))}\n"
+        f"- Giờ: {_format_add_form_value(state.get('time'))}\n"
+        f"- Làm gì: {_format_add_form_value(state.get('job'))}\n"
+        f"- Ở đâu: {_format_add_form_value(state.get('where'))}\n\n"
         "Nếu ổn thì bấm Done (hoặc gửi /done) để lưu.\n"
         "Muốn bỏ thì bấm Cancel (hoặc gửi /cancel)."
     )
@@ -484,43 +524,33 @@ def _build_add_form_keyboard() -> dict[str, list[list[dict[str, str]]]]:
 
 
 def _advance_add_form_state(state: dict[str, object], user_text: str) -> str:
-    step = int(state.get("step") or 0)
-    if step >= len(_ADD_FORM_STEPS):
-        state["awaiting_confirm"] = True
-        return _build_add_form_review_text(state)
-
-    key, _ = _ADD_FORM_STEPS[step]
-    value = str(user_text or "").strip()
-    lowered = value.lower()
-    state[key] = None if lowered in {"/skip", "skip"} else value
-    state["step"] = step + 1
-
-    if int(state.get("step") or 0) >= len(_ADD_FORM_STEPS):
-        state["awaiting_confirm"] = True
-        return _build_add_form_review_text(state)
-    return _build_add_form_prompt(state)
+    fields = _parse_add_fields(user_text)
+    state["date"] = fields["date"]
+    state["time"] = fields["time"]
+    state["job"] = fields["job"]
+    state["where"] = fields["where"]
+    state["awaiting_form_text"] = False
+    state["awaiting_confirm"] = True
+    return _build_add_form_review_text(state)
 
 
 def _build_add_appointment_from_form(state: dict[str, object]) -> tuple[str, dt.date, str | None, str | None]:
-    time_value = str(state.get("time") or "").strip()
-    if time_value:
-        appt_date, hhmm = _parse_time_field(time_value)
-        start_time = f"{hhmm}:00"
-    else:
-        appt_date = local_today()
-        start_time = None
-
-    title = str(state.get("job") or "").strip() or "Lịch cá nhân"
+    appointment_date = _parse_date_field(state.get("date") or "")
+    start_time = _parse_clock_field(state.get("time") or "")
+    title = str(state.get("job") or "").strip()
+    if not title:
+        raise ValueError("Mục 'Làm gì' không được để trống.")
     location = _normalize_optional_text(state.get("where"))
-    return title, appt_date, start_time, location
+    return title, appointment_date, start_time, location
 
 
 def _build_add_form_raw_input(state: dict[str, object]) -> str:
     return (
         "FORM_ADD\n"
-        f"Thời gian: {_format_add_form_value(state.get('time'))}\n"
-        f"Job: {_format_add_form_value(state.get('job'))}\n"
-        f"Where: {_format_add_form_value(state.get('where'))}"
+        f"Ngày: {_format_add_form_value(state.get('date'))}\n"
+        f"Giờ: {_format_add_form_value(state.get('time'))}\n"
+        f"Làm gì: {_format_add_form_value(state.get('job'))}\n"
+        f"Ở đâu: {_format_add_form_value(state.get('where'))}"
     )
 
 
@@ -642,8 +672,12 @@ def run() -> None:
                     _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
                     continue
 
-                if form_state and (not lowered.startswith("/") or lowered in {"/skip", "skip"}):
-                    reply = _advance_add_form_state(form_state, text)
+                if form_state and not lowered.startswith("/"):
+                    try:
+                        reply = _advance_add_form_state(form_state, text)
+                    except ValueError as exc:
+                        _send_text(token, chat_id, f"{exc}\n\n{_build_add_form_prompt(form_state)}")
+                        continue
                     if bool(form_state.get("awaiting_confirm")):
                         _send_text_with_keyboard(token, chat_id, reply, _build_add_form_keyboard())
                     else:
