@@ -56,21 +56,11 @@ def main() -> None:
     # ------------------------------------------------------------------
     logger.info("=== Fetching today's schedule and appointments ===")
     try:
-        from database import (
-            get_today_appointments,
-            get_today_class_sessions,
-            get_today_schedule,
-            get_upcoming_exams,
-        )
-        today_classes = get_today_class_sessions(student_id=student_id)
-        if not today_classes:
-            logger.warning(
-                "No class sessions found for today; falling back to weekly schedule rows for notifications."
-            )
-            today_classes = get_today_schedule(student_id=student_id)
-
-        today_appointments = get_today_appointments(student_id=student_id)
-        upcoming_exams = get_upcoming_exams(student_id=student_id, days_ahead=7)
+        from calendar_sync import fetch_events_from_calendar
+        from time_utils import local_today
+        
+        today = local_today()
+        today_classes, today_appointments, upcoming_exams = fetch_events_from_calendar(target_date=today, days_ahead=7)
         logger.info("Today has %d class(es).", len(today_classes))
         logger.info("Today has %d appointment(s).", len(today_appointments))
         logger.info("Upcoming exam set has %d row(s).", len(upcoming_exams))

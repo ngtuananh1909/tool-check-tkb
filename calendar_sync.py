@@ -17,7 +17,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 
-from database import get_all_class_sessions, get_upcoming_exams, upsert_calendar_sync_state
+from database import get_all_class_sessions, get_upcoming_exams
 from time_utils import local_today
 
 logger = logging.getLogger(__name__)
@@ -222,6 +222,199 @@ def sync_database_to_csv_and_google_calendar(
 
     logger.info("Synced %d event(s) to Google Calendar '%s'.", len(events), calendar_id)
     return csv_path, True
+
+
+def sync_crawled_data_to_google_calendar(
+    class_sessions: list[dict],
+    exams: list[dict],
+    student_id: str | None = None,
+) -> tuple[str, bool]:
+    """Sync raw crawled data to Google Calendar without querying the database."""
+    target_date = local_today()
+    
+    sync_items = _build_sync_items_from_sessions(class_sessions, [], exams, target_date)
+    
+    calendar_id = os.environ.get("GOOGLE_CALENDAR_ID", "").strip()
+    events = [item["payload"] for item in sync_items]
+    
+    service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    service_account_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
+    calendar_required = os.environ.get("GOOGLE_CALENDAR_REQUIRED", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    if not calendar_id or (not service_account_json and not service_account_file):
+        if calendar_required:
+            raise RuntimeError(
+                "Google Calendar sync is required but credentials are missing. "
+                "Set GOOGLE_CALENDAR_ID and GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_FILE."
+            )
+        logger.warning(
+            "Google Calendar sync skipped. Missing GOOGLE_CALENDAR_ID and Google credentials."
+        )
+        return "", False
+
+    service, service_account_email = _build_calendar_service(service_account_json, service_account_file)
+    _validate_calendar_target(service, calendar_id, service_account_email)
+    _replace_bot_events_for_range(service, calendar_id, sync_items, student_id)
+    
+    logger.info("Synced %d event(s) to Google Calendar '%s' directly from crawler.", len(events), calendar_id)
+    return "", True
+
+
+def insert_calendar_event(title: str, appointment_date: dt.date, start_time: str | None, end_time: str | None, location: str | None, note: str | None) -> str:
+    """Insert a single event directly into Google Calendar (used by Telegram /add)."""
+    calendar_id = os.environ.get("GOOGLE_CALENDAR_ID", "").strip()
+    service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    service_account_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
+    
+    if not calendar_id or (not service_account_json and not service_account_file):
+        logger.warning("Skipping calendar insert: Missing credentials.")
+        return ""
+
+    service, _ = _build_calendar_service(service_account_json, service_account_file)
+    timezone = os.environ.get("APP_TIMEZONE", "Asia/Ho_Chi_Minh")
+
+    if start_time:
+        start_dt = _to_datetime(appointment_date, start_time, timezone)
+        if end_time:
+            end_dt = _to_datetime(appointment_date, end_time, timezone)
+        else:
+            end_dt = start_dt + dt.timedelta(hours=1)
+        payload = {
+            "summary": title,
+            "location": location,
+            "description": note,
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone},
+            "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
+        }
+        _apply_default_reminder(payload)
+    else:
+        payload = {
+            "summary": title,
+            "location": location,
+            "description": note,
+            "start": {"date": appointment_date.isoformat()},
+            "end": {"date": (appointment_date + dt.timedelta(days=1)).isoformat()},
+        }
+        
+    source_key = f"{SYNC_SOURCE_APPOINTMENT}:{appointment_date.isoformat()}:{start_time or ''}:{end_time or ''}:{title}"
+    payload["extendedProperties"] = {
+        "private": {
+            "source": BOT_SOURCE_TAG,
+            "source_type": SYNC_SOURCE_APPOINTMENT,
+            "source_key": source_key,
+            "source_hash": _sync_hash(payload),
+        }
+    }
+    
+    resp = _execute_calendar_request(
+        "calendar insert event",
+        lambda: service.events().insert(calendarId=calendar_id, body=payload).execute(),
+    )
+    return str(resp.get("id") or "")
+
+
+def fetch_events_from_calendar(target_date: dt.date, days_ahead: int = 0) -> tuple[list[dict], list[dict], list[dict]]:
+    """Fetch events from Google Calendar for the target date range, export to CSV, and return grouped events."""
+    calendar_id = os.environ.get("GOOGLE_CALENDAR_ID", "").strip()
+    service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    service_account_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
+    
+    if not calendar_id or (not service_account_json and not service_account_file):
+        logger.warning("Missing credentials, cannot fetch from Google Calendar.")
+        return [], [], []
+
+    service, _ = _build_calendar_service(service_account_json, service_account_file)
+    timezone = os.environ.get("APP_TIMEZONE", "Asia/Ho_Chi_Minh")
+    tz = ZoneInfo(timezone)
+    
+    # Time range: start of target_date to start of next day + days_ahead
+    time_min = dt.datetime.combine(target_date, dt.time.min).replace(tzinfo=tz)
+    time_max = time_min + dt.timedelta(days=1 + days_ahead)
+    
+    events_result = _execute_calendar_request(
+        "calendar fetch todays events",
+        lambda: service.events().list(
+            calendarId=calendar_id,
+            timeMin=time_min.isoformat(),
+            timeMax=time_max.isoformat(),
+            singleEvents=True,
+            orderBy="startTime"
+        ).execute()
+    )
+    
+    events = events_result.get("items", [])
+    
+    classes = []
+    appointments = []
+    exams = []
+    
+    os.makedirs("exports", exist_ok=True)
+    csv_path = os.path.join("exports", f"schedule_from_calendar_{target_date.strftime('%Y%m%d')}.csv")
+    
+    with open(csv_path, "w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=["event_type", "title", "start_time", "end_time", "location", "notes"],
+        )
+        writer.writeheader()
+        
+        for event in events:
+            # Parse start and end time
+            start = event.get("start", {})
+            end = event.get("end", {})
+            start_str = start.get("dateTime") or start.get("date")
+            end_str = end.get("dateTime") or end.get("date")
+            
+            start_time = ""
+            end_time = ""
+            if start.get("dateTime"):
+                dt_obj = dt.datetime.fromisoformat(start["dateTime"])
+                start_time = dt_obj.strftime("%H:%M")
+            if end.get("dateTime"):
+                dt_obj = dt.datetime.fromisoformat(end["dateTime"])
+                end_time = dt_obj.strftime("%H:%M")
+                
+            title = event.get("summary", "")
+            location = event.get("location", "")
+            notes = event.get("description", "")
+            
+            source_type = _event_source_type(event)
+            writer.writerow({
+                "event_type": source_type,
+                "title": title,
+                "start_time": start_time,
+                "end_time": end_time,
+                "location": location,
+                "notes": notes,
+            })
+            
+            row = {
+                "title": title,
+                "subject_name": title,
+                "start_time": start_time,
+                "end_time": end_time,
+                "location": location,
+                "room": location,
+                "exam_room": location,
+                "note": notes,
+                "notes": notes,
+                "appointment_date": target_date.isoformat()
+            }
+            
+            if source_type == SYNC_SOURCE_CLASS_SESSION:
+                if row["appointment_date"] == target_date.isoformat():
+                    classes.append(row)
+            elif source_type == SYNC_SOURCE_EXAM:
+                exams.append(row)
+            elif source_type == SYNC_SOURCE_APPOINTMENT or source_type == "legacy":
+                if row["appointment_date"] == target_date.isoformat():
+                    appointments.append(row)
+                
+    logger.info("Exported events from Calendar to CSV: %s", csv_path)
+    return classes, appointments, exams
 
 
 def _export_csv(schedule_rows: list[dict], appointments: list[dict], exams: list[dict], target_date: dt.date) -> str:
@@ -923,7 +1116,7 @@ def _replace_bot_events_for_range(
                 }
             )
 
-    upsert_calendar_sync_state(state_rows)
+    # Note: Bypassing DB, so we do not call upsert_calendar_sync_state here.
 
 
 def _safe_delete_calendar_event(service: Resource, calendar_id: str, event_id: str) -> None:

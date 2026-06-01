@@ -107,32 +107,16 @@ def run_hourly_sync() -> None:
         return
     _log_step_elapsed("Step 1", step_started)
 
-    # -------- Step 2: DB Sync --------
+    # -------- Step 2: DB Sync (eLearning only) --------
     step_started = time.perf_counter()
-    logger.info("Step 2: Updating schedule in Supabase")
+    logger.info("Step 2: Updating eLearning data in Supabase")
     try:
         from database import (
-            materialize_class_sessions,
             upsert_elearning_deadlines,
             upsert_elearning_progress,
-            upsert_exams,
-            upsert_actual_class_sessions,
-            upsert_schedule,
         )
-        upsert_schedule(schedule, student_id=student_id)
-        materialized = upsert_actual_class_sessions(schedule, student_id=student_id)
-        if materialized == 0:
-            logger.warning(
-                "Crawler did not return concrete session_date rows; using generated fallback class sessions."
-            )
-            materialized = materialize_class_sessions(schedule, student_id=student_id)
-
-        exam_rows = upsert_exams(exams, student_id=student_id)
         progress_rows = upsert_elearning_progress(elearning_progress, student_id=student_id)
         deadline_rows = upsert_elearning_deadlines(elearning_deadlines, student_id=student_id)
-        logger.debug("Supabase update complete.")
-        logger.debug("Class sessions materialized: %d row(s).", materialized)
-        logger.debug("Exams upserted: %d row(s).", exam_rows)
         logger.debug("eLearning progress upserted: %d row(s).", progress_rows)
         logger.debug("eLearning deadlines upserted: %d row(s).", deadline_rows)
     except Exception as exc:
@@ -141,46 +125,17 @@ def run_hourly_sync() -> None:
         return
     _log_step_elapsed("Step 2", step_started)
 
-    # -------- Step 3: Fetch full data --------
+    # -------- Step 3: Direct Google Calendar sync --------
     step_started = time.perf_counter()
-    logger.info("Step 3: Fetching full sync data from Supabase")
+    logger.info("Step 3: Syncing raw data directly to Google Calendar")
     try:
-        from database import (
-            get_all_appointments,
-            get_all_class_sessions,
-            get_upcoming_exams,
-            get_all_schedule,
-        )
-        all_schedule_rows = get_all_class_sessions(student_id=student_id)
-        if not all_schedule_rows:
-            logger.warning(
-                "No class sessions found for full sync; falling back to weekly schedule rows for calendar sync."
-            )
-            all_schedule_rows = get_all_schedule(student_id=student_id)
-        all_appointments = get_all_appointments(student_id=student_id)
-        all_exams = get_upcoming_exams(student_id=student_id, days_ahead=180)
-        logger.debug("Full class dataset has %d row(s).", len(all_schedule_rows))
-        logger.debug("Full appointment set has %d row(s).", len(all_appointments))
-        logger.debug("Full exam set has %d row(s).", len(all_exams))
-    except Exception as exc:
-        logger.exception("Step 3 failed after %.2fs", time.perf_counter() - step_started)
-        _handle_error("Failed to fetch full data", exc)
-        return
-    _log_step_elapsed("Step 3", step_started)
+        from calendar_sync import sync_crawled_data_to_google_calendar
 
-    # -------- Step 4: Calendar sync & CSV export --------
-    step_started = time.perf_counter()
-    logger.info("Step 4: Exporting CSV and syncing Google Calendar")
-    try:
-        from calendar_sync import sync_database_to_csv_and_google_calendar
-
-        csv_path, did_sync = sync_database_to_csv_and_google_calendar(
-            all_schedule_rows,
-            all_appointments,
-            exams=all_exams,
+        _, did_sync = sync_crawled_data_to_google_calendar(
+            schedule,
+            exams,
             student_id=student_id,
         )
-        logger.info("CSV export complete: %s", csv_path)
         if did_sync:
             logger.info("Google Calendar sync complete.")
         else:
@@ -188,10 +143,10 @@ def run_hourly_sync() -> None:
                 "Google Calendar sync skipped (missing GOOGLE_CALENDAR_ID or Google service-account credentials)."
             )
     except Exception as exc:
-        logger.exception("Step 4 failed after %.2fs", time.perf_counter() - step_started)
-        _handle_error("CSV export / Google Calendar sync failed", exc)
+        logger.exception("Step 3 failed after %.2fs", time.perf_counter() - step_started)
+        _handle_error("Google Calendar sync failed", exc)
         return
-    _log_step_elapsed("Step 4", step_started)
+    _log_step_elapsed("Step 3", step_started)
 
     logger.info("=== Hourly data collection and sync complete. ===")
 

@@ -23,11 +23,9 @@ from requests import RequestException
 import requests
 
 from database import (
-    create_appointment,
     get_nearest_elearning_deadlines,
-    get_today_appointments,
-    get_today_class_sessions,
 )
+from calendar_sync import insert_calendar_event, fetch_events_from_calendar
 from gemini_parser import generate_conversational_reply_with_gemini
 from time_utils import local_now, local_today
 
@@ -742,15 +740,13 @@ def run() -> None:
                             _send_add_form_step(token, chat_id, form_state, prefix="Bạn chưa điền xong form.")
                             continue
                         title, appt_date, start_time, location = _build_add_appointment_from_form(form_state)
-                        create_appointment(
+                        insert_calendar_event(
                             title=title,
                             appointment_date=appt_date,
                             start_time=start_time,
                             end_time=None,
                             location=location,
-                            note=None,
-                            raw_user_input=_build_add_form_raw_input(form_state),
-                            gemini_confidence=None,
+                            note=_build_add_form_raw_input(form_state),
                         )
                         add_form_states.pop(chat_id, None)
                         _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
@@ -780,15 +776,13 @@ def run() -> None:
                         _send_add_form_step(token, chat_id, form_state, prefix="Bạn chưa điền xong form.")
                         continue
                     title, appt_date, start_time, location = _build_add_appointment_from_form(form_state)
-                    create_appointment(
+                    insert_calendar_event(
                         title=title,
                         appointment_date=appt_date,
                         start_time=start_time,
                         end_time=None,
                         location=location,
-                        note=None,
-                        raw_user_input=_build_add_form_raw_input(form_state),
-                        gemini_confidence=None,
+                        note=_build_add_form_raw_input(form_state),
                     )
                     add_form_states.pop(chat_id, None)
                     _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
@@ -811,7 +805,7 @@ def run() -> None:
                     continue
 
                 if lowered == "/today":
-                    rows = get_today_appointments()
+                    _, rows, _ = fetch_events_from_calendar(local_today())
                     _send_text(token, chat_id, _build_today_appointments_text(rows))
                     continue
 
@@ -831,7 +825,7 @@ def run() -> None:
                     except ValueError as exc:
                         _send_text(token, chat_id, str(exc))
                         continue
-                    rows = get_today_class_sessions(target_date=target_date)
+                    rows, _, _ = fetch_events_from_calendar(target_date)
                     _send_text(token, chat_id, _build_schedule_text(rows, target_date))
                     continue
 
