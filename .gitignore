@@ -41,6 +41,17 @@ exports/
 *.swo
 .DS_Store
 Thumbs.db
+
+# Local agent/tool configs
+.claude/
+.code-review-graph/
+.gemini/
+.kiro/
+.openclaude/
+.qoder/
+.cursorrules
+.windsurfrules
+.opencode.json
 CLAUDE.md
 test_local_sync.py
 QODER.md
