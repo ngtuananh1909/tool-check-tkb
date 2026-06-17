@@ -52,6 +52,18 @@ def main() -> None:
     student_id = os.environ.get("STUDENT_ID")
 
     # ------------------------------------------------------------------
+    # Debug: Log all relevant env vars
+    # ------------------------------------------------------------------
+    logger.info("=== ENV VAR CHECK ===")
+    logger.info(f"GOOGLE_CALENDAR_ID: {os.environ.get('GOOGLE_CALENDAR_ID', 'NOT SET')}")
+    logger.info(f"GOOGLE_SERVICE_ACCOUNT_JSON: {'SET' if os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON') else 'NOT SET'}")
+    logger.info(f"GOOGLE_SERVICE_ACCOUNT_FILE: {os.environ.get('GOOGLE_SERVICE_ACCOUNT_FILE', 'NOT SET')}")
+    logger.info(f"APP_TIMEZONE: {os.environ.get('APP_TIMEZONE', 'NOT SET')}")
+    logger.info(f"TELEGRAM_BOT_TOKEN: {'SET' if os.environ.get('TELEGRAM_BOT_TOKEN') else 'NOT SET'}")
+    logger.info(f"TELEGRAM_CHAT_ID: {os.environ.get('TELEGRAM_CHAT_ID', 'NOT SET')}")
+    logger.info("========================")
+
+    # ------------------------------------------------------------------
     # Fetch today's classes and appointments from Supabase
     # ------------------------------------------------------------------
     logger.info("=== Fetching today's schedule and appointments ===")

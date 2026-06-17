@@ -76,5 +76,11 @@ jobs:
       # -----------------------------------------------------------------------
       # 5. Send morning Telegram notification (step 5 only)
       # -----------------------------------------------------------------------
+      - name: Debug env vars
+        run: |
+          echo "GOOGLE_CALENDAR_ID=${GOOGLE_CALENDAR_ID:0:5}..."
+          echo "GOOGLE_SERVICE_ACCOUNT_JSON set: $[${#GOOGLE_SERVICE_ACCOUNT_JSON} > 0]"
+          echo "APP_TIMEZONE=$APP_TIMEZONE"
+
       - name: Send morning Telegram notification
         run: python main.py

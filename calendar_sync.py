@@ -321,9 +321,19 @@ def fetch_events_from_calendar(target_date: dt.date, days_ahead: int = 0) -> tup
     calendar_id = os.environ.get("GOOGLE_CALENDAR_ID", "").strip()
     service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
     service_account_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
-    
+
+    logger.info("=== fetch_events_from_calendar DEBUG ===")
+    logger.info(f"GOOGLE_CALENDAR_ID: '{calendar_id}' (len={len(calendar_id)})")
+    logger.info(f"GOOGLE_SERVICE_ACCOUNT_JSON: {'SET' if service_account_json else 'NOT SET'} (len={len(service_account_json)})")
+    logger.info(f"GOOGLE_SERVICE_ACCOUNT_FILE: '{service_account_file}'")
+    logger.info(f"File exists: {os.path.isfile(service_account_file) if service_account_file else 'N/A'}")
+    logger.info("=======================================")
+
     if not calendar_id or (not service_account_json and not service_account_file):
         logger.warning("Missing credentials, cannot fetch from Google Calendar.")
+        logger.warning(f"  calendar_id empty: {not calendar_id}")
+        logger.warning(f"  service_account_json empty: {not service_account_json}")
+        logger.warning(f"  service_account_file empty: {not service_account_file}")
         return [], [], []
 
     service, _ = _build_calendar_service(service_account_json, service_account_file)
