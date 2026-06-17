@@ -24,11 +24,11 @@ import requests
 from fastapi import FastAPI, Header, HTTPException, Request
 
 from database import (
-    create_appointment,
     get_nearest_elearning_deadlines,
     get_today_appointments,
     get_today_class_sessions,
 )
+from calendar_sync import insert_calendar_event
 from telegram_mvp_bot import (
     ADD_FORM_CANCEL_CALLBACK,
     ADD_FORM_DONE_CALLBACK,
@@ -288,15 +288,13 @@ async def telegram_webhook(
                 _send_add_form_step(token, chat_id, state, prefix="Bạn chưa điền xong form.")
                 return {"ok": True}
             title, appt_date, start_time, location = _build_add_appointment_from_form(state)
-            create_appointment(
+            insert_calendar_event(
                 title=title,
                 appointment_date=appt_date,
                 start_time=start_time,
                 end_time=None,
                 location=location,
-                note=None,
-                raw_user_input=_build_add_form_raw_input(state),
-                gemini_confidence=None,
+                note=_build_add_form_raw_input(state),
             )
             _ADD_FORM_STATES.pop(chat_id, None)
             _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
@@ -343,15 +341,13 @@ async def telegram_webhook(
                 _send_add_form_step(token, chat_id, form_state, prefix="Bạn chưa điền xong form.")
                 return {"ok": True}
             title, appt_date, start_time, location = _build_add_appointment_from_form(form_state)
-            create_appointment(
+            insert_calendar_event(
                 title=title,
                 appointment_date=appt_date,
                 start_time=start_time,
                 end_time=None,
                 location=location,
-                note=None,
-                raw_user_input=_build_add_form_raw_input(form_state),
-                gemini_confidence=None,
+                note=_build_add_form_raw_input(form_state),
             )
             _ADD_FORM_STATES.pop(chat_id, None)
             _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
