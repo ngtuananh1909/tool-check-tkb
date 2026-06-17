@@ -1,13 +1,14 @@
 {
   "mcpServers": {
     "code-review-graph": {
-      "command": "/home/tuananh/Documents/tool-check-tkb/.venv/bin/python",
-      "args": [
-        "-m",
-        "code_review_graph",
-        "serve"
-      ],
-      "cwd": "/home/tuananh/Documents/tool-check-tkb",
+      "command": "uvx",
+      "args": ["code-review-graph", "serve"],
+      "cwd": "/home/tuananh/Documents/TDTU-Vibe-Quest",
+      "type": "stdio"
+    },
+    "chrome-devtools": {
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp@latest"],
       "type": "stdio"
     }
   }
