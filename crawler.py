@@ -237,7 +237,7 @@ def fetch_schedule(
             try:
                 page.wait_for_url(
                     lambda url: "login" not in str(url).lower(),
-                    timeout=30_000,
+                    timeout=60_000,
                 )
             except PlaywrightTimeoutError:
                 # URL did not change within the timeout window.
@@ -249,7 +249,7 @@ def fetch_schedule(
             # Ensure the page is fully loaded after the URL change.
             # Use domcontentloaded – networkidle never settles on TDTU portal
             # due to persistent analytics/tracking connections.
-            page.wait_for_load_state("domcontentloaded", timeout=30_000)
+            page.wait_for_load_state("domcontentloaded", timeout=60_000)
 
             # Basic check – if we're still on the login page, fail loudly.
             if page.url == login_page_url or "login" in page.url.lower():
