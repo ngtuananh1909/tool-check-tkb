@@ -78,6 +78,15 @@ def run_hourly_sync() -> None:
 
     student_id = os.environ.get("STUDENT_ID")
 
+    # -------- Pre-check: log active semester --------
+    try:
+        from crawler import get_current_semester
+
+        semester = get_current_semester(student_id=student_id)
+        logger.info("Active semester on portal: %s", semester)
+    except Exception as exc:
+        logger.warning("Could not determine active semester: %s", exc)
+
     # -------- Step 1: Crawl --------
     step_started = time.perf_counter()
     logger.info("Step 1: Crawling schedule from TDTU portal")

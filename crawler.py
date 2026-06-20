@@ -303,6 +303,8 @@ def fetch_schedule(
             logger.info("Configuring schedule filters (semester + weekly view) when available")
             _configure_schedule_filters(page)
 
+            semester_label = _get_selected_semester_text(page)
+            logger.info("Crawling schedule for semester: %s", semester_label)
             logger.info(
                 "Parsing schedule table on %s (current week + %d future week(s)).",
                 page.url,
@@ -955,6 +957,9 @@ def _parse_exam_table_with_filters(page) -> list[dict]:
     except Exception as exc:
         logger.debug("Could not auto-select exam semester: %s", exc)
         semester_changed = False
+
+    semester_label = _get_selected_semester_text(page)
+    logger.info("Crawling exam schedule for semester: %s", semester_label)
 
     button_targets = _resolve_exam_type_button_targets(page)
     if button_targets:
@@ -1930,6 +1935,70 @@ def _configure_schedule_filters(page) -> None:
                 raise
 
 
+def get_current_semester(student_id: str | None = None, password: str | None = None) -> str:
+    """Login to portal, navigate to schedule page, and return the selected semester text."""
+    sid = student_id or os.environ.get("STUDENT_ID")
+    pwd = password or os.environ.get("PASSWORD")
+    if not sid or not pwd:
+        return "unknown"
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        )
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+        )
+        page = context.new_page()
+        try:
+            page.goto(PORTAL_URL, wait_until="networkidle", timeout=60_000)
+            page.wait_for_selector(SELECTOR_USERNAME, state="visible", timeout=30_000)
+            page.fill(SELECTOR_USERNAME, sid)
+            page.fill(SELECTOR_PASSWORD, pwd)
+            page.locator(SELECTOR_SUBMIT).first.click(timeout=5_000)
+            page.wait_for_url(lambda url: "login" not in str(url).lower(), timeout=30_000)
+            page.wait_for_load_state("networkidle", timeout=30_000)
+
+            page.goto(SCHEDULE_URL_BASE, wait_until="networkidle", timeout=60_000)
+            _select_semester_if_available(page)
+            return _get_selected_semester_text(page)
+        except Exception:
+            return "unknown"
+        finally:
+            context.close()
+            browser.close()
+
+
+def _get_selected_semester_text(page) -> str:
+    """Return the text of the currently selected semester option, or 'unknown' if not found."""
+    for select in page.locator("select").all():
+        try:
+            if not select.is_visible():
+                continue
+            options = select.locator("option").all()
+            if not options:
+                continue
+            option_texts = [opt.inner_text().strip() for opt in options]
+            searchable = " | ".join(option_texts)
+            if not SEMESTER_TEXT.search(searchable):
+                continue
+            current_value = (select.input_value() or "").strip()
+            if not current_value:
+                continue
+            for opt in options:
+                value = (opt.get_attribute("value") or "").strip()
+                if value == current_value:
+                    return opt.inner_text().strip()
+            return current_value
+        except Exception:
+            continue
+    return "unknown"
+
+
 def _select_semester_if_available(page) -> bool:
     """Select a likely semester option from any visible dropdown, if present."""
     preferred_semester = (os.environ.get("TARGET_SEMESTER") or "").strip().lower()
@@ -2005,36 +2074,58 @@ def _pick_target_semester(
                 return value, text
         logger.warning("TARGET_SEMESTER=%s not found in dropdown options.", preferred_semester)
 
-    # 2) Date-based default: Jan-Jul -> HK2/(year-1)-year, Aug-Dec -> HK1/year-(year+1)
+    # 2) Date-based default:
+    #    Jan-May  -> HK2/(year-1)-year
+    #    Jun-Aug  -> HK Hè/(year-1)-year  (summer semester: June-August)
+    #    Sep-Dec  -> HK1/year-(year+1)
     today = local_today()
-    if today.month <= 7:
+    if today.month <= 5:
         hk_num = 2
         start_year = today.year - 1
         end_year = today.year
+        hk_label = f"hk{hk_num}"
+    elif today.month <= 8:
+        hk_num = 0  # Hè has no number; matched by keyword below
+        start_year = today.year - 1
+        end_year = today.year
+        hk_label = "hè"
     else:
         hk_num = 1
         start_year = today.year
         end_year = today.year + 1
+        hk_label = f"hk{hk_num}"
 
     # Match flexibly: strip all separators/spaces from both the target and the option
     # so that "HK2/2025-2026", "HK2 2025-2026", "HK2-2025-2026" are all equivalent.
     def _sem_key(s: str) -> str:
         return re.sub(r'[\s/\-]+', '', s.lower())
 
-    default_key = _sem_key(f"hk{hk_num}{start_year}{end_year}")
-    for value, text in valid_options:
-        if default_key in _sem_key(text):
-            logger.info("Auto-selected semester by date rule: %s", text)
-            return value, text
+    if hk_label == "hè":
+        # Summer semester (HK Hè): match keyword "hè" + correct year range
+        year_re = re.compile(rf'{start_year}\s*[-/]\s*{end_year}', re.IGNORECASE)
+        he_re = re.compile(r'h[eèê]\s*/?\s*$|h[eèê]\s*/?\s*{start_year}', re.IGNORECASE)
+        for value, text in valid_options:
+            if year_re.search(text) and he_re.search(text):
+                logger.info("Auto-selected summer semester by date rule: %s", text)
+                return value, text
+    else:
+        default_key = _sem_key(f"{hk_label}{start_year}{end_year}")
+        for value, text in valid_options:
+            if default_key in _sem_key(text):
+                logger.info("Auto-selected semester by date rule: %s", text)
+                return value, text
 
     # Also try matching on just the year range + semester number with common Vietnamese prefixes
     # Normalize away spaces around separators for the year-range check.
     year_re = re.compile(rf'{start_year}\s*[-/]\s*{end_year}')
     # k[yỳiì]: matches "ky" (unaccented), "kỳ" (grave), "ki", "kì" – Vietnamese romanisations of "kỳ"
-    sem_re = re.compile(
-        rf'(?:hk|ky|k[yỳiì]|học\s*kỳ|hoc\s*ky|semester)\s*[/\-]?\s*{hk_num}(?!\d)',
-        re.IGNORECASE,
-    )
+    if hk_label == "hè":
+        sem_re = re.compile(r'h[eèê]', re.IGNORECASE)
+    else:
+        sem_re = re.compile(
+            rf'(?:hk|ky|k[yỳiì]|học\s*kỳ|hoc\s*ky|semester)\s*[/\-]?\s*{hk_num}(?!\d)',
+            re.IGNORECASE,
+        )
     for value, text in valid_options:
         if year_re.search(text) and sem_re.search(text):
             logger.info("Auto-selected semester by date rule (flexible match): %s", text)
