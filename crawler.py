@@ -172,6 +172,7 @@ def fetch_schedule(
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
+                "--disable-http2",
             ],
         )
         context = browser.new_context(
@@ -471,6 +472,7 @@ def fetch_elearning_progress(
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
+                "--disable-http2",
             ],
         )
         context = browser.new_context(
@@ -529,6 +531,7 @@ def _fetch_exam_schedule_from_portal(sid: str, pwd: str, weeks_ahead: int | None
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
+                "--disable-http2",
             ],
         )
         context = browser.new_context(
@@ -639,6 +642,7 @@ def _fetch_exam_schedule_from_elearning(username: str, password: str) -> list[di
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
+                "--disable-http2",
             ],
         )
         context = browser.new_context(
@@ -680,6 +684,7 @@ def _fetch_exam_schedule_from_stdportal_announcements(username: str, password: s
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
+                "--disable-http2",
             ],
         )
         context = browser.new_context(
@@ -1524,7 +1529,11 @@ def fetch_elearning_deadlines(
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-http2",
+            ],
         )
         context = browser.new_context(
             user_agent=(
@@ -1947,7 +1956,11 @@ def get_current_semester(student_id: str | None = None, password: str | None = N
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-http2",
+            ],
         )
         context = browser.new_context(
             user_agent=(
