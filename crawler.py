@@ -188,7 +188,7 @@ def fetch_schedule(
             # Step 1 – Load the portal login page
             # ----------------------------------------------------------------
             logger.info("Navigating to %s", PORTAL_URL)
-            page.goto(PORTAL_URL, wait_until="networkidle", timeout=60_000)
+            page.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=60_000)
 
             # ----------------------------------------------------------------
             # Step 2 – Fill in credentials and submit
@@ -247,7 +247,9 @@ def fetch_schedule(
                 )
 
             # Ensure the page is fully loaded after the URL change.
-            page.wait_for_load_state("networkidle", timeout=30_000)
+            # Use domcontentloaded – networkidle never settles on TDTU portal
+            # due to persistent analytics/tracking connections.
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
 
             # Basic check – if we're still on the login page, fail loudly.
             if page.url == login_page_url or "login" in page.url.lower():
@@ -286,7 +288,7 @@ def fetch_schedule(
 
                         logger.info("Clicking visible schedule navigation link (candidate %d)", i + 1)
                         candidate.click(timeout=10_000)
-                        page.wait_for_load_state("networkidle", timeout=60_000)
+                        page.wait_for_load_state("domcontentloaded", timeout=60_000)
                         clicked_schedule_link = True
                         break
                     except Exception as exc:
@@ -295,7 +297,7 @@ def fetch_schedule(
             if not clicked_schedule_link:
                 # Fallback: navigate directly to the schedule URL
                 logger.info("No visible schedule link found; navigating directly to %s", schedule_url)
-                page.goto(schedule_url, wait_until="networkidle", timeout=60_000)
+                page.goto(schedule_url, wait_until="domcontentloaded", timeout=60_000)
 
             # ----------------------------------------------------------------
             # Step 4 – Parse the schedule table
@@ -488,7 +490,7 @@ def fetch_elearning_progress(
             page.fill(ELEARNING_SELECTOR_USERNAME, user)
             page.fill(ELEARNING_SELECTOR_PASSWORD, pwd)
             page.locator(ELEARNING_SELECTOR_SUBMIT).first.click(timeout=10_000)
-            page.wait_for_load_state("networkidle", timeout=30_000)
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
 
             if "login" in page.url.lower():
                 raise RuntimeError(f"eLearning login failed. Current URL: {page.url}")
@@ -539,7 +541,7 @@ def _fetch_exam_schedule_from_portal(sid: str, pwd: str, weeks_ahead: int | None
         page = context.new_page()
 
         try:
-            page.goto(PORTAL_URL, wait_until="networkidle", timeout=60_000)
+            page.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_selector(SELECTOR_USERNAME, state="visible", timeout=30_000)
             page.fill(SELECTOR_USERNAME, sid)
             page.fill(SELECTOR_PASSWORD, pwd)
@@ -555,7 +557,7 @@ def _fetch_exam_schedule_from_portal(sid: str, pwd: str, weeks_ahead: int | None
             except PlaywrightTimeoutError:
                 logger.warning("Portal exam login wait_for_url timed out.")
 
-            page.wait_for_load_state("networkidle", timeout=30_000)
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
             if page.url == login_page_url or "login" in page.url.lower():
                 raise RuntimeError("Portal exam login failed.")
 
@@ -570,7 +572,7 @@ def _fetch_exam_schedule_from_portal(sid: str, pwd: str, weeks_ahead: int | None
                         if not candidate.is_visible():
                             continue
                         candidate.click(timeout=10_000)
-                        page.wait_for_load_state("networkidle", timeout=60_000)
+                        page.wait_for_load_state("domcontentloaded", timeout=60_000)
                         exams = _parse_exam_table_with_filters(page)
                         if exams:
                             return exams
@@ -592,7 +594,7 @@ def _fetch_exam_schedule_from_portal(sid: str, pwd: str, weeks_ahead: int | None
                         if not candidate.is_visible():
                             continue
                         candidate.click(timeout=10_000)
-                        page.wait_for_load_state("networkidle", timeout=60_000)
+                        page.wait_for_load_state("domcontentloaded", timeout=60_000)
                         clicked_schedule_link = True
                         break
                     except Exception:
@@ -600,7 +602,7 @@ def _fetch_exam_schedule_from_portal(sid: str, pwd: str, weeks_ahead: int | None
 
             if not clicked_schedule_link:
                 schedule_url = _build_schedule_url(page.url)
-                page.goto(schedule_url, wait_until="networkidle", timeout=60_000)
+                page.goto(schedule_url, wait_until="domcontentloaded", timeout=60_000)
 
             exam_tab = page.locator("a, button, input[type='button'], input[type='submit']").filter(
                 has_text=re.compile(r"lịch\s*thi|lich\s*thi|exam", re.IGNORECASE)
@@ -612,7 +614,7 @@ def _fetch_exam_schedule_from_portal(sid: str, pwd: str, weeks_ahead: int | None
                         if not candidate.is_visible():
                             continue
                         candidate.click(timeout=10_000)
-                        page.wait_for_load_state("networkidle", timeout=30_000)
+                        page.wait_for_load_state("domcontentloaded", timeout=30_000)
                         exams = _parse_exam_table_with_filters(page)
                         if exams:
                             return exams
@@ -621,7 +623,7 @@ def _fetch_exam_schedule_from_portal(sid: str, pwd: str, weeks_ahead: int | None
 
             # Strategy 3: final fallback to direct exam URL built from any available token.
             exam_url = _build_exam_url(page.url)
-            page.goto(exam_url, wait_until="networkidle", timeout=60_000)
+            page.goto(exam_url, wait_until="domcontentloaded", timeout=60_000)
             exams = _parse_exam_table_with_filters(page)
             return exams
         finally:
@@ -653,7 +655,7 @@ def _fetch_exam_schedule_from_elearning(username: str, password: str) -> list[di
             page.fill(ELEARNING_SELECTOR_USERNAME, username)
             page.fill(ELEARNING_SELECTOR_PASSWORD, password)
             page.locator(ELEARNING_SELECTOR_SUBMIT).first.click(timeout=10_000)
-            page.wait_for_load_state("networkidle", timeout=30_000)
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
             if "login" in page.url.lower():
                 raise RuntimeError("eLearning login failed while fetching exams.")
 
@@ -690,7 +692,7 @@ def _fetch_exam_schedule_from_stdportal_announcements(username: str, password: s
         page = context.new_page()
         try:
             # Reuse old-portal login to establish SSO session before opening stdportal pages.
-            page.goto(PORTAL_URL, wait_until="networkidle", timeout=60_000)
+            page.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_selector(SELECTOR_USERNAME, state="visible", timeout=30_000)
             page.fill(SELECTOR_USERNAME, username)
             page.fill(SELECTOR_PASSWORD, password)
@@ -704,8 +706,8 @@ def _fetch_exam_schedule_from_stdportal_announcements(username: str, password: s
                 pass
 
             # Two-step navigation consistently lands on authenticated stdportal home.
-            page.goto(stdportal_home, wait_until="networkidle", timeout=60_000)
-            page.goto(stdportal_login_home, wait_until="networkidle", timeout=60_000)
+            page.goto(stdportal_home, wait_until="domcontentloaded", timeout=60_000)
+            page.goto(stdportal_login_home, wait_until="domcontentloaded", timeout=60_000)
 
             links = page.evaluate(
                 r"""
@@ -967,7 +969,7 @@ def _parse_exam_table_with_filters(page) -> list[dict]:
         for target in button_targets:
             changed = _click_exam_type_by_group(page, target["group"])
             if changed or semester_changed:
-                page.wait_for_load_state("networkidle", timeout=30_000)
+                page.wait_for_load_state("domcontentloaded", timeout=30_000)
 
             _scroll_exam_page_to_bottom(page)
             rows = _parse_exam_table(page)
@@ -983,7 +985,7 @@ def _parse_exam_table_with_filters(page) -> list[dict]:
     type_targets = _resolve_exam_type_targets(page)
     if not type_targets:
         if semester_changed:
-            page.wait_for_load_state("networkidle", timeout=30_000)
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
         _scroll_exam_page_to_bottom(page)
         return _parse_exam_table(page)
 
@@ -991,7 +993,7 @@ def _parse_exam_table_with_filters(page) -> list[dict]:
     for target in type_targets:
         changed = _select_exam_type_by_value(page, target["value"])
         if changed or semester_changed:
-            page.wait_for_load_state("networkidle", timeout=30_000)
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
 
         _scroll_exam_page_to_bottom(page)
         rows = _parse_exam_table(page)
@@ -1105,7 +1107,7 @@ def _click_exam_type_by_group(page, group: str) -> bool:
                 if not candidate.is_visible():
                     continue
                 candidate.click(timeout=10_000)
-                page.wait_for_load_state("networkidle", timeout=30_000)
+                page.wait_for_load_state("domcontentloaded", timeout=30_000)
                 logger.info("Selected exam type tab/button for group=%s using selector=%s", group, selector)
                 return True
         except Exception as exc:
@@ -1196,7 +1198,7 @@ def _select_exam_type_by_value(page, target_value: str) -> bool:
                     return False
 
                 select.select_option(value)
-                page.wait_for_load_state("networkidle", timeout=30_000)
+                page.wait_for_load_state("domcontentloaded", timeout=30_000)
                 logger.info("Selected exam type option value=%s", value)
                 return True
         except Exception as exc:
@@ -1538,7 +1540,7 @@ def fetch_elearning_deadlines(
             page.fill(ELEARNING_SELECTOR_USERNAME, user)
             page.fill(ELEARNING_SELECTOR_PASSWORD, pwd)
             page.locator(ELEARNING_SELECTOR_SUBMIT).first.click(timeout=10_000)
-            page.wait_for_load_state("networkidle", timeout=30_000)
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
             if "login" in page.url.lower():
                 raise RuntimeError("eLearning login failed while fetching deadlines.")
 
@@ -1895,7 +1897,7 @@ def _goto_next_week(page) -> bool:
                     )
                 except Exception:
                     pass
-                page.wait_for_load_state("networkidle", timeout=30_000)
+                page.wait_for_load_state("domcontentloaded", timeout=30_000)
                 page.wait_for_timeout(1_200)
                 after = _capture_week_signature(page)
                 if after != before:
@@ -1919,7 +1921,7 @@ def _configure_schedule_filters(page) -> None:
         # Retry once after waiting for navigation to stabilize.
         if semester_changed and "Execution context was destroyed" in str(exc):
             logger.info("Page reloaded after semester change; retrying week-view selection.")
-            page.wait_for_load_state("networkidle", timeout=30_000)
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
             week_view_changed = _switch_to_week_view_if_available(page)
         else:
             raise
@@ -1930,7 +1932,7 @@ def _configure_schedule_filters(page) -> None:
         except Exception as exc:
             if "Execution context was destroyed" in str(exc):
                 logger.info("Page reloaded while applying filters; continuing with latest state.")
-                page.wait_for_load_state("networkidle", timeout=30_000)
+                page.wait_for_load_state("domcontentloaded", timeout=30_000)
             else:
                 raise
 
@@ -1955,15 +1957,35 @@ def get_current_semester(student_id: str | None = None, password: str | None = N
         )
         page = context.new_page()
         try:
-            page.goto(PORTAL_URL, wait_until="networkidle", timeout=60_000)
+            page.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_selector(SELECTOR_USERNAME, state="visible", timeout=30_000)
             page.fill(SELECTOR_USERNAME, sid)
             page.fill(SELECTOR_PASSWORD, pwd)
-            page.locator(SELECTOR_SUBMIT).first.click(timeout=5_000)
-            page.wait_for_url(lambda url: "login" not in str(url).lower(), timeout=30_000)
-            page.wait_for_load_state("networkidle", timeout=30_000)
 
-            page.goto(SCHEDULE_URL_BASE, wait_until="networkidle", timeout=60_000)
+            submitted = False
+            try:
+                page.locator(SELECTOR_SUBMIT).first.click(timeout=5_000)
+                submitted = True
+            except Exception:
+                try:
+                    page.locator(SELECTOR_PASSWORD).press("Enter")
+                    submitted = True
+                except Exception:
+                    page.evaluate(
+                        "const f = document.querySelector('form'); if (f) f.submit();"
+                    )
+                    submitted = True
+
+            if submitted:
+                try:
+                    page.wait_for_url(
+                        lambda url: "login" not in str(url).lower(), timeout=30_000
+                    )
+                except PlaywrightTimeoutError:
+                    pass
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
+
+            page.goto(SCHEDULE_URL_BASE, wait_until="domcontentloaded", timeout=60_000)
             _select_semester_if_available(page)
             return _get_selected_semester_text(page)
         except Exception:
@@ -2050,7 +2072,7 @@ def _select_semester_if_available(page) -> bool:
                 return False
 
             select.select_option(target_value)
-            page.wait_for_load_state("networkidle", timeout=30_000)
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
             logger.info("Selected semester option: %s", target_text)
             return True
         except Exception as exc:
@@ -2163,7 +2185,7 @@ def _switch_to_week_view_if_available(page) -> bool:
                 if item.is_visible() and not item.is_checked():
                     item.check()
                     try:
-                        page.wait_for_load_state("networkidle", timeout=30_000)
+                        page.wait_for_load_state("domcontentloaded", timeout=30_000)
                     except Exception:
                         pass
                     logger.info("Switched schedule mode to week view via radio control.")
@@ -2188,7 +2210,7 @@ def _switch_to_week_view_if_available(page) -> bool:
                     if text and not WEEK_VIEW_TEXT.search(text):
                         continue
                     item.click()
-                    page.wait_for_load_state("networkidle", timeout=30_000)
+                    page.wait_for_load_state("domcontentloaded", timeout=30_000)
                     logger.info("Switched schedule mode to week view via clickable control.")
                     return True
             except Exception:
@@ -2212,7 +2234,7 @@ def _click_apply_filter_if_available(page) -> None:
             return
     except Exception as exc:
         if "Execution context was destroyed" in str(exc):
-            page.wait_for_load_state("networkidle", timeout=30_000)
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
             return
         raise
 
@@ -2228,7 +2250,7 @@ def _click_apply_filter_if_available(page) -> None:
                 continue
 
             control.click()
-            page.wait_for_load_state("networkidle", timeout=30_000)
+            page.wait_for_load_state("domcontentloaded", timeout=30_000)
             logger.info("Applied schedule filters.")
             return
         except Exception:
