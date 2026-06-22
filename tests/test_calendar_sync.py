@@ -7,7 +7,17 @@ from unittest.mock import patch
 from googleapiclient.errors import HttpError
 
 import calendar_sync
-from calendar_sync import _build_sync_items, _validate_calendar_target
+from calendar_sync import (
+    SYNC_SOURCE_APPOINTMENT,
+    SYNC_SOURCE_CLASS_SESSION,
+    SYNC_SOURCE_EXAM,
+    SYNC_SOURCE_SCHEDULE,
+    _build_sync_items,
+    _managed_source_types_for_crawler_sync,
+    _managed_source_types_for_database_sync,
+    _replace_bot_events_for_range,
+    _validate_calendar_target,
+)
 
 
 class _FakeCalendarsGet:
@@ -158,6 +168,296 @@ class CalendarSyncValidationTests(unittest.TestCase):
         items = _build_sync_items(sessions, [], [], target_date)
 
         self.assertEqual(items[0]["payload"]["description"], "Học bù")
+
+
+# ---------------------------------------------------------------------------
+# Fakes for _replace_bot_events_for_range tests
+# ---------------------------------------------------------------------------
+
+
+class _Recorder:
+    def __init__(self) -> None:
+        self.inserts: list[str] = []
+        self.insert_bodies: list[dict] = []
+        self.patches: list[str] = []
+        self.deletes: list[str] = []
+
+
+class _FakeEventsList:
+    def __init__(self, items: list[dict]) -> None:
+        self._items = items
+
+    def execute(self) -> dict:
+        return {"items": self._items, "nextPageToken": None}
+
+
+class _FakeEventsInsert:
+    def __init__(self, recorder: _Recorder, body: dict) -> None:
+        self._recorder = recorder
+        self._body = body
+
+    def execute(self) -> dict:
+        eid = f"new-{len(self._recorder.inserts)}"
+        self._recorder.inserts.append(eid)
+        self._recorder.insert_bodies.append(self._body)
+        return {"id": eid, "htmlLink": f"https://example.com/{eid}"}
+
+
+class _FakeEventsPatch:
+    def __init__(self, recorder: _Recorder, event_id: str, body: dict) -> None:
+        self._recorder = recorder
+        self._event_id = event_id
+        self._body = body
+
+    def execute(self) -> dict:
+        self._recorder.patches.append(self._event_id)
+        return {"id": self._event_id, "htmlLink": f"https://example.com/{self._event_id}"}
+
+
+class _FakeEventsDelete:
+    def __init__(self, recorder: _Recorder, event_id: str) -> None:
+        self._recorder = recorder
+        self._event_id = event_id
+
+    def execute(self) -> dict:
+        self._recorder.deletes.append(self._event_id)
+        return {}
+
+
+class _FakeEventsResource:
+    def __init__(self, recorder: _Recorder, items: list[dict]) -> None:
+        self._recorder = recorder
+        self._items = items
+
+    def list(self, **_kwargs) -> _FakeEventsList:
+        return _FakeEventsList(self._items)
+
+    def insert(self, calendarId: str, body: dict) -> _FakeEventsInsert:
+        return _FakeEventsInsert(self._recorder, body)
+
+    def patch(self, calendarId: str, eventId: str, body: dict) -> _FakeEventsPatch:
+        return _FakeEventsPatch(self._recorder, eventId, body)
+
+    def delete(self, calendarId: str, eventId: str) -> _FakeEventsDelete:
+        return _FakeEventsDelete(self._recorder, eventId)
+
+
+class _OwnershipFakeCalendarsGet:
+    def execute(self) -> dict:
+        return {"id": "cal-id"}
+
+
+class _OwnershipFakeCalendarsResource:
+    def get(self, calendarId: str) -> _OwnershipFakeCalendarsGet:
+        return _OwnershipFakeCalendarsGet()
+
+
+class _OwnershipFakeService:
+    def __init__(self, recorder: _Recorder, items: list[dict]) -> None:
+        self._recorder = recorder
+        self._events = _FakeEventsResource(recorder, items)
+
+    def events(self) -> _FakeEventsResource:
+        return self._events
+
+    def calendars(self) -> _OwnershipFakeCalendarsResource:
+        return _OwnershipFakeCalendarsResource()
+
+
+def _event(eid: str, source_type: str, source_key: str) -> dict:
+    return {
+        "id": eid,
+        "extendedProperties": {
+            "private": {
+                "source": "tool-check-tkb",
+                "source_type": source_type,
+                "source_key": source_key,
+            }
+        },
+    }
+
+
+def _sync_item(source_type: str, source_key: str) -> dict:
+    return {
+        "source_type": source_type,
+        "source_key": source_key,
+        "source_hash": "h",
+        "payload": {"summary": "x"},
+    }
+
+
+class ManagedSourceTypesHelperTests(unittest.TestCase):
+    def test_crawler_sync_owns_class_session_and_exam(self) -> None:
+        self.assertEqual(
+            _managed_source_types_for_crawler_sync(),
+            frozenset({SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM}),
+        )
+
+    def test_database_sync_with_class_sessions(self) -> None:
+        self.assertEqual(
+            _managed_source_types_for_database_sync(use_class_sessions=True),
+            frozenset(
+                {SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_APPOINTMENT, SYNC_SOURCE_EXAM}
+            ),
+        )
+
+    def test_database_sync_with_schedule(self) -> None:
+        self.assertEqual(
+            _managed_source_types_for_database_sync(use_class_sessions=False),
+            frozenset(
+                {SYNC_SOURCE_SCHEDULE, SYNC_SOURCE_APPOINTMENT, SYNC_SOURCE_EXAM}
+            ),
+        )
+
+
+class ReplaceBotEventsOwnershipTests(unittest.TestCase):
+    """Regression tests for the /add deletion bug."""
+
+    def test_empty_sync_items_keeps_appointments(self) -> None:
+        """Bug gốc: TKB rỗng không được xóa appointments do /add tạo."""
+        existing = [
+            _event("evt-appt-1", SYNC_SOURCE_APPOINTMENT, "appointment:2026-06-22:Họp nhóm"),
+        ]
+        recorder = _Recorder()
+        service = _OwnershipFakeService(recorder, existing)
+
+        _replace_bot_events_for_range(
+            service,
+            "cal",
+            [],
+            None,
+            frozenset({SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM}),
+        )
+
+        self.assertEqual(recorder.deletes, [])
+        self.assertEqual(recorder.inserts, [])
+        self.assertEqual(recorder.patches, [])
+
+    def test_only_managed_source_type_is_deleted(self) -> None:
+        """Khi sync class_session mới, chỉ class_session cũ bị xóa."""
+        existing = [
+            _event("evt-appt", SYNC_SOURCE_APPOINTMENT, "appointment:2026-06-22:Họp"),
+            _event("evt-cs-old", SYNC_SOURCE_CLASS_SESSION, "class_session:abc"),
+        ]
+        recorder = _Recorder()
+        service = _OwnershipFakeService(recorder, existing)
+        sync_items = [_sync_item(SYNC_SOURCE_CLASS_SESSION, "class_session:new")]
+
+        _replace_bot_events_for_range(
+            service,
+            "cal",
+            sync_items,
+            None,
+            frozenset({SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM}),
+        )
+
+        self.assertIn("evt-cs-old", recorder.deletes)
+        self.assertNotIn("evt-appt", recorder.deletes)
+
+    def test_exam_events_deleted_by_crawler_sync(self) -> None:
+        """Crawler sync owns exam → xóa được exam cũ (không thuộc current_keys)."""
+        existing = [
+            _event("evt-exam-old", SYNC_SOURCE_EXAM, "exam:xyz"),
+        ]
+        recorder = _Recorder()
+        service = _OwnershipFakeService(recorder, existing)
+
+        _replace_bot_events_for_range(
+            service,
+            "cal",
+            [],
+            None,
+            frozenset({SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM}),
+        )
+
+        self.assertEqual(recorder.deletes, ["evt-exam-old"])
+
+    def test_schedule_events_skipped_by_crawler_sync(self) -> None:
+        """Crawler sync KHÔNG owns schedule → schedule events được bảo vệ."""
+        existing = [
+            _event("evt-sched", SYNC_SOURCE_SCHEDULE, "schedule:monday-1-2"),
+        ]
+        recorder = _Recorder()
+        service = _OwnershipFakeService(recorder, existing)
+
+        with self.assertLogs(calendar_sync.logger, level="WARNING") as cm:
+            _replace_bot_events_for_range(
+                service,
+                "cal",
+                [],
+                None,
+                frozenset({SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM}),
+            )
+
+        self.assertEqual(recorder.deletes, [])
+        self.assertTrue(
+            any("owned by other source types" in m for m in cm.output),
+            cm.output,
+        )
+
+    def test_legacy_event_without_source_type_not_deleted(self) -> None:
+        """Event không có source_type → chỉ log warning, không xóa."""
+        existing = [
+            {"id": "evt-legacy", "extendedProperties": {"private": {"source": "tool-check-tkb"}}},
+        ]
+        recorder = _Recorder()
+        service = _OwnershipFakeService(recorder, existing)
+
+        with self.assertLogs(calendar_sync.logger, level="WARNING") as cm:
+            _replace_bot_events_for_range(
+                service,
+                "cal",
+                [],
+                None,
+                frozenset({SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM}),
+            )
+
+        self.assertEqual(recorder.deletes, [])
+        self.assertTrue(
+            any("legacy" in m.lower() for m in cm.output),
+            cm.output,
+        )
+
+    def test_database_sync_deletes_appointments(self) -> None:
+        """DB sync owns appointment → xóa appointment cũ khi sync mới không có nó."""
+        existing = [
+            _event("evt-appt", SYNC_SOURCE_APPOINTMENT, "appointment:old"),
+        ]
+        recorder = _Recorder()
+        service = _OwnershipFakeService(recorder, existing)
+
+        _replace_bot_events_for_range(
+            service,
+            "cal",
+            [],
+            None,
+            frozenset(
+                {SYNC_SOURCE_SCHEDULE, SYNC_SOURCE_APPOINTMENT, SYNC_SOURCE_EXAM}
+            ),
+        )
+
+        self.assertEqual(recorder.deletes, ["evt-appt"])
+
+    def test_matching_source_key_is_kept_via_patch(self) -> None:
+        """Event đã có source_key khớp sync_items → patch (không xóa)."""
+        existing = [
+            _event("evt-cs", SYNC_SOURCE_CLASS_SESSION, "class_session:abc"),
+        ]
+        recorder = _Recorder()
+        service = _OwnershipFakeService(recorder, existing)
+        sync_items = [_sync_item(SYNC_SOURCE_CLASS_SESSION, "class_session:abc")]
+
+        _replace_bot_events_for_range(
+            service,
+            "cal",
+            sync_items,
+            None,
+            frozenset({SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM}),
+        )
+
+        self.assertEqual(recorder.deletes, [])
+        # patch hoặc skip (nếu hash giống). Không quan trọng insert ở đây.
+        self.assertEqual(len(recorder.inserts) + len(recorder.patches), 1)
 
 
 if __name__ == "__main__":

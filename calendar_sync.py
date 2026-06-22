@@ -29,6 +29,27 @@ SYNC_SOURCE_CLASS_SESSION = "class_session"
 SYNC_SOURCE_APPOINTMENT = "appointment"
 SYNC_SOURCE_EXAM = "exam"
 DEFAULT_SYNC_WEEKS = 16
+
+
+def _managed_source_types_for_crawler_sync() -> frozenset[str]:
+    """Source types owned by ``sync_crawled_data_to_google_calendar``.
+
+    Crawler sync only manages ``class_sessions`` and ``exams``. It must never
+    delete events created by Telegram ``/add`` (``source_type=appointment``) or
+    by the recurring-weekly DB sync (``source_type=schedule``).
+    """
+    return frozenset({SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM})
+
+
+def _managed_source_types_for_database_sync(use_class_sessions: bool) -> frozenset[str]:
+    """Source types owned by ``sync_database_to_csv_and_google_calendar``."""
+    if use_class_sessions:
+        return frozenset(
+            {SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_APPOINTMENT, SYNC_SOURCE_EXAM}
+        )
+    return frozenset(
+        {SYNC_SOURCE_SCHEDULE, SYNC_SOURCE_APPOINTMENT, SYNC_SOURCE_EXAM}
+    )
 CALENDAR_API_MAX_ATTEMPTS = 4
 CALENDAR_API_RETRY_STATUSES = {429, 500, 502, 503, 504}
 WEEKDAY_TO_RRULE = {
@@ -218,9 +239,17 @@ def sync_database_to_csv_and_google_calendar(
 
     service, service_account_email = _build_calendar_service(service_account_json, service_account_file)
     _validate_calendar_target(service, calendar_id, service_account_email)
-    _replace_bot_events_for_range(service, calendar_id, sync_items, student_id)
+    managed = _managed_source_types_for_database_sync(
+        bool(use_class_sessions and class_sessions)
+    )
+    _replace_bot_events_for_range(service, calendar_id, sync_items, student_id, managed)
 
-    logger.info("Synced %d event(s) to Google Calendar '%s'.", len(events), calendar_id)
+    logger.info(
+        "Synced %d event(s) to Google Calendar '%s' (managed=%s).",
+        len(events),
+        calendar_id,
+        sorted(managed),
+    )
     return csv_path, True
 
 
@@ -257,9 +286,15 @@ def sync_crawled_data_to_google_calendar(
 
     service, service_account_email = _build_calendar_service(service_account_json, service_account_file)
     _validate_calendar_target(service, calendar_id, service_account_email)
-    _replace_bot_events_for_range(service, calendar_id, sync_items, student_id)
-    
-    logger.info("Synced %d event(s) to Google Calendar '%s' directly from crawler.", len(events), calendar_id)
+    managed = _managed_source_types_for_crawler_sync()
+    _replace_bot_events_for_range(service, calendar_id, sync_items, student_id, managed)
+
+    logger.info(
+        "Synced %d event(s) to Google Calendar '%s' directly from crawler (managed=%s).",
+        len(events),
+        calendar_id,
+        sorted(managed),
+    )
     return "", True
 
 
@@ -1073,9 +1108,18 @@ def _replace_bot_events_for_range(
     calendar_id: str,
     sync_items: list[dict],
     student_id: str | None,
+    managed_source_types: frozenset[str] | set[str],
 ) -> None:
+    """Reconcile bot-owned events with the desired ``sync_items``.
+
+    Only events whose ``extendedProperties.private.source_type`` is in
+    ``managed_source_types`` are eligible for deletion. This guarantees that
+    one sync entry (e.g. the crawler sync) never purges events owned by
+    another entry (e.g. appointments created by Telegram ``/add``).
+    """
     existing_by_key, legacy_events = _list_bot_events(service, calendar_id)
     current_keys = {item["source_key"] for item in sync_items}
+    managed = frozenset(managed_source_types)
 
     sid = student_id or os.environ.get("STUDENT_ID", "")
     now_utc = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -1103,28 +1147,54 @@ def _replace_bot_events_for_range(
             }
         )
 
-    for event in legacy_events:
+    # Legacy events: tagged with `source=tool-check-tkb` but no `source_key`,
+    # so we cannot determine their owner. Leave them untouched and warn.
+    if legacy_events:
+        logger.warning(
+            "Found %d legacy bot event(s) without source_key; leaving untouched.",
+            len(legacy_events),
+        )
+
+    deleted_count = 0
+    skipped_other_owner: list[str] = []
+    for source_key, event in existing_by_key.items():
+        if source_key in current_keys:
+            continue
+        event_source_type = _event_source_type(event)
+        if event_source_type not in managed:
+            skipped_other_owner.append(source_key)
+            continue
         event_id = str(event.get("id") or "").strip()
         if event_id:
             _safe_delete_calendar_event(service, calendar_id, event_id)
+            deleted_count += 1
+        state_rows.append(
+            {
+                "student_id": sid,
+                "source_type": event_source_type,
+                "source_key": source_key,
+                "source_hash": _event_source_hash(event),
+                "uploaded": False,
+                "calendar_event_id": None,
+                "calendar_event_link": None,
+                "last_seen_at": now_utc,
+            }
+        )
 
-    for source_key, event in existing_by_key.items():
-        if source_key not in current_keys:
-            event_id = str(event.get("id") or "").strip()
-            if event_id:
-                _safe_delete_calendar_event(service, calendar_id, event_id)
-            state_rows.append(
-                {
-                    "student_id": sid,
-                    "source_type": _event_source_type(event),
-                    "source_key": source_key,
-                    "source_hash": _event_source_hash(event),
-                    "uploaded": False,
-                    "calendar_event_id": None,
-                    "calendar_event_link": None,
-                    "last_seen_at": now_utc,
-                }
-            )
+    if skipped_other_owner:
+        logger.warning(
+            "Sync (managed=%s) skipped %d event(s) owned by other source types. "
+            "Sample source_keys: %s",
+            sorted(managed),
+            len(skipped_other_owner),
+            skipped_other_owner[:5],
+        )
+    if deleted_count:
+        logger.info(
+            "Sync (managed=%s) deleted %d stale event(s).",
+            sorted(managed),
+            deleted_count,
+        )
 
     # Note: Bypassing DB, so we do not call upsert_calendar_sync_state here.
 
