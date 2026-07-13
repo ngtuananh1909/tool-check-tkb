@@ -4,10 +4,10 @@ telegram_mvp_bot.py - MVP Telegram listener for creating appointments.
 Appointments are created only through the /add form flow.
 
 Time parsing rules (MVP):
-    - YYYY-MM-DD HH:MM
-    - DD/MM/YYYY HH:MM
-    - DD/MM HH:MM      (uses current year)
-    - HH:MM            (uses today)
+    - YYYY-MM-DD HHhMM
+    - DD/MM/YYYY HHhMM
+    - DD/MM HHhMM      (uses current year)
+    - HHhMM            (uses today)
 
 The script uses Telegram getUpdates long polling and only accepts messages
 from TELEGRAM_CHAT_ID (if set).
@@ -214,7 +214,7 @@ def _parse_input(text: str) -> tuple[str, dt.date, str, str | None]:
 
 def _looks_like_appointment_message(text: str) -> bool:
     lower = text.lower()
-    has_time = re.search(r"\b\d{1,2}:\d{2}\b", text) is not None
+    has_time = re.search(r"\b\d{1,2}h\d{2}\b", text) is not None
     has_short_date = re.search(r"\b\d{1,2}/\d{1,2}(?:/\d{4})?\b", text) is not None
     has_iso_date = re.search(r"\b\d{4}-\d{2}-\d{2}\b", text) is not None
 
@@ -222,7 +222,7 @@ def _looks_like_appointment_message(text: str) -> bool:
         parts = text.split("-", 1)
         if len(parts) == 2 and parts[0].strip() and parts[1].strip():
             rest = parts[1]
-            if re.search(r"\b\d{1,2}:\d{2}\b", rest) or re.search(r"\b\d{1,2}/\d{1,2}(?:/\d{4})?\b", rest) or re.search(
+            if re.search(r"\b\d{1,2}h\d{2}\b", rest) or re.search(r"\b\d{1,2}/\d{1,2}(?:/\d{4})?\b", rest) or re.search(
                 r"\b\d{4}-\d{2}-\d{2}\b", rest
             ):
                 return True
@@ -284,33 +284,33 @@ def _normalize_time_value(value: object) -> str | None:
 
 
 def _parse_time_field(raw: str) -> tuple[dt.date, str]:
-    """Return (date, HH:MM) from accepted time patterns."""
+    """Return (date, HH:MM) from accepted HHhMM input patterns."""
     value = raw.strip()
     now = local_now()
 
-    m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})", value)
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2})h(\d{2})", value)
     if m:
         y, mo, d, h, mi = map(int, m.groups())
         return dt.date(y, mo, d), _validate_hhmm(h, mi)
 
-    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2}):(\d{2})", value)
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2})h(\d{2})", value)
     if m:
         d, mo, y, h, mi = map(int, m.groups())
         return dt.date(y, mo, d), _validate_hhmm(h, mi)
 
-    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})\s+(\d{1,2}):(\d{2})", value)
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})\s+(\d{1,2})h(\d{2})", value)
     if m:
         d, mo, h, mi = map(int, m.groups())
         return dt.date(now.year, mo, d), _validate_hhmm(h, mi)
 
-    m = re.fullmatch(r"(\d{1,2}):(\d{2})", value)
+    m = re.fullmatch(r"(\d{1,2})h(\d{2})", value)
     if m:
         h, mi = map(int, m.groups())
         return now.date(), _validate_hhmm(h, mi)
 
     raise ValueError(
         "Không đọc được thời gian. Dùng một trong các format: "
-        "YYYY-MM-DD HH:MM | DD/MM/YYYY HH:MM | DD/MM HH:MM | HH:MM"
+        "YYYY-MM-DD HHhMM | DD/MM/YYYY HHhMM | DD/MM HHhMM | HHhMM"
     )
 
 
@@ -340,12 +340,23 @@ def _parse_date_field(raw: str, *, reference_date: dt.date | None = None) -> dt.
     raise ValueError("Không đọc được ngày. Dùng YYYY-MM-DD hoặc DD/MM hoặc DD/MM/YYYY.")
 
 
-def _parse_clock_field(raw: str) -> str:
+def _parse_clock_parts(raw: str) -> tuple[int, int]:
     value = str(raw or "").strip()
-    m = re.fullmatch(r"(\d{1,2}):(\d{2})", value)
+    m = re.fullmatch(r"(\d{1,2})h(\d{2})", value)
     if not m:
-        raise ValueError("Không đọc được giờ. Dùng HH:MM, ví dụ 9:00 hoặc 09:00.")
+        raise ValueError("Không đọc được giờ. Dùng HHhMM, ví dụ 9h00 hoặc 09h00.")
     hour, minute = map(int, m.groups())
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError("Giờ không hợp lệ.")
+    return hour, minute
+
+
+def _format_clock_for_add_form(hour: int, minute: int) -> str:
+    return f"{hour}h{minute:02d}"
+
+
+def _parse_clock_field(raw: str) -> str:
+    hour, minute = _parse_clock_parts(raw)
     return f"{_validate_hhmm(hour, minute)}:00"
 
 
@@ -489,7 +500,7 @@ def _build_add_form_prompt(state: dict[str, object]) -> str:
     if step == "date":
         return "Nhập ngày cho lịch hẹn.\nVí dụ: 16/5 hoặc 2026-05-16\nGõ /cancel để hủy."
     if step == "time":
-        return "Nhập giờ bắt đầu.\nVí dụ: 9:00 hoặc 09:00\nGõ /cancel để hủy."
+        return "Nhập giờ bắt đầu.\nVí dụ: 9h00 hoặc 09h00\nGõ /cancel để hủy."
     if step == "job":
         return "Nhập nội dung công việc.\nVí dụ: Họp nhóm\nGõ /cancel để hủy."
     if step == "where":
@@ -501,7 +512,7 @@ def _build_add_form_input_markup(state: dict[str, object]) -> dict[str, object]:
     step = str(state.get("step") or "date")
     placeholders = {
         "date": "Ví dụ: 16/5 hoặc 2026-05-16",
-        "time": "Ví dụ: 9:00 hoặc 09:00",
+        "time": "Ví dụ: 9h00 hoặc 09h00",
         "job": "Ví dụ: Họp nhóm",
         "where": "Ví dụ: B402",
     }
@@ -559,7 +570,8 @@ def _advance_add_form_state(state: dict[str, object], user_text: str) -> str:
         state["step"] = "time"
         return _build_add_form_prompt(state)
     if step == "time":
-        state["time"] = _parse_clock_field(value)[:5]
+        hour, minute = _parse_clock_parts(value)
+        state["time"] = _format_clock_for_add_form(hour, minute)
         state["step"] = "job"
         return _build_add_form_prompt(state)
     if step == "job":
@@ -614,10 +626,18 @@ def _build_add_form_raw_input(state: dict[str, object]) -> str:
     )
 
 
+def _format_saved_time_for_add_form(start_time: str | None) -> str:
+    text = str(start_time or "").strip()
+    if len(text) >= 5 and text[2] == ":":
+        return f"{int(text[:2])}h{text[3:5]}"
+    return text
+
+
 def _build_appointment_confirmation(title: str, appt_date: dt.date, start_time: str | None, location: str | None) -> str:
     conf = f"{CONFIRM_PREFIX} {title} - {appt_date.isoformat()}"
-    if start_time:
-        conf += f" {start_time[:5]}"
+    display_time = _format_saved_time_for_add_form(start_time)
+    if display_time:
+        conf += f" {display_time}"
     if location:
         conf += f" - {location}"
     return conf + "\nMình đã lưu giúp bạn rồi nè."
@@ -652,7 +672,7 @@ def _fallback_conversational_reply(user_text: str) -> str:
         return "Ôm tinh thần bạn một cái nhẹ nha, nghỉ một chút rồi mình cùng sắp xếp lại lịch cho dễ thở hơn."
     return (
         "Mình vẫn ở đây để nghe bạn nè. "
-        "Nếu cần tạo lịch hẹn, bạn cứ nhắn kiểu: họp nhóm-15/04 14:00-B402."
+        "Nếu cần tạo lịch hẹn, bạn cứ nhắn kiểu: họp nhóm-15/04 14h00-B402."
     )
 
 

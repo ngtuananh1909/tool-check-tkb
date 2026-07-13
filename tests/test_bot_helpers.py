@@ -111,11 +111,11 @@ class BotHelperTests(unittest.TestCase):
         self.assertEqual(_parse_schedule_day_arg("20/05", today=today), dt.date(2026, 5, 20))
 
     def test_parse_add_fields_accepts_missing_values_but_rejects_all_blank(self) -> None:
-        parsed = _parse_add_fields("Ngày: 16/5\nGiờ: 9:00\nLàm gì: Họp nhóm\nỞ đâu: B402")
+        parsed = _parse_add_fields("Ngày: 16/5\nGiờ: 9h00\nLàm gì: Họp nhóm\nỞ đâu: B402")
 
-        self.assertEqual(parsed, {"date": "16/5", "time": "9:00", "job": "Họp nhóm", "where": "B402"})
+        self.assertEqual(parsed, {"date": "16/5", "time": "9h00", "job": "Họp nhóm", "where": "B402"})
         with self.assertRaises(ValueError):
-            _parse_add_fields("Ngày: \nGiờ: 9:00\nLàm gì: Họp nhóm\nỞ đâu: ")
+            _parse_add_fields("Ngày: \nGiờ: 9h00\nLàm gì: Họp nhóm\nỞ đâu: ")
 
     def test_add_form_state_collects_values_step_by_step_and_builds_payload(self) -> None:
         state = _new_add_form_state()
@@ -124,9 +124,9 @@ class BotHelperTests(unittest.TestCase):
         self.assertIn("16/5", _build_add_form_input_markup(state)["input_field_placeholder"])
         _advance_add_form_state(state, "16/5")
         self.assertEqual(state["step"], "time")
-        self.assertIn("9:00", _build_add_form_input_markup(state)["input_field_placeholder"])
+        self.assertIn("9h00", _build_add_form_input_markup(state)["input_field_placeholder"])
 
-        _advance_add_form_state(state, "9:00")
+        _advance_add_form_state(state, "9h00")
         self.assertEqual(state["step"], "job")
 
         review_prompt = _advance_add_form_state(state, "Họp nhóm")
@@ -138,7 +138,7 @@ class BotHelperTests(unittest.TestCase):
         review = _skip_add_form_optional_step(state)
         self.assertTrue(_is_add_form_complete(state))
         self.assertEqual(state["date"], "16/5")
-        self.assertEqual(state["time"], "09:00")
+        self.assertEqual(state["time"], "9h00")
         self.assertIsNone(state["where"])
         self.assertIn("Done", review)
         title, appointment_date, start_time, location = _build_add_appointment_from_form(state)
@@ -148,12 +148,12 @@ class BotHelperTests(unittest.TestCase):
         self.assertEqual(start_time, "09:00:00")
         self.assertIsNone(location)
 
-    def test_add_form_time_rejects_h_separator(self) -> None:
+    def test_add_form_time_rejects_colon_separator(self) -> None:
         state = _new_add_form_state()
         _advance_add_form_state(state, "16/5")
 
         with self.assertRaises(ValueError):
-            _advance_add_form_state(state, "9h00")
+            _advance_add_form_state(state, "9:00")
 
 
 if __name__ == "__main__":
