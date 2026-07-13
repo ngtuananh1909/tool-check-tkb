@@ -124,6 +124,7 @@ class BotHelperTests(unittest.TestCase):
         self.assertIn("16/5", _build_add_form_input_markup(state)["input_field_placeholder"])
         _advance_add_form_state(state, "16/5")
         self.assertEqual(state["step"], "time")
+        self.assertIn("9:00", _build_add_form_input_markup(state)["input_field_placeholder"])
 
         _advance_add_form_state(state, "9:00")
         self.assertEqual(state["step"], "job")
@@ -137,7 +138,7 @@ class BotHelperTests(unittest.TestCase):
         review = _skip_add_form_optional_step(state)
         self.assertTrue(_is_add_form_complete(state))
         self.assertEqual(state["date"], "16/5")
-        self.assertEqual(state["time"], "9:00")
+        self.assertEqual(state["time"], "09:00")
         self.assertIsNone(state["where"])
         self.assertIn("Done", review)
         title, appointment_date, start_time, location = _build_add_appointment_from_form(state)
@@ -146,6 +147,13 @@ class BotHelperTests(unittest.TestCase):
         self.assertEqual(appointment_date, dt.date(dt.date.today().year, 5, 16))
         self.assertEqual(start_time, "09:00:00")
         self.assertIsNone(location)
+
+    def test_add_form_time_rejects_h_separator(self) -> None:
+        state = _new_add_form_state()
+        _advance_add_form_state(state, "16/5")
+
+        with self.assertRaises(ValueError):
+            _advance_add_form_state(state, "9h00")
 
 
 if __name__ == "__main__":

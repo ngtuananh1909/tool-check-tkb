@@ -1,5 +1,6 @@
 import unittest
 import datetime as dt
+import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -284,6 +285,60 @@ def _sync_item(source_type: str, source_key: str) -> dict:
         "source_hash": "h",
         "payload": {"summary": "x"},
     }
+
+
+class FetchEventsFromCalendarTests(unittest.TestCase):
+    def test_only_target_date_appointments_are_returned_with_upcoming_exams(self) -> None:
+        target_date = dt.date(2026, 7, 13)
+        events = [
+            {
+                "summary": "Gia su Tin hom nay",
+                "start": {"dateTime": "2026-07-13T20:00:00+07:00"},
+                "end": {"dateTime": "2026-07-13T22:00:00+07:00"},
+                "extendedProperties": {"private": {"source_type": SYNC_SOURCE_APPOINTMENT}},
+            },
+            {
+                "summary": "Gia su Tin ngay mai",
+                "start": {"dateTime": "2026-07-14T20:00:00+07:00"},
+                "end": {"dateTime": "2026-07-14T22:00:00+07:00"},
+                "extendedProperties": {"private": {"source_type": SYNC_SOURCE_APPOINTMENT}},
+            },
+            {
+                "summary": "Thi Toan",
+                "start": {"dateTime": "2026-07-15T08:00:00+07:00"},
+                "end": {"dateTime": "2026-07-15T10:00:00+07:00"},
+                "extendedProperties": {"private": {"source_type": SYNC_SOURCE_EXAM}},
+            },
+        ]
+        service = _OwnershipFakeService(_Recorder(), events)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                with patch.dict(
+                    os.environ,
+                    {
+                        "APP_TIMEZONE": "Asia/Ho_Chi_Minh",
+                        "GOOGLE_CALENDAR_ID": "cal",
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": "{}",
+                    },
+                ), patch.object(
+                    calendar_sync,
+                    "_build_calendar_service",
+                    return_value=(service, "svc@example.com"),
+                ):
+                    classes, appointments, exams = calendar_sync.fetch_events_from_calendar(
+                        target_date=target_date,
+                        days_ahead=7,
+                    )
+            finally:
+                os.chdir(original_cwd)
+
+        self.assertEqual(classes, [])
+        self.assertEqual([row["title"] for row in appointments], ["Gia su Tin hom nay"])
+        self.assertEqual(appointments[0]["appointment_date"], "2026-07-13")
+        self.assertEqual([row["title"] for row in exams], ["Thi Toan"])
 
 
 class ManagedSourceTypesHelperTests(unittest.TestCase):

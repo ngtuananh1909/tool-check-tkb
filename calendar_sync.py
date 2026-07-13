@@ -415,11 +415,26 @@ def fetch_events_from_calendar(target_date: dt.date, days_ahead: int = 0) -> tup
             
             start_time = ""
             end_time = ""
+            event_date = target_date
             if start.get("dateTime"):
-                dt_obj = dt.datetime.fromisoformat(start["dateTime"])
+                dt_obj = dt.datetime.fromisoformat(start["dateTime"].replace("Z", "+00:00"))
+                if dt_obj.tzinfo is None:
+                    dt_obj = dt_obj.replace(tzinfo=tz)
+                else:
+                    dt_obj = dt_obj.astimezone(tz)
                 start_time = dt_obj.strftime("%H:%M")
+                event_date = dt_obj.date()
+            elif start.get("date"):
+                try:
+                    event_date = dt.date.fromisoformat(start["date"])
+                except ValueError:
+                    event_date = target_date
             if end.get("dateTime"):
-                dt_obj = dt.datetime.fromisoformat(end["dateTime"])
+                dt_obj = dt.datetime.fromisoformat(end["dateTime"].replace("Z", "+00:00"))
+                if dt_obj.tzinfo is None:
+                    dt_obj = dt_obj.replace(tzinfo=tz)
+                else:
+                    dt_obj = dt_obj.astimezone(tz)
                 end_time = dt_obj.strftime("%H:%M")
                 
             title = event.get("summary", "")
@@ -446,7 +461,7 @@ def fetch_events_from_calendar(target_date: dt.date, days_ahead: int = 0) -> tup
                 "exam_room": location,
                 "note": notes,
                 "notes": notes,
-                "appointment_date": target_date.isoformat()
+                "appointment_date": event_date.isoformat()
             }
             
             if source_type == SYNC_SOURCE_CLASS_SESSION:

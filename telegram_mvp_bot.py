@@ -559,8 +559,7 @@ def _advance_add_form_state(state: dict[str, object], user_text: str) -> str:
         state["step"] = "time"
         return _build_add_form_prompt(state)
     if step == "time":
-        _parse_clock_field(value)
-        state["time"] = value
+        state["time"] = _parse_clock_field(value)[:5]
         state["step"] = "job"
         return _build_add_form_prompt(state)
     if step == "job":
