@@ -1,0 +1,5 @@
+#!/bin/sh
+# Keep CodeGraph current without printing a risk-score report on every commit.
+if command -v code-review-graph >/dev/null 2>&1; then
+    code-review-graph update >/dev/null 2>&1 || true
+fi
