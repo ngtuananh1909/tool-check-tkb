@@ -1,8 +1,7 @@
-"""Export Supabase schedule data to CSV and sync it to Google Calendar."""
+"""Synchronize crawled TDTU data with, and read from, Google Calendar."""
 
 from __future__ import annotations
 
-import csv
 import datetime as dt
 import hashlib
 import json
@@ -17,19 +16,16 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 
-from database import get_all_class_sessions, get_upcoming_exams
 from time_utils import local_today
 
 logger = logging.getLogger(__name__)
 
 CALENDAR_SCOPE = ["https://www.googleapis.com/auth/calendar"]
 BOT_SOURCE_TAG = "tool-check-tkb"
-SYNC_SOURCE_SCHEDULE = "schedule"
 SYNC_SOURCE_CLASS_SESSION = "class_session"
 SYNC_SOURCE_APPOINTMENT = "appointment"
 SYNC_SOURCE_EXAM = "exam"
 SYNC_SOURCE_DEADLINE = "deadline"
-DEFAULT_SYNC_WEEKS = 16
 
 
 def _managed_source_types_for_crawler_sync() -> frozenset[str]:
@@ -37,40 +33,11 @@ def _managed_source_types_for_crawler_sync() -> frozenset[str]:
 
     Crawler sync only manages ``class_sessions``, ``exams``, and ``deadlines``. It must never
     delete events created by Telegram ``/add`` (``source_type=appointment``) or
-    by the recurring-weekly DB sync (``source_type=schedule``).
+    by Telegram ``/add`` (``source_type=appointment``).
     """
     return frozenset({SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM, SYNC_SOURCE_DEADLINE})
-
-
-def _managed_source_types_for_database_sync(use_class_sessions: bool) -> frozenset[str]:
-    """Source types owned by ``sync_database_to_csv_and_google_calendar``."""
-    if use_class_sessions:
-        return frozenset(
-            {SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_APPOINTMENT, SYNC_SOURCE_EXAM}
-        )
-    return frozenset(
-        {SYNC_SOURCE_SCHEDULE, SYNC_SOURCE_APPOINTMENT, SYNC_SOURCE_EXAM}
-    )
 CALENDAR_API_MAX_ATTEMPTS = 4
 CALENDAR_API_RETRY_STATUSES = {429, 500, 502, 503, 504}
-WEEKDAY_TO_RRULE = {
-    "monday": "MO",
-    "tuesday": "TU",
-    "wednesday": "WE",
-    "thursday": "TH",
-    "friday": "FR",
-    "saturday": "SA",
-    "sunday": "SU",
-}
-WEEKDAY_TO_INDEX = {
-    "monday": 0,
-    "tuesday": 1,
-    "wednesday": 2,
-    "thursday": 3,
-    "friday": 4,
-    "saturday": 5,
-    "sunday": 6,
-}
 
 # Google Calendar colorId mapping for special class session statuses.
 # See https://developers.google.com/calendar/api/v3/reference/colors/get
@@ -169,91 +136,6 @@ def _contacts_to_attendees(contacts: list[dict]) -> list[dict]:
     return attendees
 
 
-def sync_today_to_csv_and_google_calendar(
-    classes: list[dict],
-    appointments: list[dict],
-    exams: list[dict] | None = None,
-    student_id: str | None = None,
-) -> tuple[str, bool]:
-    """Backward-compatible wrapper for full-database Google Calendar sync."""
-    return sync_database_to_csv_and_google_calendar(classes, appointments, exams=exams, student_id=student_id)
-
-
-def sync_database_to_csv_and_google_calendar(
-    schedule_rows: list[dict],
-    appointments: list[dict],
-    exams: list[dict] | None = None,
-    student_id: str | None = None,
-) -> tuple[str, bool]:
-    """Export all schedule data and sync it to Google Calendar when configured.
-
-    Returns
-    -------
-    tuple[str, bool]
-        CSV path and whether Google Calendar sync was executed.
-    """
-    target_date = local_today()
-    exam_rows = exams
-    if exam_rows is None:
-        exam_rows = get_upcoming_exams(student_id=student_id, days_ahead=180)
-
-    use_class_sessions = _use_class_sessions_sync()
-    class_sessions: list[dict] = []
-    if use_class_sessions:
-        class_sessions = get_all_class_sessions(student_id=student_id)
-        if class_sessions:
-            logger.info("Calendar session mode enabled with %d concrete class session(s).", len(class_sessions))
-        else:
-            logger.warning(
-                "CALENDAR_USE_CLASS_SESSIONS is enabled but no class sessions were found. "
-                "Falling back to fixed weekly schedule mode."
-            )
-
-    if use_class_sessions and class_sessions:
-        csv_path = _export_csv_sessions(class_sessions, appointments, exam_rows, target_date)
-        sync_items = _build_sync_items_from_sessions(class_sessions, appointments, exam_rows, target_date)
-    else:
-        csv_path = _export_csv(schedule_rows, appointments, exam_rows, target_date)
-        sync_items = _build_sync_items(schedule_rows, appointments, exam_rows, target_date)
-
-    calendar_id = os.environ.get("GOOGLE_CALENDAR_ID", "").strip()
-    events = [item["payload"] for item in sync_items]
-
-    service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
-    service_account_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
-    calendar_required = os.environ.get("GOOGLE_CALENDAR_REQUIRED", "true").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
-    if not calendar_id or (not service_account_json and not service_account_file):
-        if calendar_required:
-            raise RuntimeError(
-                "Google Calendar sync is required but credentials are missing. "
-                "Set GOOGLE_CALENDAR_ID and GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_FILE."
-            )
-        logger.warning(
-            "Google Calendar sync skipped. Missing GOOGLE_CALENDAR_ID and Google credentials. "
-            "Set GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_FILE."
-        )
-        return csv_path, False
-
-    service, service_account_email = _build_calendar_service(service_account_json, service_account_file)
-    _validate_calendar_target(service, calendar_id, service_account_email)
-    managed = _managed_source_types_for_database_sync(
-        bool(use_class_sessions and class_sessions)
-    )
-    _replace_bot_events_for_range(service, calendar_id, sync_items, student_id, managed)
-
-    logger.info(
-        "Synced %d event(s) to Google Calendar '%s' (managed=%s).",
-        len(events),
-        calendar_id,
-        sorted(managed),
-    )
-    return csv_path, True
-
-
 def sync_crawled_data_to_google_calendar(
     class_sessions: list[dict] | None,
     exams: list[dict] | None,
@@ -273,11 +155,7 @@ def sync_crawled_data_to_google_calendar(
     exam_rows = exams or []
     deadline_rows = deadlines or []
     sync_items = _build_sync_items_from_sessions(
-        session_rows,
-        [],
-        exam_rows,
-        target_date,
-        deadlines=deadline_rows,
+        session_rows, exam_rows, target_date, deadlines=deadline_rows
     )
     managed: set[str] = set()
     if class_sessions is not None:
@@ -378,30 +256,19 @@ def insert_calendar_event(title: str, appointment_date: dt.date, start_time: str
 
 
 def fetch_events_from_calendar(target_date: dt.date, days_ahead: int = 0) -> tuple[list[dict], list[dict], list[dict]]:
-    """Fetch events from Google Calendar for the target date range, export to CSV, and return grouped events."""
+    """Fetch Calendar events and group classes, appointments, and exams."""
     calendar_id = os.environ.get("GOOGLE_CALENDAR_ID", "").strip()
     service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
     service_account_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
 
-    logger.info("=== fetch_events_from_calendar DEBUG ===")
-    logger.info(f"GOOGLE_CALENDAR_ID: {'SET' if calendar_id else 'NOT SET'}")
-    logger.info(f"GOOGLE_SERVICE_ACCOUNT_JSON: {'SET' if service_account_json else 'NOT SET'} (len={len(service_account_json)})")
-    logger.info(f"GOOGLE_SERVICE_ACCOUNT_FILE: {'SET' if service_account_file else 'NOT SET'}")
-    logger.info(f"File exists: {os.path.isfile(service_account_file) if service_account_file else 'N/A'}")
-    logger.info("=======================================")
-
     if not calendar_id or (not service_account_json and not service_account_file):
         logger.warning("Missing credentials, cannot fetch from Google Calendar.")
-        logger.warning(f"  calendar_id empty: {not calendar_id}")
-        logger.warning(f"  service_account_json empty: {not service_account_json}")
-        logger.warning(f"  service_account_file empty: {not service_account_file}")
         return [], [], []
 
     service, _ = _build_calendar_service(service_account_json, service_account_file)
     timezone = os.environ.get("APP_TIMEZONE", "Asia/Ho_Chi_Minh")
     tz = ZoneInfo(timezone)
     
-    # Time range: start of target_date to start of next day + days_ahead
     time_min = dt.datetime.combine(target_date, dt.time.min).replace(tzinfo=tz)
     time_max = time_min + dt.timedelta(days=1 + days_ahead)
     
@@ -422,84 +289,51 @@ def fetch_events_from_calendar(target_date: dt.date, days_ahead: int = 0) -> tup
     appointments = []
     exams = []
     
-    os.makedirs("exports", exist_ok=True)
-    csv_path = os.path.join("exports", f"schedule_from_calendar_{target_date.strftime('%Y%m%d')}.csv")
-    
-    with open(csv_path, "w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(
-            file,
-            fieldnames=["event_type", "title", "start_time", "end_time", "location", "notes"],
-        )
-        writer.writeheader()
-        
-        for event in events:
-            # Parse start and end time
-            start = event.get("start", {})
-            end = event.get("end", {})
-            start_str = start.get("dateTime") or start.get("date")
-            end_str = end.get("dateTime") or end.get("date")
-            
-            start_time = ""
-            end_time = ""
-            event_date = target_date
-            if start.get("dateTime"):
-                dt_obj = dt.datetime.fromisoformat(start["dateTime"].replace("Z", "+00:00"))
-                if dt_obj.tzinfo is None:
-                    dt_obj = dt_obj.replace(tzinfo=tz)
-                else:
-                    dt_obj = dt_obj.astimezone(tz)
-                start_time = dt_obj.strftime("%H:%M")
-                event_date = dt_obj.date()
-            elif start.get("date"):
-                try:
-                    event_date = dt.date.fromisoformat(start["date"])
-                except ValueError:
-                    event_date = target_date
-            if end.get("dateTime"):
-                dt_obj = dt.datetime.fromisoformat(end["dateTime"].replace("Z", "+00:00"))
-                if dt_obj.tzinfo is None:
-                    dt_obj = dt_obj.replace(tzinfo=tz)
-                else:
-                    dt_obj = dt_obj.astimezone(tz)
-                end_time = dt_obj.strftime("%H:%M")
-                
-            title = event.get("summary", "")
-            location = event.get("location", "")
-            notes = event.get("description", "")
-            
-            source_type = _event_source_type(event)
-            writer.writerow({
-                "event_type": source_type,
-                "title": title,
-                "start_time": start_time,
-                "end_time": end_time,
-                "location": location,
-                "notes": notes,
-            })
-            
-            row = {
-                "title": title,
-                "subject_name": title,
-                "start_time": start_time,
-                "end_time": end_time,
-                "location": location,
-                "room": location,
-                "exam_room": location,
-                "note": notes,
-                "notes": notes,
-                "appointment_date": event_date.isoformat()
-            }
-            
-            if source_type == SYNC_SOURCE_CLASS_SESSION:
-                if row["appointment_date"] == target_date.isoformat():
-                    classes.append(row)
-            elif source_type == SYNC_SOURCE_EXAM:
-                exams.append(row)
-            elif source_type == SYNC_SOURCE_APPOINTMENT or source_type == "legacy":
-                if row["appointment_date"] == target_date.isoformat():
-                    appointments.append(row)
-                
-    logger.info("Exported events from Calendar to CSV: %s", csv_path)
+    for event in events:
+        start = event.get("start", {})
+        end = event.get("end", {})
+        start_time = ""
+        end_time = ""
+        event_date = target_date
+        if start.get("dateTime"):
+            dt_obj = dt.datetime.fromisoformat(start["dateTime"].replace("Z", "+00:00"))
+            dt_obj = dt_obj.replace(tzinfo=tz) if dt_obj.tzinfo is None else dt_obj.astimezone(tz)
+            start_time = dt_obj.strftime("%H:%M")
+            event_date = dt_obj.date()
+        elif start.get("date"):
+            try:
+                event_date = dt.date.fromisoformat(start["date"])
+            except ValueError:
+                event_date = target_date
+        if end.get("dateTime"):
+            dt_obj = dt.datetime.fromisoformat(end["dateTime"].replace("Z", "+00:00"))
+            dt_obj = dt_obj.replace(tzinfo=tz) if dt_obj.tzinfo is None else dt_obj.astimezone(tz)
+            end_time = dt_obj.strftime("%H:%M")
+
+        title = event.get("summary", "")
+        location = event.get("location", "")
+        notes = event.get("description", "")
+        source_type = _event_source_type(event)
+        row = {
+            "title": title,
+            "subject_name": title,
+            "start_time": start_time,
+            "end_time": end_time,
+            "location": location,
+            "room": location,
+            "exam_room": location,
+            "note": notes,
+            "notes": notes,
+            "appointment_date": event_date.isoformat(),
+        }
+        if source_type == SYNC_SOURCE_CLASS_SESSION and row["appointment_date"] == target_date.isoformat():
+            classes.append(row)
+        elif source_type == SYNC_SOURCE_EXAM:
+            exams.append(row)
+        elif source_type in {SYNC_SOURCE_APPOINTMENT, "legacy"} and row["appointment_date"] == target_date.isoformat():
+            appointments.append(row)
+
+    logger.info("Fetched %d event(s) from Google Calendar for %s.", len(events), target_date)
     return classes, appointments, exams
 
 
@@ -565,161 +399,6 @@ def find_tagged_calendar_event(source_type: str, source_key: str) -> dict | None
         ),
         None,
     )
-
-
-def _export_csv(schedule_rows: list[dict], appointments: list[dict], exams: list[dict], target_date: dt.date) -> str:
-    os.makedirs("exports", exist_ok=True)
-    csv_path = os.path.join("exports", f"schedule_{target_date.strftime('%Y%m%d')}.csv")
-
-    with open(csv_path, "w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(
-            file,
-            fieldnames=[
-                "event_type",
-                "title",
-                "day_of_week",
-                "appointment_date",
-                "start_time",
-                "end_time",
-                "location",
-                "notes",
-                "first_occurrence",
-            ],
-        )
-        writer.writeheader()
-
-        for cls in schedule_rows:
-            subject = str(cls.get("subject_name") or "").strip() or "N/A"
-            room = str(cls.get("room") or "").strip()
-            day_of_week = str(cls.get("day_of_week") or "").strip() or "N/A"
-            start, end = _class_time_range(cls)
-            first_occurrence = _next_weekday_date(target_date, day_of_week).isoformat()
-            writer.writerow(
-                {
-                    "event_type": "class",
-                    "title": subject,
-                    "day_of_week": day_of_week,
-                    "appointment_date": "",
-                    "start_time": start,
-                    "end_time": end,
-                    "location": room,
-                    "notes": "Imported from table schedules",
-                    "first_occurrence": first_occurrence,
-                }
-            )
-
-        for appointment in appointments:
-            writer.writerow(
-                {
-                    "event_type": "appointment",
-                    "title": str(appointment.get("title") or "").strip() or "N/A",
-                    "day_of_week": "",
-                    "appointment_date": str(appointment.get("appointment_date") or target_date.isoformat()),
-                    "start_time": _display_time(appointment.get("start_time")),
-                    "end_time": _display_time(appointment.get("end_time")),
-                    "location": str(appointment.get("location") or "").strip(),
-                    "notes": str(appointment.get("note") or "").strip(),
-                    "first_occurrence": "",
-                }
-            )
-
-        for exam in exams:
-            exam_date = _parse_date(exam.get("exam_date"), target_date)
-            writer.writerow(
-                {
-                    "event_type": "exam",
-                    "title": str(exam.get("subject_name") or "").strip() or "N/A",
-                    "day_of_week": exam_date.strftime("%A"),
-                    "appointment_date": exam_date.isoformat(),
-                    "start_time": _display_time(exam.get("start_time")),
-                    "end_time": _display_time(exam.get("end_time")),
-                    "location": str(exam.get("exam_room") or "").strip(),
-                    "notes": str(exam.get("notes") or "").strip() or "Imported from table exams",
-                    "first_occurrence": exam_date.isoformat(),
-                }
-            )
-
-    logger.info("Exported schedule data to CSV: %s", csv_path)
-    return csv_path
-
-
-def _export_csv_sessions(
-    class_sessions: list[dict],
-    appointments: list[dict],
-    exams: list[dict],
-    target_date: dt.date,
-) -> str:
-    os.makedirs("exports", exist_ok=True)
-    csv_path = os.path.join("exports", f"schedule_{target_date.strftime('%Y%m%d')}.csv")
-
-    with open(csv_path, "w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(
-            file,
-            fieldnames=[
-                "event_type",
-                "title",
-                "day_of_week",
-                "appointment_date",
-                "start_time",
-                "end_time",
-                "location",
-                "notes",
-                "first_occurrence",
-            ],
-        )
-        writer.writeheader()
-
-        for session in class_sessions:
-            session_date = _parse_date(session.get("session_date"), target_date)
-            writer.writerow(
-                {
-                    "event_type": "class_session",
-                    "title": str(session.get("subject_name") or "").strip() or "N/A",
-                    "day_of_week": session_date.strftime("%A"),
-                    "appointment_date": session_date.isoformat(),
-                    "start_time": _display_time(session.get("start_time")) or PERIOD_START.get(
-                        _to_int(session.get("start_period")), ""
-                    ),
-                    "end_time": _display_time(session.get("end_time")),
-                    "location": str(session.get("room") or "").strip(),
-                    "notes": str(session.get("notes") or "").strip() or "Imported from table class_sessions",
-                    "first_occurrence": session_date.isoformat(),
-                }
-            )
-
-        for appointment in appointments:
-            writer.writerow(
-                {
-                    "event_type": "appointment",
-                    "title": str(appointment.get("title") or "").strip() or "N/A",
-                    "day_of_week": "",
-                    "appointment_date": str(appointment.get("appointment_date") or target_date.isoformat()),
-                    "start_time": _display_time(appointment.get("start_time")),
-                    "end_time": _display_time(appointment.get("end_time")),
-                    "location": str(appointment.get("location") or "").strip(),
-                    "notes": str(appointment.get("note") or "").strip(),
-                    "first_occurrence": "",
-                }
-            )
-
-        for exam in exams:
-            exam_date = _parse_date(exam.get("exam_date"), target_date)
-            writer.writerow(
-                {
-                    "event_type": "exam",
-                    "title": str(exam.get("subject_name") or "").strip() or "N/A",
-                    "day_of_week": exam_date.strftime("%A"),
-                    "appointment_date": exam_date.isoformat(),
-                    "start_time": _display_time(exam.get("start_time")),
-                    "end_time": _display_time(exam.get("end_time")),
-                    "location": str(exam.get("exam_room") or "").strip(),
-                    "notes": str(exam.get("notes") or "").strip() or "Imported from table exams",
-                    "first_occurrence": exam_date.isoformat(),
-                }
-            )
-
-    logger.info("Exported session-based schedule data to CSV: %s", csv_path)
-    return csv_path
 
 
 def _build_calendar_service(service_account_json: str, service_account_file: str) -> tuple[Resource, str]:
@@ -987,13 +666,13 @@ def _class_session_status_description(session: dict) -> str:
 
 def _build_sync_items_from_sessions(
     class_sessions: list[dict],
-    appointments: list[dict],
     exams: list[dict],
     target_date: dt.date,
     deadlines: list[dict] | None = None,
 ) -> list[dict]:
     timezone = os.environ.get("APP_TIMEZONE", "Asia/Ho_Chi_Minh")
     items: list[dict] = []
+    appointments: list[dict] = []  # Appointments are inserted directly by Telegram /add.
 
     # Load contacts for attendee auto-add on class session events.
     all_contacts = _load_contacts()
@@ -1494,27 +1173,6 @@ def _event_source_hash(event: dict) -> str:
     return str(props.get("source_hash") or "").strip()
 
 
-def _calendar_sync_weeks() -> int:
-    try:
-        weeks = int(os.environ.get("GOOGLE_CALENDAR_SYNC_WEEKS", str(DEFAULT_SYNC_WEEKS)))
-    except ValueError:
-        weeks = DEFAULT_SYNC_WEEKS
-    return max(1, weeks)
-
-
-def _use_class_sessions_sync() -> bool:
-    raw = os.environ.get("CALENDAR_USE_CLASS_SESSIONS", "true").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
-
-
-def _class_source_key(cls: dict) -> str:
-    subject = _normalize_value(cls.get("subject_name"))
-    day_of_week = _normalize_value(cls.get("day_of_week"))
-    start_period = _to_int(cls.get("start_period"))
-    end_period = _to_int(cls.get("end_period"))
-    return f"{SYNC_SOURCE_SCHEDULE}:{subject}:{day_of_week}:{start_period}:{end_period}"
-
-
 def _class_session_source_key(session: dict) -> str:
     session_id = str(session.get("id") or "").strip()
     if session_id:
@@ -1589,7 +1247,7 @@ def _exam_calendar_title(exam: dict) -> str:
 
 
 def _exam_calendar_description(exam: dict) -> str:
-    base_note = str(exam.get("notes") or "").strip() or "Lich thi duoc dong bo tu Supabase."
+    base_note = str(exam.get("notes") or "").strip() or "Lich thi dong bo tu cong TDTU."
     label = _exam_calendar_type_label(exam.get("exam_type"))
     if not label:
         return f"#exam\n{base_note}"
@@ -1603,13 +1261,6 @@ def _sync_hash(payload: dict) -> str:
 
 def _normalize_value(value: object) -> str:
     return str(value or "").strip().lower()
-
-
-def _class_recurrence(day_of_week: str, sync_weeks: int) -> list[str]:
-    code = WEEKDAY_TO_RRULE.get(day_of_week.strip().lower())
-    if not code:
-        return []
-    return [f"RRULE:FREQ=WEEKLY;COUNT={sync_weeks};BYDAY={code}"]
 
 
 def _apply_default_reminder(payload: dict, minutes: int = DEFAULT_EVENT_REMINDER_MINUTES) -> None:
@@ -1633,40 +1284,6 @@ def _apply_default_reminder(payload: dict, minutes: int = DEFAULT_EVENT_REMINDER
             }
         ],
     }
-
-
-def _next_weekday_date(reference_date: dt.date, day_of_week: str) -> dt.date:
-    weekday_index = WEEKDAY_TO_INDEX.get(day_of_week.strip().lower())
-    if weekday_index is None:
-        return reference_date
-    delta_days = (weekday_index - reference_date.weekday()) % 7
-    return reference_date + dt.timedelta(days=delta_days)
-
-
-def _class_time_range(cls: dict) -> tuple[str, str]:
-    start_period = _to_int(cls.get("start_period"))
-    end_period = _to_int(cls.get("end_period"))
-
-    start = PERIOD_START.get(start_period, _fallback_period_time(start_period))
-    end_start = PERIOD_START.get(end_period, _fallback_period_time(end_period))
-    end_dt = _to_datetime(local_today(), end_start, "Asia/Ho_Chi_Minh") + dt.timedelta(minutes=50)
-    return start, end_dt.strftime("%H:%M")
-
-
-def _class_datetimes(cls: dict, target_date: dt.date, timezone: str) -> tuple[dt.datetime, dt.datetime]:
-    start_period = _to_int(cls.get("start_period"))
-    end_period = _to_int(cls.get("end_period"))
-
-    start_text = PERIOD_START.get(start_period, _fallback_period_time(start_period))
-    end_start_text = PERIOD_START.get(end_period, _fallback_period_time(end_period))
-
-    start_dt = _to_datetime(target_date, start_text, timezone)
-    end_dt = _to_datetime(target_date, end_start_text, timezone) + dt.timedelta(minutes=50)
-
-    if end_dt <= start_dt:
-        end_dt = start_dt + dt.timedelta(minutes=50)
-
-    return start_dt, end_dt
 
 
 def _fallback_period_time(period: int) -> str:

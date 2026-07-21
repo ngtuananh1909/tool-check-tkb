@@ -2,10 +2,10 @@
 
 Execution flow:
     1. Load environment variables from a local .env file (if present).
-    2. Query today's classes and appointments from Supabase.
+    2. Read today's classes, appointments, and exams from Google Calendar.
     3. Send a Telegram notification with the day's schedule.
 
-Data collection (crawling, DB sync, calendar sync) is handled separately by run_hour.py.
+Data collection and Calendar synchronization are handled separately by run_hour.py.
 This script is scheduled to run once daily (typically at midnight) to send the morning briefing.
 
 On any failure, a Telegram error alert is sent so that issues are surfaced immediately.
@@ -49,24 +49,7 @@ def main() -> None:
     """Fetch today's schedule and send morning Telegram notification."""
     _load_dotenv()
 
-    student_id = os.environ.get("STUDENT_ID")
-
-    # ------------------------------------------------------------------
-    # Debug: Log all relevant env vars
-    # ------------------------------------------------------------------
-    logger.info("=== ENV VAR CHECK ===")
-    logger.info(f"GOOGLE_CALENDAR_ID: {'SET' if os.environ.get('GOOGLE_CALENDAR_ID') else 'NOT SET'}")
-    logger.info(f"GOOGLE_SERVICE_ACCOUNT_JSON: {'SET' if os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON') else 'NOT SET'}")
-    logger.info(f"GOOGLE_SERVICE_ACCOUNT_FILE: {'SET' if os.environ.get('GOOGLE_SERVICE_ACCOUNT_FILE') else 'NOT SET'}")
-    logger.info(f"APP_TIMEZONE: {os.environ.get('APP_TIMEZONE', 'NOT SET')}")
-    logger.info(f"TELEGRAM_BOT_TOKEN: {'SET' if os.environ.get('TELEGRAM_BOT_TOKEN') else 'NOT SET'}")
-    logger.info(f"TELEGRAM_CHAT_ID: {'SET' if os.environ.get('TELEGRAM_CHAT_ID') else 'NOT SET'}")
-    logger.info("========================")
-
-    # ------------------------------------------------------------------
-    # Fetch today's classes and appointments from Supabase
-    # ------------------------------------------------------------------
-    logger.info("=== Fetching today's schedule and appointments ===")
+    logger.info("Fetching today's schedule from Google Calendar.")
     try:
         from calendar_sync import fetch_events_from_calendar
         from time_utils import local_today

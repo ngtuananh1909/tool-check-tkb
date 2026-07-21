@@ -21,18 +21,6 @@
       "description": "TDTU portal password",
       "sensitive": true
     },
-    "SUPABASE_URL": {
-      "description": "Supabase project URL",
-      "example": "https://xxx.supabase.co"
-    },
-    "SUPABASE_SERVICE_ROLE_KEY": {
-      "description": "Supabase service role key (for writes)",
-      "sensitive": true
-    },
-    "SUPABASE_KEY": {
-      "description": "Supabase public key",
-      "sensitive": true
-    },
     "TELEGRAM_BOT_TOKEN": {
       "description": "Telegram bot token from @BotFather",
       "sensitive": true,
@@ -57,14 +45,13 @@
       "required": false
     },
     "GOOGLE_CALENDAR_ID": {
-      "description": "Google Calendar ID to sync classes/appointments",
-      "example": "primary",
-      "required": false
+      "description": "Google Calendar ID shared with the service account",
+      "required": true
     },
     "GOOGLE_SERVICE_ACCOUNT_JSON": {
       "description": "Google service account JSON credentials in one line",
       "sensitive": true,
-      "required": false
+      "required": true
     },
     "GOOGLE_SERVICE_ACCOUNT_FILE": {
       "description": "Path to mounted service account JSON file (if using file-based credentials)",

@@ -1,10 +1,10 @@
 """
 run_hour.py – Hourly data collection and sync orchestrator.
 
-This script runs steps 1-4 of the schedule-notification pipeline:
+This script runs the data-collection pipeline:
     1. Crawl the TDTU portal for the latest timetable.
     2. Push raw crawler results directly to Google Calendar.
-    3. Upsert eLearning progress and deadlines into Supabase.
+    3. Finish after Calendar reconciliation.
 
 Can be scheduled to run hourly via cron, Railway Scheduled Jobs, or similar.
 This does NOT send Telegram notifications; that's handled separately by main.py.
@@ -72,7 +72,7 @@ def _log_step_elapsed(step_name: str, started_at: float) -> None:
 
 
 def run_hourly_sync() -> None:
-    """Execute hourly crawl, DB sync, and calendar sync pipeline."""
+    """Execute the crawler and synchronize successful results to Calendar."""
     _load_dotenv()
 
     student_id = os.environ.get("STUDENT_ID")
@@ -92,7 +92,6 @@ def run_hourly_sync() -> None:
     try:
         from crawler import (
             fetch_elearning_deadlines,
-            fetch_elearning_progress,
             fetch_exam_schedule,
             fetch_schedule,
         )
@@ -112,13 +111,6 @@ def run_hourly_sync() -> None:
         except Exception:
             logger.exception("Exam crawl failed; continuing without exam data.")
 
-        elearning_progress = None
-        try:
-            elearning_progress = fetch_elearning_progress()
-            logger.info("eLearning progress crawler returned %d row(s).", len(elearning_progress))
-        except Exception:
-            logger.exception("eLearning progress crawl failed; continuing without a progress update.")
-
         elearning_deadlines = None
         try:
             elearning_deadlines = fetch_elearning_deadlines()
@@ -132,8 +124,7 @@ def run_hourly_sync() -> None:
     _log_step_elapsed("Step 1", step_started)
 
     # -------- Step 2: Direct Google Calendar sync --------
-    # Use raw crawler results so Calendar is updated immediately after crawling,
-    # without waiting for the Supabase eLearning upserts below.
+    # Use raw crawler results so Calendar is updated immediately after crawling.
     step_started = time.perf_counter()
     logger.info("Step 2: Syncing raw crawler data directly to Google Calendar")
     try:
@@ -156,33 +147,6 @@ def run_hourly_sync() -> None:
         _handle_error("Google Calendar sync failed", exc)
         return
     _log_step_elapsed("Step 2", step_started)
-
-    # -------- Step 3: DB Sync (eLearning only) --------
-    step_started = time.perf_counter()
-    logger.info("Step 3: Updating eLearning data in Supabase")
-    try:
-        from database import (
-            upsert_elearning_deadlines,
-            upsert_elearning_progress,
-        )
-        progress_rows = 0
-        if elearning_progress is not None:
-            progress_rows = upsert_elearning_progress(elearning_progress, student_id=student_id)
-        else:
-            logger.warning("Skipped eLearning progress upsert because the crawl failed.")
-
-        deadline_rows = 0
-        if elearning_deadlines is not None:
-            deadline_rows = upsert_elearning_deadlines(elearning_deadlines, student_id=student_id)
-        else:
-            logger.warning("Skipped eLearning deadline upsert because the crawl failed.")
-        logger.debug("eLearning progress upserted: %d row(s).", progress_rows)
-        logger.debug("eLearning deadlines upserted: %d row(s).", deadline_rows)
-    except Exception as exc:
-        logger.exception("Step 3 failed after %.2fs", time.perf_counter() - step_started)
-        _handle_error("Database update failed", exc)
-        return
-    _log_step_elapsed("Step 3", step_started)
 
     logger.info("=== Hourly data collection and sync complete. ===")
 

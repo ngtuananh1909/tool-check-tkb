@@ -1,9 +1,9 @@
-"""FastAPI Telegram webhook for appointment creation.
+"""FastAPI Telegram webhook backed directly by Google Calendar.
 
 This is the production-friendly replacement for long polling:
 - Telegram sends updates to POST /telegram/webhook
 - The app creates appointments only through the /add form flow
-- The appointment is stored in Supabase
+- The appointment is inserted into Google Calendar
 
 Environment variables:
     TELEGRAM_BOT_TOKEN
@@ -23,14 +23,15 @@ from urllib.parse import urlparse
 import requests
 from fastapi import FastAPI, Header, HTTPException, Request
 
-from database import get_today_appointments, get_today_class_sessions
 from calendar_sync import (
     SYNC_SOURCE_DEADLINE,
     SYNC_SOURCE_EXAM,
+    fetch_events_from_calendar,
     fetch_tagged_calendar_events,
     find_tagged_calendar_event,
     insert_calendar_event,
 )
+from time_utils import local_today
 from telegram_mvp_bot import (
     ADD_FORM_CANCEL_CALLBACK,
     ADD_FORM_DONE_CALLBACK,
@@ -373,7 +374,7 @@ async def telegram_webhook(
             return {"ok": True}
 
         if lowered == "/today":
-            rows = get_today_appointments()
+            _, rows, _ = fetch_events_from_calendar(local_today())
             _send_text(token, chat_id, _build_today_appointments_text(rows))
             return {"ok": True}
 
@@ -398,7 +399,7 @@ async def telegram_webhook(
             except ValueError as exc:
                 _send_text(token, chat_id, str(exc))
                 return {"ok": True}
-            rows = get_today_class_sessions(target_date=target_date)
+            rows, _, _ = fetch_events_from_calendar(target_date)
             _send_text(token, chat_id, _build_schedule_text(rows, target_date))
             return {"ok": True}
 

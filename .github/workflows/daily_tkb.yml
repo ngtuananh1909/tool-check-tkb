@@ -34,10 +34,6 @@ jobs:
     # All secrets are injected as environment variables so the Python code
     # can read them with os.environ.
     env:
-      STUDENT_ID: ${{ secrets.STUDENT_ID }}
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
@@ -66,21 +62,6 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Install Python dependencies
         run: pip install -r requirements.txt
-
-      # -----------------------------------------------------------------------
-      # 4. Install Playwright browsers (Chromium only to keep the image lean)
-      # -----------------------------------------------------------------------
-      - name: Install Playwright browsers
-        run: playwright install --with-deps chromium
-
-      # -----------------------------------------------------------------------
-      # 5. Send morning Telegram notification (step 5 only)
-      # -----------------------------------------------------------------------
-      - name: Debug env vars
-        run: |
-          echo "GOOGLE_CALENDAR_ID=${GOOGLE_CALENDAR_ID:0:5}..."
-          echo "GOOGLE_SERVICE_ACCOUNT_JSON set: $[${#GOOGLE_SERVICE_ACCOUNT_JSON} > 0]"
-          echo "APP_TIMEZONE=$APP_TIMEZONE"
 
       - name: Send morning Telegram notification
         run: python main.py
