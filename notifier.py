@@ -306,7 +306,7 @@ def _send_message(token: str, chat_id: str, text: str) -> None:
         "disable_web_page_preview": True,
     }
 
-    logger.info("Sending Telegram message to chat_id=%s", chat_id)
+    logger.info("Sending Telegram message.")
     last_exc: Exception | None = None
 
     for attempt in range(1, 4):

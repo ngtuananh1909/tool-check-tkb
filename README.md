@@ -37,7 +37,7 @@ flowchart TD
 | Requirement | Details |
 |---|---|
 | **Python** | 3.11 (or newer) |
-| **Playwright** | Chromium installed (`playwright install chromium`) |
+| **Playwright** | Chromium installed (`python -m playwright install chromium`) |
 | **Supabase** | Project with tables from `supabase/init_tables.sql` |
 | **Telegram Bot** | Bot token from BotFather |
 | **Google Calendar** | Service account JSON (or JSON secret) |
@@ -53,7 +53,7 @@ flowchart TD
    python3.11 -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
-   playwright install chromium
+   python -m playwright install chromium
    ```
 2. **Create environment file**
    ```bash

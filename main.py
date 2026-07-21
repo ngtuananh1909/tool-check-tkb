@@ -55,12 +55,12 @@ def main() -> None:
     # Debug: Log all relevant env vars
     # ------------------------------------------------------------------
     logger.info("=== ENV VAR CHECK ===")
-    logger.info(f"GOOGLE_CALENDAR_ID: {os.environ.get('GOOGLE_CALENDAR_ID', 'NOT SET')}")
+    logger.info(f"GOOGLE_CALENDAR_ID: {'SET' if os.environ.get('GOOGLE_CALENDAR_ID') else 'NOT SET'}")
     logger.info(f"GOOGLE_SERVICE_ACCOUNT_JSON: {'SET' if os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON') else 'NOT SET'}")
-    logger.info(f"GOOGLE_SERVICE_ACCOUNT_FILE: {os.environ.get('GOOGLE_SERVICE_ACCOUNT_FILE', 'NOT SET')}")
+    logger.info(f"GOOGLE_SERVICE_ACCOUNT_FILE: {'SET' if os.environ.get('GOOGLE_SERVICE_ACCOUNT_FILE') else 'NOT SET'}")
     logger.info(f"APP_TIMEZONE: {os.environ.get('APP_TIMEZONE', 'NOT SET')}")
     logger.info(f"TELEGRAM_BOT_TOKEN: {'SET' if os.environ.get('TELEGRAM_BOT_TOKEN') else 'NOT SET'}")
-    logger.info(f"TELEGRAM_CHAT_ID: {os.environ.get('TELEGRAM_CHAT_ID', 'NOT SET')}")
+    logger.info(f"TELEGRAM_CHAT_ID: {'SET' if os.environ.get('TELEGRAM_CHAT_ID') else 'NOT SET'}")
     logger.info("========================")
 
     # ------------------------------------------------------------------

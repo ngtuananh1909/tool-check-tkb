@@ -358,9 +358,9 @@ def fetch_events_from_calendar(target_date: dt.date, days_ahead: int = 0) -> tup
     service_account_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
 
     logger.info("=== fetch_events_from_calendar DEBUG ===")
-    logger.info(f"GOOGLE_CALENDAR_ID: '{calendar_id}' (len={len(calendar_id)})")
+    logger.info(f"GOOGLE_CALENDAR_ID: {'SET' if calendar_id else 'NOT SET'}")
     logger.info(f"GOOGLE_SERVICE_ACCOUNT_JSON: {'SET' if service_account_json else 'NOT SET'} (len={len(service_account_json)})")
-    logger.info(f"GOOGLE_SERVICE_ACCOUNT_FILE: '{service_account_file}'")
+    logger.info(f"GOOGLE_SERVICE_ACCOUNT_FILE: {'SET' if service_account_file else 'NOT SET'}")
     logger.info(f"File exists: {os.path.isfile(service_account_file) if service_account_file else 'N/A'}")
     logger.info("=======================================")
 

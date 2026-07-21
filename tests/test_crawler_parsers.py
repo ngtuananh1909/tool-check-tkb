@@ -5,14 +5,37 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_pla
 from crawler import (
   _collect_elearning_course_deadlines,
   _deduplicate_schedule_rows,
+  _launch_chromium,
   _parse_elearning_dashboard_deadlines,
   _parse_elearning_progress,
   _parse_exam_table,
   _parse_weekly_grid_table,
+  _sanitize_url_for_log,
 )
 
 
 class CrawlerParserTests(unittest.TestCase):
+    def test_sanitize_url_for_log_redacts_portal_session_values(self) -> None:
+        url = "https://example.test/tkb?Token=secret-token&RequestId=secret-request&week=1"
+
+        self.assertEqual(
+            _sanitize_url_for_log(url),
+            "https://example.test/tkb?Token=[redacted]&RequestId=[redacted]&week=1",
+        )
+
+    def test_launch_chromium_explains_how_to_install_missing_browser(self) -> None:
+        class FakeChromium:
+            executable_path = "/tmp/tool-check-tkb-missing-chromium"
+
+            def launch(self, **kwargs):
+                raise AssertionError("launch must not be called when the executable is missing")
+
+        class FakePlaywright:
+            chromium = FakeChromium()
+
+        with self.assertRaisesRegex(RuntimeError, r"python -m playwright install chromium"):
+            _launch_chromium(FakePlaywright())
+
     def setUp(self) -> None:
         try:
             self.playwright = sync_playwright().start()

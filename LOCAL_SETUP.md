@@ -15,7 +15,7 @@ source .venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
 
 # Install Playwright browsers (required for TDTU portal scraping)
-playwright install chromium
+python -m playwright install chromium
 ```
 
 ## 2. Configure Environment

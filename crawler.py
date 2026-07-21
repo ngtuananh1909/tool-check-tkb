@@ -19,6 +19,7 @@ import os
 import re
 import datetime
 import hashlib
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
@@ -58,6 +59,34 @@ ELEARNING_SELECTOR_SUBMIT = (
 
 # Timeout (ms) for locating the submit button before falling back to Enter
 SUBMIT_BUTTON_TIMEOUT_MS = 5_000
+
+PLAYWRIGHT_BROWSER_INSTALL_COMMAND = "python -m playwright install chromium"
+SENSITIVE_URL_QUERY_PARAMS = re.compile(r"([?&](?:token|requestid)=)[^&]+", re.IGNORECASE)
+
+
+def _launch_chromium(playwright):
+    """Launch the bundled Chromium with an actionable missing-browser error."""
+    executable_path = Path(playwright.chromium.executable_path)
+    if not executable_path.exists():
+        raise RuntimeError(
+            "Playwright Chromium is not installed for this Python environment. "
+            f"Run `{PLAYWRIGHT_BROWSER_INSTALL_COMMAND}` and retry. "
+            f"Expected executable: {executable_path}"
+        )
+    return playwright.chromium.launch(
+        headless=True,
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-http2",
+        ],
+    )
+
+
+def _sanitize_url_for_log(url: object) -> str:
+    """Redact portal session query parameters before writing a URL to logs."""
+    return SENSITIVE_URL_QUERY_PARAMS.sub(r"\1[redacted]", str(url or ""))
+
 
 # Selector hints – adjust if the portal markup changes
 # Include both lowercase (HTML) and PascalCase (ASP.NET MVC model binding) variants.
@@ -167,14 +196,7 @@ def fetch_schedule(
     total_weeks = 1 + extra_weeks
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-http2",
-            ],
-        )
+        browser = _launch_chromium(p)
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -196,7 +218,7 @@ def fetch_schedule(
             # ----------------------------------------------------------------
             # Wait for the username input to be ready before filling.
             page.wait_for_selector(SELECTOR_USERNAME, state="visible", timeout=30_000)
-            logger.info("Filling in login credentials for student %s", sid)
+            logger.info("Filling in portal login credentials.")
             page.fill(SELECTOR_USERNAME, sid)
             page.fill(SELECTOR_PASSWORD, pwd)
 
@@ -257,11 +279,11 @@ def fetch_schedule(
                 # Try to grab an error message from the page for better diagnostics
                 error_text = page.text_content("body") or ""
                 raise RuntimeError(
-                    f"Login appears to have failed. Current URL: {page.url}. "
+                    f"Login appears to have failed. Current URL: {_sanitize_url_for_log(page.url)}. "
                     f"Page excerpt: {error_text[:500]}"
                 )
 
-            logger.info("Login successful. Current URL: %s", page.url)
+            logger.info("Login successful. Current URL: %s", _sanitize_url_for_log(page.url))
 
             # ----------------------------------------------------------------
             # Step 3 – Navigate to the schedule section
@@ -297,7 +319,10 @@ def fetch_schedule(
 
             if not clicked_schedule_link:
                 # Fallback: navigate directly to the schedule URL
-                logger.info("No visible schedule link found; navigating directly to %s", schedule_url)
+                logger.info(
+                    "No visible schedule link found; navigating directly to %s",
+                    _sanitize_url_for_log(schedule_url),
+                )
                 page.goto(schedule_url, wait_until="domcontentloaded", timeout=60_000)
 
             # ----------------------------------------------------------------
@@ -310,7 +335,7 @@ def fetch_schedule(
             logger.info("Crawling schedule for semester: %s", semester_label)
             logger.info(
                 "Parsing schedule table on %s (current week + %d future week(s)).",
-                page.url,
+                _sanitize_url_for_log(page.url),
                 extra_weeks,
             )
             all_rows: list[dict] = []
@@ -467,14 +492,7 @@ def fetch_elearning_progress(
         )
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-http2",
-            ],
-        )
+        browser = _launch_chromium(p)
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -495,7 +513,9 @@ def fetch_elearning_progress(
             page.wait_for_load_state("domcontentloaded", timeout=30_000)
 
             if "login" in page.url.lower():
-                raise RuntimeError(f"eLearning login failed. Current URL: {page.url}")
+                raise RuntimeError(
+                    f"eLearning login failed. Current URL: {_sanitize_url_for_log(page.url)}"
+                )
 
             page.goto(ELEARNING_MY_URL, wait_until="networkidle", timeout=60_000)
             # Moodle dashboards often render course cards asynchronously.
@@ -512,7 +532,7 @@ def fetch_elearning_progress(
             if not deduped:
                 logger.warning(
                     "eLearning progress parser returned 0 rows. url=%s title=%s",
-                    page.url,
+                    _sanitize_url_for_log(page.url),
                     page.title(),
                 )
                 body_excerpt = (page.locator("body").inner_text() or "").strip().replace("\n", " ")
@@ -526,14 +546,7 @@ def fetch_elearning_progress(
 def _fetch_exam_schedule_from_portal(sid: str, pwd: str, weeks_ahead: int | None = None) -> list[dict]:
     """Fetch exam rows from the old portal / lichhoc-lichthi stack."""
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-http2",
-            ],
-        )
+        browser = _launch_chromium(p)
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -637,14 +650,7 @@ def _fetch_exam_schedule_from_portal(sid: str, pwd: str, weeks_ahead: int | None
 def _fetch_exam_schedule_from_elearning(username: str, password: str) -> list[dict]:
     """Best-effort exam parsing from eLearning pages when portal source is unavailable."""
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-http2",
-            ],
-        )
+        browser = _launch_chromium(p)
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -679,14 +685,7 @@ def _fetch_exam_schedule_from_stdportal_announcements(username: str, password: s
     )
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-http2",
-            ],
-        )
+        browser = _launch_chromium(p)
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1527,14 +1526,7 @@ def fetch_elearning_deadlines(
         raise ValueError("eLearning credentials missing. Set STUDENT_ID and PASSWORD.")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-http2",
-            ],
-        )
+        browser = _launch_chromium(p)
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1954,14 +1946,7 @@ def get_current_semester(student_id: str | None = None, password: str | None = N
         return "unknown"
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-http2",
-            ],
-        )
+        browser = _launch_chromium(p)
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
