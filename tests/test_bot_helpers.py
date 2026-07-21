@@ -11,6 +11,7 @@ from telegram_mvp_bot import (
     _build_deadline_detail_text,
     _build_deadline_keyboard,
     _build_deadline_list_text,
+    _build_exam_list_text,
     _is_add_form_complete,
     _new_add_form_state,
     _skip_add_form_optional_step,
@@ -102,6 +103,21 @@ class BotHelperTests(unittest.TestCase):
 
         self.assertEqual(len(callbacks), 2)
         self.assertEqual(len(set(callbacks)), 2)
+
+    def test_exam_text_formats_tagged_calendar_events(self) -> None:
+        text = _build_exam_list_text(
+            [
+                {
+                    "title": "[EXAM] Cuoi ky - Operating Systems",
+                    "start": "2026-05-21T08:00:00+07:00",
+                    "location": "A101",
+                }
+            ]
+        )
+
+        self.assertIn("21/05/2026 08:00", text)
+        self.assertIn("Cuoi ky - Operating Systems", text)
+        self.assertIn("@ A101", text)
 
     def test_parse_schedule_day_arg_supports_vietnamese_relative_and_weekday(self) -> None:
         today = dt.date(2026, 5, 13)

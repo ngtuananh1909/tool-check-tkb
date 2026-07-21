@@ -28,17 +28,18 @@ SYNC_SOURCE_SCHEDULE = "schedule"
 SYNC_SOURCE_CLASS_SESSION = "class_session"
 SYNC_SOURCE_APPOINTMENT = "appointment"
 SYNC_SOURCE_EXAM = "exam"
+SYNC_SOURCE_DEADLINE = "deadline"
 DEFAULT_SYNC_WEEKS = 16
 
 
 def _managed_source_types_for_crawler_sync() -> frozenset[str]:
     """Source types owned by ``sync_crawled_data_to_google_calendar``.
 
-    Crawler sync only manages ``class_sessions`` and ``exams``. It must never
+    Crawler sync only manages ``class_sessions``, ``exams``, and ``deadlines``. It must never
     delete events created by Telegram ``/add`` (``source_type=appointment``) or
     by the recurring-weekly DB sync (``source_type=schedule``).
     """
-    return frozenset({SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM})
+    return frozenset({SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM, SYNC_SOURCE_DEADLINE})
 
 
 def _managed_source_types_for_database_sync(use_class_sessions: bool) -> frozenset[str]:
@@ -254,15 +255,41 @@ def sync_database_to_csv_and_google_calendar(
 
 
 def sync_crawled_data_to_google_calendar(
-    class_sessions: list[dict],
-    exams: list[dict],
+    class_sessions: list[dict] | None,
+    exams: list[dict] | None,
     student_id: str | None = None,
+    deadlines: list[dict] | None = None,
 ) -> tuple[str, bool]:
-    """Sync raw crawled data to Google Calendar without querying the database."""
+    """Sync raw crawled data without deleting sources whose crawl failed.
+
+    ``None`` means that source could not be collected; an empty list means it
+    was collected successfully and genuinely has no rows.  Only successfully
+    collected source types are reconciled, protecting existing Calendar events
+    during a partial crawler outage.
+    """
     target_date = local_today()
-    
-    sync_items = _build_sync_items_from_sessions(class_sessions, [], exams, target_date)
-    
+
+    session_rows = class_sessions or []
+    exam_rows = exams or []
+    deadline_rows = deadlines or []
+    sync_items = _build_sync_items_from_sessions(
+        session_rows,
+        [],
+        exam_rows,
+        target_date,
+        deadlines=deadline_rows,
+    )
+    managed: set[str] = set()
+    if class_sessions is not None:
+        managed.add(SYNC_SOURCE_CLASS_SESSION)
+    if exams is not None:
+        managed.add(SYNC_SOURCE_EXAM)
+    if deadlines is not None:
+        managed.add(SYNC_SOURCE_DEADLINE)
+    if not managed:
+        logger.warning("Calendar sync skipped because no crawler data was collected.")
+        return "", False
+
     calendar_id = os.environ.get("GOOGLE_CALENDAR_ID", "").strip()
     events = [item["payload"] for item in sync_items]
     
@@ -286,7 +313,6 @@ def sync_crawled_data_to_google_calendar(
 
     service, service_account_email = _build_calendar_service(service_account_json, service_account_file)
     _validate_calendar_target(service, calendar_id, service_account_email)
-    managed = _managed_source_types_for_crawler_sync()
     _replace_bot_events_for_range(service, calendar_id, sync_items, student_id, managed)
 
     logger.info(
@@ -475,6 +501,70 @@ def fetch_events_from_calendar(target_date: dt.date, days_ahead: int = 0) -> tup
                 
     logger.info("Exported events from Calendar to CSV: %s", csv_path)
     return classes, appointments, exams
+
+
+def fetch_tagged_calendar_events(
+    source_type: str,
+    target_date: dt.date | None = None,
+    days_ahead: int = 90,
+) -> list[dict]:
+    """Return bot-created tagged events from tomorrow onward by default."""
+    calendar_id = os.environ.get("GOOGLE_CALENDAR_ID", "").strip()
+    service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    service_account_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
+    if not calendar_id or (not service_account_json and not service_account_file):
+        logger.warning("Missing credentials, cannot fetch tagged Calendar events.")
+        return []
+
+    service, _ = _build_calendar_service(service_account_json, service_account_file)
+    timezone = os.environ.get("APP_TIMEZONE", "Asia/Ho_Chi_Minh")
+    tz = ZoneInfo(timezone)
+    start_date = target_date or (local_today() + dt.timedelta(days=1))
+    time_min = dt.datetime.combine(start_date, dt.time.min).replace(tzinfo=tz)
+    time_max = time_min + dt.timedelta(days=max(1, days_ahead))
+    events_result = _execute_calendar_request(
+        f"calendar fetch {source_type} events",
+        lambda: service.events().list(
+            calendarId=calendar_id,
+            timeMin=time_min.isoformat(),
+            timeMax=time_max.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+            privateExtendedProperty=f"source_type={source_type}",
+        ).execute(),
+    )
+
+    rows: list[dict] = []
+    for event in events_result.get("items", []):
+        props = ((event.get("extendedProperties") or {}).get("private") or {})
+        if props.get("source") != BOT_SOURCE_TAG or _event_source_type(event) != source_type:
+            continue
+        start = event.get("start") or {}
+        end = event.get("end") or {}
+        rows.append(
+            {
+                "title": str(event.get("summary") or "").strip(),
+                "start": start.get("dateTime") or start.get("date") or "",
+                "end": end.get("dateTime") or end.get("date") or "",
+                "location": str(event.get("location") or "").strip(),
+                "notes": str(event.get("description") or "").strip(),
+                "html_link": str(event.get("htmlLink") or "").strip(),
+                "source_key": _event_source_key(event),
+            }
+        )
+    return rows
+
+
+def find_tagged_calendar_event(source_type: str, source_key: str) -> dict | None:
+    """Find a future tagged event selected through a Telegram callback."""
+    return next(
+        (
+            event
+            for event in fetch_tagged_calendar_events(source_type)
+            if str(event.get("source_key") or "") == source_key
+        ),
+        None,
+    )
 
 
 def _export_csv(schedule_rows: list[dict], appointments: list[dict], exams: list[dict], target_date: dt.date) -> str:
@@ -900,6 +990,7 @@ def _build_sync_items_from_sessions(
     appointments: list[dict],
     exams: list[dict],
     target_date: dt.date,
+    deadlines: list[dict] | None = None,
 ) -> list[dict]:
     timezone = os.environ.get("APP_TIMEZONE", "Asia/Ho_Chi_Minh")
     items: list[dict] = []
@@ -1107,6 +1198,67 @@ def _build_sync_items_from_sessions(
             }
         )
 
+    items.extend(_build_deadline_sync_items(deadlines or [], timezone))
+    return items
+
+
+def _build_deadline_sync_items(deadlines: list[dict], timezone: str) -> list[dict]:
+    """Build tagged Calendar events for incomplete eLearning deadlines."""
+    items: list[dict] = []
+    for deadline in deadlines:
+        due_at = _parse_deadline_datetime(deadline.get("due_date"), timezone)
+        if due_at is None:
+            logger.warning("Skipping deadline with invalid due_date: %r", deadline.get("due_date"))
+            continue
+        if due_at < dt.datetime.now(due_at.tzinfo):
+            continue
+
+        course = str(deadline.get("course_name") or "").strip() or "Môn học"
+        activity = str(deadline.get("activity_name") or "").strip() or "Deadline"
+        activity_url = str(deadline.get("activity_url") or "").strip()
+        source_key = _deadline_source_key(deadline)
+        payload = {
+            "summary": f"[DEADLINE] {course}: {activity}",
+            "description": "\n".join(
+                line
+                for line in ("#deadline", f"Môn: {course}", f"Công việc: {activity}", activity_url)
+                if line
+            ),
+            "colorId": "6",
+            "start": {"dateTime": due_at.isoformat(), "timeZone": timezone},
+            "end": {
+                "dateTime": (due_at + dt.timedelta(minutes=30)).isoformat(),
+                "timeZone": timezone,
+            },
+        }
+        _apply_default_reminder(payload)
+        source_hash = _sync_hash(
+            {
+                "source_type": SYNC_SOURCE_DEADLINE,
+                "source_key": source_key,
+                "course": course,
+                "activity": activity,
+                "due_date": due_at.isoformat(),
+                "activity_url": activity_url,
+                "payload": payload,
+            }
+        )
+        payload["extendedProperties"] = {
+            "private": {
+                "source": BOT_SOURCE_TAG,
+                "source_type": SYNC_SOURCE_DEADLINE,
+                "source_key": source_key,
+                "source_hash": source_hash,
+            }
+        }
+        items.append(
+            {
+                "source_type": SYNC_SOURCE_DEADLINE,
+                "source_key": source_key,
+                "source_hash": source_hash,
+                "payload": payload,
+            }
+        )
     return items
 
 
@@ -1400,6 +1552,23 @@ def _exam_source_key(exam: dict) -> str:
     return f"{SYNC_SOURCE_EXAM}:{exam_date}:{start_time}:{end_time}:{subject}:{exam_type}"
 
 
+def _deadline_source_key(deadline: dict) -> str:
+    source_signature = str(deadline.get("source_signature") or "").strip()
+    if source_signature:
+        return f"{SYNC_SOURCE_DEADLINE}:{source_signature}"
+
+    activity_url = str(deadline.get("activity_url") or "").strip()
+    if activity_url:
+        return f"{SYNC_SOURCE_DEADLINE}:{activity_url}"
+
+    payload = {
+        "course_id": _normalize_value(deadline.get("course_id")),
+        "activity_name": _normalize_value(deadline.get("activity_name")),
+        "due_date": _normalize_value(deadline.get("due_date")),
+    }
+    return f"{SYNC_SOURCE_DEADLINE}:{_sync_hash(payload)}"
+
+
 def _exam_calendar_type_label(exam_type: object) -> str:
     raw = str(exam_type or "").strip().lower()
     if not raw:
@@ -1415,16 +1584,16 @@ def _exam_calendar_title(exam: dict) -> str:
     subject = str(exam.get("subject_name") or "").strip() or "Lich thi"
     label = _exam_calendar_type_label(exam.get("exam_type"))
     if not label:
-        return f"[Thi] {subject}"
-    return f"[{label}] {subject}"
+        return f"[EXAM] {subject}"
+    return f"[EXAM] {label} - {subject}"
 
 
 def _exam_calendar_description(exam: dict) -> str:
     base_note = str(exam.get("notes") or "").strip() or "Lich thi duoc dong bo tu Supabase."
     label = _exam_calendar_type_label(exam.get("exam_type"))
     if not label:
-        return base_note
-    return f"Loai thi: {label}. {base_note}"
+        return f"#exam\n{base_note}"
+    return f"#exam\nLoai thi: {label}. {base_note}"
 
 
 def _sync_hash(payload: dict) -> str:
@@ -1528,6 +1697,20 @@ def _parse_date(value: object, default_date: dt.date) -> dt.date:
         return dt.date.fromisoformat(text)
     except ValueError:
         return default_date
+
+
+def _parse_deadline_datetime(value: object, timezone: str) -> dt.datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    tz = ZoneInfo(timezone)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=tz)
+    return parsed.astimezone(tz)
 
 
 def _to_int(value: object) -> int:

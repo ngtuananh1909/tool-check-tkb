@@ -3,9 +3,8 @@ run_hour.py – Hourly data collection and sync orchestrator.
 
 This script runs steps 1-4 of the schedule-notification pipeline:
     1. Crawl the TDTU portal for the latest timetable.
-    2. Upsert the timetable into Supabase.
-    3. Fetch full dataset from Supabase for sync preparation.
-    4. Export CSV and sync to Google Calendar.
+    2. Push raw crawler results directly to Google Calendar.
+    3. Upsert eLearning progress and deadlines into Supabase.
 
 Can be scheduled to run hourly via cron, Railway Scheduled Jobs, or similar.
 This does NOT send Telegram notifications; that's handled separately by main.py.
@@ -99,44 +98,44 @@ def run_hourly_sync() -> None:
         )
         weeks_ahead = _resolve_crawler_weeks_ahead()
         logger.debug("Crawler will fetch current week + %d future week(s).", weeks_ahead)
-        schedule = fetch_schedule(weeks_ahead=weeks_ahead)
-        logger.debug("Crawler returned %d schedule entries.", len(schedule))
+        schedule = None
+        try:
+            schedule = fetch_schedule(weeks_ahead=weeks_ahead)
+            logger.info("Schedule crawler returned %d row(s).", len(schedule))
+        except Exception:
+            logger.exception("Schedule crawl failed; continuing without schedule data.")
 
-        exams = fetch_exam_schedule(weeks_ahead=weeks_ahead)
-        logger.debug("Exam crawler returned %d exam row(s).", len(exams))
+        exams = None
+        try:
+            exams = fetch_exam_schedule(weeks_ahead=weeks_ahead)
+            logger.info("Exam crawler returned %d row(s).", len(exams))
+        except Exception:
+            logger.exception("Exam crawl failed; continuing without exam data.")
 
-        elearning_progress = fetch_elearning_progress()
-        logger.debug("eLearning crawler returned %d progress row(s).", len(elearning_progress))
+        elearning_progress = None
+        try:
+            elearning_progress = fetch_elearning_progress()
+            logger.info("eLearning progress crawler returned %d row(s).", len(elearning_progress))
+        except Exception:
+            logger.exception("eLearning progress crawl failed; continuing without a progress update.")
 
-        elearning_deadlines = fetch_elearning_deadlines()
-        logger.debug("eLearning deadline crawler returned %d row(s).", len(elearning_deadlines))
+        elearning_deadlines = None
+        try:
+            elearning_deadlines = fetch_elearning_deadlines()
+            logger.info("eLearning deadline crawler returned %d row(s).", len(elearning_deadlines))
+        except Exception:
+            logger.exception("eLearning deadline crawl failed; continuing without a deadline update.")
     except Exception as exc:
         logger.exception("Step 1 failed after %.2fs", time.perf_counter() - step_started)
         _handle_error("Crawler failed", exc)
         return
     _log_step_elapsed("Step 1", step_started)
 
-    # -------- Step 2: DB Sync (eLearning only) --------
+    # -------- Step 2: Direct Google Calendar sync --------
+    # Use raw crawler results so Calendar is updated immediately after crawling,
+    # without waiting for the Supabase eLearning upserts below.
     step_started = time.perf_counter()
-    logger.info("Step 2: Updating eLearning data in Supabase")
-    try:
-        from database import (
-            upsert_elearning_deadlines,
-            upsert_elearning_progress,
-        )
-        progress_rows = upsert_elearning_progress(elearning_progress, student_id=student_id)
-        deadline_rows = upsert_elearning_deadlines(elearning_deadlines, student_id=student_id)
-        logger.debug("eLearning progress upserted: %d row(s).", progress_rows)
-        logger.debug("eLearning deadlines upserted: %d row(s).", deadline_rows)
-    except Exception as exc:
-        logger.exception("Step 2 failed after %.2fs", time.perf_counter() - step_started)
-        _handle_error("Database update failed", exc)
-        return
-    _log_step_elapsed("Step 2", step_started)
-
-    # -------- Step 3: Direct Google Calendar sync --------
-    step_started = time.perf_counter()
-    logger.info("Step 3: Syncing raw data directly to Google Calendar")
+    logger.info("Step 2: Syncing raw crawler data directly to Google Calendar")
     try:
         from calendar_sync import sync_crawled_data_to_google_calendar
 
@@ -144,6 +143,7 @@ def run_hourly_sync() -> None:
             schedule,
             exams,
             student_id=student_id,
+            deadlines=elearning_deadlines,
         )
         if did_sync:
             logger.info("Google Calendar sync complete.")
@@ -152,8 +152,35 @@ def run_hourly_sync() -> None:
                 "Google Calendar sync skipped (missing GOOGLE_CALENDAR_ID or Google service-account credentials)."
             )
     except Exception as exc:
-        logger.exception("Step 3 failed after %.2fs", time.perf_counter() - step_started)
+        logger.exception("Step 2 failed after %.2fs", time.perf_counter() - step_started)
         _handle_error("Google Calendar sync failed", exc)
+        return
+    _log_step_elapsed("Step 2", step_started)
+
+    # -------- Step 3: DB Sync (eLearning only) --------
+    step_started = time.perf_counter()
+    logger.info("Step 3: Updating eLearning data in Supabase")
+    try:
+        from database import (
+            upsert_elearning_deadlines,
+            upsert_elearning_progress,
+        )
+        progress_rows = 0
+        if elearning_progress is not None:
+            progress_rows = upsert_elearning_progress(elearning_progress, student_id=student_id)
+        else:
+            logger.warning("Skipped eLearning progress upsert because the crawl failed.")
+
+        deadline_rows = 0
+        if elearning_deadlines is not None:
+            deadline_rows = upsert_elearning_deadlines(elearning_deadlines, student_id=student_id)
+        else:
+            logger.warning("Skipped eLearning deadline upsert because the crawl failed.")
+        logger.debug("eLearning progress upserted: %d row(s).", progress_rows)
+        logger.debug("eLearning deadlines upserted: %d row(s).", deadline_rows)
+    except Exception as exc:
+        logger.exception("Step 3 failed after %.2fs", time.perf_counter() - step_started)
+        _handle_error("Database update failed", exc)
         return
     _log_step_elapsed("Step 3", step_started)
 

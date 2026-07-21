@@ -57,8 +57,20 @@ ELEARNING_SELECTOR_SUBMIT = (
     "#loginbtn"
 )
 
-# Timeout (ms) for locating the submit button before falling back to Enter
-SUBMIT_BUTTON_TIMEOUT_MS = 5_000
+# Portal controls can be slow during peak registration hours.  Do not use the
+# browser's short default timeout here: an incomplete control interaction can
+# otherwise make a perfectly usable timetable look empty.
+PORTAL_CONTROL_TIMEOUT_MS = 30_000
+PORTAL_CONTROL_MAX_ATTEMPTS = 2
+# Timeout (ms) for locating the submit button before falling back to Enter.
+SUBMIT_BUTTON_TIMEOUT_MS = PORTAL_CONTROL_TIMEOUT_MS
+ELEARNING_NAVIGATION_TIMEOUT_MS = 60_000
+ELEARNING_LOGIN_TIMEOUT_MS = 30_000
+ELEARNING_DASHBOARD_TIMEOUT_MS = 20_000
+ELEARNING_SELECTOR_DASHBOARD_READY = (
+    ".dashboard-card, .block_myoverview, [data-region='courses-view'], "
+    "[data-region='timeline-view'], #region-main"
+)
 
 PLAYWRIGHT_BROWSER_INSTALL_COMMAND = "python -m playwright install chromium"
 SENSITIVE_URL_QUERY_PARAMS = re.compile(r"([?&](?:token|requestid)=)[^&]+", re.IGNORECASE)
@@ -86,6 +98,95 @@ def _launch_chromium(playwright):
 def _sanitize_url_for_log(url: object) -> str:
     """Redact portal session query parameters before writing a URL to logs."""
     return SENSITIVE_URL_QUERY_PARAMS.sub(r"\1[redacted]", str(url or ""))
+
+
+def _click_portal_control(page, control, description: str) -> None:
+    """Click a portal control, retrying one transient Playwright timeout.
+
+    The TDTU portal uses ASP.NET postbacks, which periodically leave an
+    otherwise visible control non-actionable for a few seconds.  Retrying only
+    timeout errors preserves genuine selector/permission failures while making
+    the hourly crawl resilient to those temporary delays.
+    """
+    for attempt in range(1, PORTAL_CONTROL_MAX_ATTEMPTS + 1):
+        try:
+            control.click(timeout=PORTAL_CONTROL_TIMEOUT_MS)
+            return
+        except PlaywrightTimeoutError as exc:
+            if attempt == PORTAL_CONTROL_MAX_ATTEMPTS:
+                raise RuntimeError(
+                    f"{description} timed out after {attempt} attempt(s) of "
+                    f"{PORTAL_CONTROL_TIMEOUT_MS}ms"
+                ) from exc
+            logger.warning(
+                "%s timed out after %dms (attempt %d/%d); waiting for the page and retrying.",
+                description,
+                PORTAL_CONTROL_TIMEOUT_MS,
+                attempt,
+                PORTAL_CONTROL_MAX_ATTEMPTS,
+            )
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=PORTAL_CONTROL_TIMEOUT_MS)
+            except PlaywrightTimeoutError:
+                logger.debug("Page was still loading before retrying %s.", description)
+
+
+def _login_and_open_elearning_dashboard(page, username: str, password: str) -> None:
+    """Authenticate with eLearning and open its dashboard without waiting for network idle.
+
+    Moodle keeps background requests alive on some deployments, so ``networkidle``
+    can time out even after the page and its login form are usable.
+    """
+    logger.info("Navigating to eLearning login page: %s", ELEARNING_LOGIN_URL)
+    page.goto(
+        ELEARNING_LOGIN_URL,
+        wait_until="domcontentloaded",
+        timeout=ELEARNING_NAVIGATION_TIMEOUT_MS,
+    )
+    page.wait_for_selector(
+        ELEARNING_SELECTOR_USERNAME,
+        state="visible",
+        timeout=ELEARNING_LOGIN_TIMEOUT_MS,
+    )
+    page.fill(ELEARNING_SELECTOR_USERNAME, username)
+    page.fill(ELEARNING_SELECTOR_PASSWORD, password)
+    page.locator(ELEARNING_SELECTOR_SUBMIT).first.click(timeout=10_000)
+
+    try:
+        page.wait_for_url(
+            lambda url: "login" not in str(url).lower(),
+            timeout=ELEARNING_LOGIN_TIMEOUT_MS,
+        )
+    except PlaywrightTimeoutError as exc:
+        if "login" in page.url.lower():
+            raise RuntimeError(
+                "eLearning login did not leave the login page. "
+                f"Current URL: {_sanitize_url_for_log(page.url)}"
+            ) from exc
+        raise
+
+    if "login" in page.url.lower():
+        raise RuntimeError(
+            f"eLearning login failed. Current URL: {_sanitize_url_for_log(page.url)}"
+        )
+
+    page.goto(
+        ELEARNING_MY_URL,
+        wait_until="domcontentloaded",
+        timeout=ELEARNING_NAVIGATION_TIMEOUT_MS,
+    )
+    if "login" in page.url.lower():
+        raise RuntimeError(
+            "eLearning dashboard redirected to the login page. "
+            f"Current URL: {_sanitize_url_for_log(page.url)}"
+        )
+    try:
+        page.wait_for_selector(
+            ELEARNING_SELECTOR_DASHBOARD_READY,
+            timeout=ELEARNING_DASHBOARD_TIMEOUT_MS,
+        )
+    except PlaywrightTimeoutError:
+        logger.warning("eLearning dashboard selectors did not appear before timeout; parsing anyway.")
 
 
 # Selector hints – adjust if the portal markup changes
@@ -229,7 +330,7 @@ def fetch_schedule(
             # ── Submission strategy 1: click the submit button ──────────────
             submit_clicked = False
             try:
-                page.locator(SELECTOR_SUBMIT).first.click(timeout=SUBMIT_BUTTON_TIMEOUT_MS)
+                _click_portal_control(page, page.locator(SELECTOR_SUBMIT).first, "Portal login submit")
                 submit_clicked = True
                 logger.info("Submit button clicked.")
             except Exception:
@@ -310,7 +411,7 @@ def fetch_schedule(
                             continue
 
                         logger.info("Clicking visible schedule navigation link (candidate %d)", i + 1)
-                        candidate.click(timeout=10_000)
+                        _click_portal_control(page, candidate, "Schedule navigation link")
                         page.wait_for_load_state("domcontentloaded", timeout=60_000)
                         clicked_schedule_link = True
                         break
@@ -503,29 +604,7 @@ def fetch_elearning_progress(
         page = context.new_page()
 
         try:
-            logger.info("Navigating to eLearning login page: %s", ELEARNING_LOGIN_URL)
-            page.goto(ELEARNING_LOGIN_URL, wait_until="networkidle", timeout=60_000)
-            page.wait_for_selector(ELEARNING_SELECTOR_USERNAME, state="visible", timeout=30_000)
-
-            page.fill(ELEARNING_SELECTOR_USERNAME, user)
-            page.fill(ELEARNING_SELECTOR_PASSWORD, pwd)
-            page.locator(ELEARNING_SELECTOR_SUBMIT).first.click(timeout=10_000)
-            page.wait_for_load_state("domcontentloaded", timeout=30_000)
-
-            if "login" in page.url.lower():
-                raise RuntimeError(
-                    f"eLearning login failed. Current URL: {_sanitize_url_for_log(page.url)}"
-                )
-
-            page.goto(ELEARNING_MY_URL, wait_until="networkidle", timeout=60_000)
-            # Moodle dashboards often render course cards asynchronously.
-            try:
-                page.wait_for_selector(
-                    ".dashboard-card, .block_myoverview, [data-region='courses-view'], .progress, .progress-bar",
-                    timeout=20_000,
-                )
-            except Exception:
-                logger.warning("eLearning dashboard selectors did not appear before timeout; parsing anyway.")
+            _login_and_open_elearning_dashboard(page, user, pwd)
 
             progress_rows = _parse_elearning_progress(page)
             deduped = _deduplicate_progress_rows(progress_rows)
@@ -564,7 +643,7 @@ def _fetch_exam_schedule_from_portal(sid: str, pwd: str, weeks_ahead: int | None
 
             login_page_url = page.url
             try:
-                page.locator(SELECTOR_SUBMIT).first.click(timeout=SUBMIT_BUTTON_TIMEOUT_MS)
+                _click_portal_control(page, page.locator(SELECTOR_SUBMIT).first, "Portal exam login submit")
             except Exception:
                 page.locator(SELECTOR_PASSWORD).press("Enter")
 
@@ -587,7 +666,7 @@ def _fetch_exam_schedule_from_portal(sid: str, pwd: str, weeks_ahead: int | None
                     try:
                         if not candidate.is_visible():
                             continue
-                        candidate.click(timeout=10_000)
+                        _click_portal_control(page, candidate, "Exam navigation link")
                         page.wait_for_load_state("domcontentloaded", timeout=60_000)
                         exams = _parse_exam_table_with_filters(page)
                         if exams:
@@ -609,7 +688,7 @@ def _fetch_exam_schedule_from_portal(sid: str, pwd: str, weeks_ahead: int | None
                     try:
                         if not candidate.is_visible():
                             continue
-                        candidate.click(timeout=10_000)
+                        _click_portal_control(page, candidate, "Schedule navigation link")
                         page.wait_for_load_state("domcontentloaded", timeout=60_000)
                         clicked_schedule_link = True
                         break
@@ -629,7 +708,7 @@ def _fetch_exam_schedule_from_portal(sid: str, pwd: str, weeks_ahead: int | None
                     try:
                         if not candidate.is_visible():
                             continue
-                        candidate.click(timeout=10_000)
+                        _click_portal_control(page, candidate, "Exam tab")
                         page.wait_for_load_state("domcontentloaded", timeout=30_000)
                         exams = _parse_exam_table_with_filters(page)
                         if exams:
@@ -660,16 +739,7 @@ def _fetch_exam_schedule_from_elearning(username: str, password: str) -> list[di
         )
         page = context.new_page()
         try:
-            page.goto(ELEARNING_LOGIN_URL, wait_until="networkidle", timeout=60_000)
-            page.wait_for_selector(ELEARNING_SELECTOR_USERNAME, state="visible", timeout=30_000)
-            page.fill(ELEARNING_SELECTOR_USERNAME, username)
-            page.fill(ELEARNING_SELECTOR_PASSWORD, password)
-            page.locator(ELEARNING_SELECTOR_SUBMIT).first.click(timeout=10_000)
-            page.wait_for_load_state("domcontentloaded", timeout=30_000)
-            if "login" in page.url.lower():
-                raise RuntimeError("eLearning login failed while fetching exams.")
-
-            page.goto(ELEARNING_MY_URL, wait_until="networkidle", timeout=60_000)
+            _login_and_open_elearning_dashboard(page, username, password)
             exams = _parse_exam_table(page)
             return exams
         finally:
@@ -701,7 +771,7 @@ def _fetch_exam_schedule_from_stdportal_announcements(username: str, password: s
             page.fill(SELECTOR_USERNAME, username)
             page.fill(SELECTOR_PASSWORD, password)
             try:
-                page.locator(SELECTOR_SUBMIT).first.click(timeout=SUBMIT_BUTTON_TIMEOUT_MS)
+                _click_portal_control(page, page.locator(SELECTOR_SUBMIT).first, "Portal announcement login submit")
             except Exception:
                 page.locator(SELECTOR_PASSWORD).press("Enter")
             try:
@@ -1536,16 +1606,7 @@ def fetch_elearning_deadlines(
         )
         page = context.new_page()
         try:
-            page.goto(ELEARNING_LOGIN_URL, wait_until="networkidle", timeout=60_000)
-            page.wait_for_selector(ELEARNING_SELECTOR_USERNAME, state="visible", timeout=30_000)
-            page.fill(ELEARNING_SELECTOR_USERNAME, user)
-            page.fill(ELEARNING_SELECTOR_PASSWORD, pwd)
-            page.locator(ELEARNING_SELECTOR_SUBMIT).first.click(timeout=10_000)
-            page.wait_for_load_state("domcontentloaded", timeout=30_000)
-            if "login" in page.url.lower():
-                raise RuntimeError("eLearning login failed while fetching deadlines.")
-
-            page.goto(ELEARNING_MY_URL, wait_until="networkidle", timeout=60_000)
+            _login_and_open_elearning_dashboard(page, user, pwd)
             dashboard_deadlines = _parse_elearning_dashboard_deadlines(page)
             courses = _parse_elearning_courses(page)
             return _deduplicate_elearning_deadlines(
@@ -1872,7 +1933,7 @@ def _goto_next_week(page) -> bool:
             try:
                 if not control.is_visible():
                     continue
-                control.click(timeout=8_000)
+                _click_portal_control(page, control, "Next-week control")
                 try:
                     page.wait_for_function(
                         r"""
@@ -1962,7 +2023,7 @@ def get_current_semester(student_id: str | None = None, password: str | None = N
 
             submitted = False
             try:
-                page.locator(SELECTOR_SUBMIT).first.click(timeout=5_000)
+                _click_portal_control(page, page.locator(SELECTOR_SUBMIT).first, "Semester pre-check login submit")
                 submitted = True
             except Exception:
                 try:

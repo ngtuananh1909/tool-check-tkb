@@ -22,10 +22,14 @@ from requests import RequestException
 
 import requests
 
-from database import (
-    get_nearest_elearning_deadlines,
+from calendar_sync import (
+    SYNC_SOURCE_DEADLINE,
+    SYNC_SOURCE_EXAM,
+    fetch_events_from_calendar,
+    fetch_tagged_calendar_events,
+    find_tagged_calendar_event,
+    insert_calendar_event,
 )
-from calendar_sync import insert_calendar_event, fetch_events_from_calendar
 from gemini_parser import generate_conversational_reply_with_gemini
 from time_utils import local_now, local_today
 
@@ -41,6 +45,7 @@ HELP_TEXT = (
     "/today - Xem lich hen hom nay\n"
     "/schedule - Xem lich hoc\n"
     "/deadline - Xem deadline eLearning\n"
+    "/exam - Xem lich thi 90 ngay toi\n"
     "/add - Mo form them lich\n\n"
     "Muon tao lich moi thi dung /add, bot se hoi lan luot Ngay, Gio, Lam gi, O dau."
 )
@@ -379,7 +384,7 @@ def _build_schedule_text(rows: list[dict], target_date: dt.date) -> str:
 
 
 def _deadline_callback_key(row: dict) -> str:
-    for field in ("id", "source_signature"):
+    for field in ("id", "source_signature", "source_key"):
         value = str(row.get(field) or "").strip()
         if value:
             return value
@@ -403,7 +408,8 @@ def _build_deadline_keyboard(rows: list[dict]) -> dict:
         key = _deadline_callback_key(row)
         if not key:
             continue
-        buttons.append([{"text": shorten_course_name(str(row.get("course_name") or "")), "callback_data": f"deadline:{key}"}])
+        course, _ = _deadline_title_parts(row)
+        buttons.append([{"text": shorten_course_name(course), "callback_data": f"deadline:{key}"}])
     return {"inline_keyboard": buttons}
 
 
@@ -429,9 +435,9 @@ def _build_deadline_list_text(rows: list[dict]) -> str:
     from course_aliases import shorten_course_name
 
     for row in rows:
-        course = shorten_course_name(str(row.get("course_name") or ""))
-        activity = row.get("activity_name") or "Deadline"
-        due = _format_deadline_due(row.get("due_date"))
+        course_name, activity = _deadline_title_parts(row)
+        course = shorten_course_name(course_name)
+        due = _format_calendar_event_time(row.get("start")) if row.get("source_key") else _format_deadline_due(row.get("due_date"))
         progress = _format_progress(row)
         suffix = f" - {progress}" if progress else ""
         lines.append(f"- {course}: {activity} ({due}){suffix}")
@@ -443,17 +449,30 @@ def _build_deadline_detail_text(row: dict | None) -> str:
         return "Không tìm thấy deadline cho môn này."
     from course_aliases import shorten_course_name
 
+    course_name, activity = _deadline_title_parts(row)
+    due = _format_calendar_event_time(row.get("start")) if row.get("source_key") else _format_deadline_due(row.get("due_date"))
+
     lines = [
-        f"Môn: {shorten_course_name(str(row.get('course_name') or 'Môn học'))}",
-        f"Deadline: {row.get('activity_name') or 'Deadline'}",
-        f"Hạn nộp: {_format_deadline_due(row.get('due_date'))}",
+        f"Môn: {shorten_course_name(course_name)}",
+        f"Deadline: {activity}",
+        f"Hạn nộp: {due}",
     ]
     progress = _format_progress(row)
     if progress:
         lines.append(f"Tiến độ: {progress}")
     if row.get("activity_url"):
         lines.append(str(row["activity_url"]))
+    elif row.get("description"):
+        lines.append(str(row["description"]))
     return "\n".join(lines)
+
+
+def _deadline_title_parts(row: dict) -> tuple[str, str]:
+    if row.get("source_key"):
+        title = str(row.get("title") or "").removeprefix("[DEADLINE] ").strip()
+        course, separator, activity = title.partition(":")
+        return course.strip() or "Môn học", activity.strip() if separator else "Deadline"
+    return str(row.get("course_name") or "Môn học"), str(row.get("activity_name") or "Deadline")
 
 
 def _format_deadline_due(value: object) -> str:
@@ -470,6 +489,36 @@ def _format_deadline_due(value: object) -> str:
         return parsed.strftime("%d/%m/%Y %H:%M")
     except ValueError:
         return text[:16]
+
+
+def _format_calendar_event_time(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "chưa rõ"
+    vietnam_tz = dt.timezone(dt.timedelta(hours=7))
+    try:
+        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=vietnam_tz)
+        else:
+            parsed = parsed.astimezone(vietnam_tz)
+        return parsed.strftime("%d/%m/%Y %H:%M")
+    except ValueError:
+        return text
+
+
+def _build_exam_list_text(rows: list[dict]) -> str:
+    if not rows:
+        return "Không tìm thấy lịch thi trong 90 ngày tới."
+    lines = [f"Có {len(rows)} lịch thi trong 90 ngày tới:"]
+    for row in rows:
+        title = str(row.get("title") or "Lịch thi").removeprefix("[EXAM] ")
+        line = f"- {_format_calendar_event_time(row.get('start'))}: {title}"
+        location = str(row.get("location") or "").strip()
+        if location:
+            line += f" @ {location}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _parse_add_appointment_payload(text: str) -> tuple[str, dt.date, str | None, str | None]:
@@ -736,6 +785,11 @@ def run() -> None:
                     except RequestException as exc:
                         logger.warning("Failed to answer callback query: %s", exc)
 
+                    if data_value.startswith("deadline:"):
+                        key = data_value.split(":", 1)[1]
+                        selected = find_tagged_calendar_event(SYNC_SOURCE_DEADLINE, key)
+                        _send_text(token, chat_id, _build_deadline_detail_text(selected))
+                        continue
                     if data_value == ADD_FORM_CANCEL_CALLBACK:
                         add_form_states.pop(chat_id, None)
                         _send_text(token, chat_id, "Đã hủy form thêm lịch.")
@@ -829,12 +883,17 @@ def run() -> None:
                     continue
 
                 if lowered == "/deadline":
-                    rows = get_nearest_elearning_deadlines()
+                    rows = fetch_tagged_calendar_events(SYNC_SOURCE_DEADLINE)
                     keyboard = _build_deadline_keyboard(rows)
                     if rows and keyboard["inline_keyboard"]:
                         _send_text_with_keyboard(token, chat_id, _build_deadline_list_text(rows), keyboard)
                     else:
                         _send_text(token, chat_id, _build_deadline_list_text(rows))
+                    continue
+
+                if lowered == "/exam":
+                    rows = fetch_tagged_calendar_events(SYNC_SOURCE_EXAM)
+                    _send_text(token, chat_id, _build_exam_list_text(rows))
                     continue
 
                 if lowered.startswith("/schedule") or lowered.startswith("/scheduel"):

@@ -23,12 +23,14 @@ from urllib.parse import urlparse
 import requests
 from fastapi import FastAPI, Header, HTTPException, Request
 
-from database import (
-    get_nearest_elearning_deadlines,
-    get_today_appointments,
-    get_today_class_sessions,
+from database import get_today_appointments, get_today_class_sessions
+from calendar_sync import (
+    SYNC_SOURCE_DEADLINE,
+    SYNC_SOURCE_EXAM,
+    fetch_tagged_calendar_events,
+    find_tagged_calendar_event,
+    insert_calendar_event,
 )
-from calendar_sync import insert_calendar_event
 from telegram_mvp_bot import (
     ADD_FORM_CANCEL_CALLBACK,
     ADD_FORM_DONE_CALLBACK,
@@ -41,10 +43,10 @@ from telegram_mvp_bot import (
     _build_deadline_detail_text,
     _build_deadline_keyboard,
     _build_deadline_list_text,
+    _build_exam_list_text,
     _is_add_form_complete,
     _build_schedule_text,
     _build_today_appointments_text,
-    _deadline_callback_key,
     _normalize_chat_id,
     _new_add_form_state,
     _parse_schedule_day_arg,
@@ -71,6 +73,7 @@ START_HELP_TEXT = (
     "/today - Xem lịch hẹn hôm nay\n"
     "/schedule - Xem lịch học\n"
     "/deadline - Xem deadline eLearning\n"
+    "/exam - Xem lịch thi 90 ngày tới\n"
     "/add - Mở form thêm lịch\n\n"
     "Muốn tạo lịch mới thì dùng /add, bot sẽ hỏi lần lượt Ngày, Giờ, Làm gì, Ở đâu."
 )
@@ -164,6 +167,7 @@ def _register_command_menu(token: str) -> None:
         {"command": "today", "description": "Xem lịch hẹn hôm nay"},
         {"command": "schedule", "description": "Xem lịch học"},
         {"command": "deadline", "description": "Xem deadline eLearning"},
+        {"command": "exam", "description": "Xem lịch thi 90 ngày tới"},
         {"command": "add", "description": "Thêm lịch hẹn theo mẫu"},
     ]
     result = _telegram_post(token, "setMyCommands", {"commands": commands})
@@ -258,13 +262,12 @@ async def telegram_webhook(
         data = str(callback_query.get("data") or "")
         if data.startswith("deadline:"):
             key = data.split(":", 1)[1]
-            rows = get_nearest_elearning_deadlines()
-            selected = next((row for row in rows if _deadline_callback_key(row) == key), None)
             requests.post(
                 _telegram_api(token, "answerCallbackQuery"),
                 json={"callback_query_id": callback_query.get("id")},
                 timeout=10,
             )
+            selected = find_tagged_calendar_event(SYNC_SOURCE_DEADLINE, key)
             _send_text(token, chat_id, _build_deadline_detail_text(selected))
         elif data == ADD_FORM_CANCEL_CALLBACK:
             _ADD_FORM_STATES.pop(chat_id, None)
@@ -375,12 +378,17 @@ async def telegram_webhook(
             return {"ok": True}
 
         if lowered == "/deadline":
-            rows = get_nearest_elearning_deadlines()
+            rows = fetch_tagged_calendar_events(SYNC_SOURCE_DEADLINE)
             keyboard = _build_deadline_keyboard(rows)
             if rows and keyboard["inline_keyboard"]:
                 _send_text_with_keyboard(token, chat_id, _build_deadline_list_text(rows), keyboard)
             else:
                 _send_text(token, chat_id, _build_deadline_list_text(rows))
+            return {"ok": True}
+
+        if lowered == "/exam":
+            rows = fetch_tagged_calendar_events(SYNC_SOURCE_EXAM)
+            _send_text(token, chat_id, _build_exam_list_text(rows))
             return {"ok": True}
 
         if lowered.startswith("/schedule") or lowered.startswith("/scheduel"):

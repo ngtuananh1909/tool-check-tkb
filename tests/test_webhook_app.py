@@ -45,16 +45,13 @@ class WebhookAppTests(unittest.TestCase):
     def test_deadline_command_sends_keyboard_when_rows_exist(self) -> None:
         rows = [
             {
-                "course_id": "47728",
-                "course_name": "Operating Systems",
-                "activity_name": "Final Report",
-                "due_date": "2026-05-20T23:59:00+07:00",
-                "activity_url": "https://example.test/mod/assign/view.php?id=1",
-                "completion_status": "incomplete",
+                "source_key": "deadline:1",
+                "title": "[DEADLINE] Operating Systems: Final Report",
+                "start": "2026-05-20T23:59:00+07:00",
             }
         ]
 
-        with patch.object(webhook_app, "get_nearest_elearning_deadlines", return_value=rows), patch.object(
+        with patch.object(webhook_app, "fetch_tagged_calendar_events", return_value=rows) as fetch_events, patch.object(
             webhook_app, "_send_text_with_keyboard"
         ) as send_keyboard:
             response = self.client.post(
@@ -65,9 +62,31 @@ class WebhookAppTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"ok": True})
+        fetch_events.assert_called_once_with("deadline")
         send_keyboard.assert_called_once()
         self.assertIn("Operating Systems", send_keyboard.call_args.args[2])
         self.assertTrue(send_keyboard.call_args.args[3]["inline_keyboard"])
+
+    def test_exam_command_reads_tagged_calendar_events(self) -> None:
+        rows = [
+            {
+                "title": "[EXAM] Operating Systems",
+                "start": "2026-05-20T08:00:00+07:00",
+                "location": "A101",
+            }
+        ]
+        with patch.object(webhook_app, "fetch_tagged_calendar_events", return_value=rows) as fetch_events, patch.object(
+            webhook_app, "_send_text"
+        ) as send_text:
+            response = self.client.post(
+                "/telegram/webhook",
+                json={"message": {"text": "/exam", "chat": {"id": 123}}},
+                headers={"x-telegram-bot-api-secret-token": "secret-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        fetch_events.assert_called_once_with("exam")
+        self.assertIn("Operating Systems", send_text.call_args.args[2])
 
     def test_webhook_info_endpoint_returns_sanitized_status(self) -> None:
         with patch.object(
@@ -144,7 +163,7 @@ class WebhookAppTests(unittest.TestCase):
         telegram_post.assert_called_once()
         self.assertEqual(telegram_post.call_args.args[1], "setMyCommands")
         commands = telegram_post.call_args.args[2]["commands"]
-        self.assertEqual([command["command"] for command in commands], ["start", "today", "schedule", "deadline", "add"])
+        self.assertEqual([command["command"] for command in commands], ["start", "today", "schedule", "deadline", "exam", "add"])
 
     def test_add_form_flow_with_done_text_creates_appointment(self) -> None:
         with patch.object(webhook_app, "create_appointment") as create_appointment, patch.object(

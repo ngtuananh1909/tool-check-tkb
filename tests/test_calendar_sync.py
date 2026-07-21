@@ -11,8 +11,11 @@ import calendar_sync
 from calendar_sync import (
     SYNC_SOURCE_APPOINTMENT,
     SYNC_SOURCE_CLASS_SESSION,
+    SYNC_SOURCE_DEADLINE,
     SYNC_SOURCE_EXAM,
     SYNC_SOURCE_SCHEDULE,
+    _build_sync_items_from_sessions,
+    fetch_tagged_calendar_events,
     _build_sync_items,
     _managed_source_types_for_crawler_sync,
     _managed_source_types_for_database_sync,
@@ -51,6 +54,56 @@ class _FakeService:
 
 
 class CalendarSyncValidationTests(unittest.TestCase):
+    def test_total_crawl_failure_skips_calendar_before_loading_credentials(self) -> None:
+        with patch.object(calendar_sync, "_build_calendar_service") as build_service:
+            _, did_sync = calendar_sync.sync_crawled_data_to_google_calendar(None, None)
+
+        self.assertFalse(did_sync)
+        build_service.assert_not_called()
+
+    def test_partial_crawl_only_reconciles_successful_source_types(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GOOGLE_CALENDAR_ID": "cal-id",
+                    "GOOGLE_SERVICE_ACCOUNT_JSON": "{}",
+                    "GOOGLE_SERVICE_ACCOUNT_FILE": "",
+                },
+                clear=False,
+            ),
+            patch.object(calendar_sync, "_build_calendar_service", return_value=(object(), "svc@example.com")),
+            patch.object(calendar_sync, "_validate_calendar_target"),
+            patch.object(calendar_sync, "_replace_bot_events_for_range") as replace_events,
+        ):
+            _, did_sync = calendar_sync.sync_crawled_data_to_google_calendar(None, [])
+
+        self.assertTrue(did_sync)
+        self.assertEqual(
+            replace_events.call_args.args[4],
+            {SYNC_SOURCE_EXAM},
+        )
+
+    def test_deadline_crawl_reconciles_only_deadline_events(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GOOGLE_CALENDAR_ID": "cal-id",
+                    "GOOGLE_SERVICE_ACCOUNT_JSON": "{}",
+                    "GOOGLE_SERVICE_ACCOUNT_FILE": "",
+                },
+                clear=False,
+            ),
+            patch.object(calendar_sync, "_build_calendar_service", return_value=(object(), "svc@example.com")),
+            patch.object(calendar_sync, "_validate_calendar_target"),
+            patch.object(calendar_sync, "_replace_bot_events_for_range") as replace_events,
+        ):
+            _, did_sync = calendar_sync.sync_crawled_data_to_google_calendar(None, None, deadlines=[])
+
+        self.assertTrue(did_sync)
+        self.assertEqual(replace_events.call_args.args[4], {SYNC_SOURCE_DEADLINE})
+
     def test_validate_calendar_target_ignores_timeout(self) -> None:
         service = _FakeService(error=TimeoutError("timed out"))
 
@@ -182,6 +235,7 @@ class _Recorder:
         self.insert_bodies: list[dict] = []
         self.patches: list[str] = []
         self.deletes: list[str] = []
+        self.list_requests: list[dict] = []
 
 
 class _FakeEventsList:
@@ -230,7 +284,8 @@ class _FakeEventsResource:
         self._recorder = recorder
         self._items = items
 
-    def list(self, **_kwargs) -> _FakeEventsList:
+    def list(self, **kwargs) -> _FakeEventsList:
+        self._recorder.list_requests.append(kwargs)
         return _FakeEventsList(self._items)
 
     def insert(self, calendarId: str, body: dict) -> _FakeEventsInsert:
@@ -340,12 +395,83 @@ class FetchEventsFromCalendarTests(unittest.TestCase):
         self.assertEqual(appointments[0]["appointment_date"], "2026-07-13")
         self.assertEqual([row["title"] for row in exams], ["Thi Toan"])
 
+    def test_fetch_tagged_events_queries_source_type_and_filters_response(self) -> None:
+        service = _OwnershipFakeService(
+            _Recorder(),
+            [
+                {
+                    "summary": "[EXAM] Toán",
+                    "start": {"dateTime": "2026-07-15T08:00:00+07:00"},
+                    "end": {"dateTime": "2026-07-15T10:00:00+07:00"},
+                    "extendedProperties": {"private": {"source": "tool-check-tkb", "source_type": SYNC_SOURCE_EXAM}},
+                },
+                {
+                    "summary": "Không phải lịch thi",
+                    "start": {"dateTime": "2026-07-16T08:00:00+07:00"},
+                    "end": {"dateTime": "2026-07-16T10:00:00+07:00"},
+                    "extendedProperties": {"private": {"source": "tool-check-tkb", "source_type": SYNC_SOURCE_APPOINTMENT}},
+                },
+            ],
+        )
+        with patch.dict(
+            os.environ,
+            {"GOOGLE_CALENDAR_ID": "cal", "GOOGLE_SERVICE_ACCOUNT_JSON": "{}"},
+        ), patch.object(calendar_sync, "_build_calendar_service", return_value=(service, "svc@example.com")):
+            rows = fetch_tagged_calendar_events(SYNC_SOURCE_EXAM, target_date=dt.date(2026, 7, 13))
+
+        self.assertEqual([row["title"] for row in rows], ["[EXAM] Toán"])
+        self.assertEqual(
+            service._recorder.list_requests[0]["privateExtendedProperty"],
+            "source_type=exam",
+        )
+
+    def test_fetch_tagged_events_starts_from_tomorrow_by_default(self) -> None:
+        service = _OwnershipFakeService(_Recorder(), [])
+        with patch.dict(
+            os.environ,
+            {"GOOGLE_CALENDAR_ID": "cal", "GOOGLE_SERVICE_ACCOUNT_JSON": "{}"},
+        ), patch.object(calendar_sync, "local_today", return_value=dt.date(2026, 7, 13)), patch.object(
+            calendar_sync, "_build_calendar_service", return_value=(service, "svc@example.com")
+        ):
+            fetch_tagged_calendar_events(SYNC_SOURCE_EXAM)
+
+        self.assertTrue(service._recorder.list_requests[0]["timeMin"].startswith("2026-07-14T00:00:00"))
+
+
+class DeadlineCalendarEventTests(unittest.TestCase):
+    def test_deadline_event_has_visible_and_private_tags(self) -> None:
+        items = _build_sync_items_from_sessions(
+            [],
+            [],
+            [],
+            dt.date(2026, 7, 13),
+            deadlines=[
+                {
+                    "course_name": "Operating Systems",
+                    "activity_name": "Final Report",
+                    "due_date": "2099-05-20T23:59:00+07:00",
+                    "activity_url": "https://example.test/assign/1",
+                    "source_signature": "deadline-1",
+                }
+            ],
+        )
+
+        self.assertEqual(len(items), 1)
+        payload = items[0]["payload"]
+        self.assertEqual(items[0]["source_type"], SYNC_SOURCE_DEADLINE)
+        self.assertEqual(payload["summary"], "[DEADLINE] Operating Systems: Final Report")
+        self.assertIn("#deadline", payload["description"])
+        self.assertEqual(
+            payload["extendedProperties"]["private"]["source_type"],
+            SYNC_SOURCE_DEADLINE,
+        )
+
 
 class ManagedSourceTypesHelperTests(unittest.TestCase):
-    def test_crawler_sync_owns_class_session_and_exam(self) -> None:
+    def test_crawler_sync_owns_class_session_exam_and_deadline(self) -> None:
         self.assertEqual(
             _managed_source_types_for_crawler_sync(),
-            frozenset({SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM}),
+            frozenset({SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM, SYNC_SOURCE_DEADLINE}),
         )
 
     def test_database_sync_with_class_sessions(self) -> None:

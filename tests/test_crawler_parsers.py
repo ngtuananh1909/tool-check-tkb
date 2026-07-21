@@ -3,8 +3,11 @@ import unittest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 from crawler import (
+  ELEARNING_SELECTOR_USERNAME,
   _collect_elearning_course_deadlines,
+  _click_portal_control,
   _deduplicate_schedule_rows,
+  _login_and_open_elearning_dashboard,
   _launch_chromium,
   _parse_elearning_dashboard_deadlines,
   _parse_elearning_progress,
@@ -14,7 +17,141 @@ from crawler import (
 )
 
 
+class PortalControlRetryTests(unittest.TestCase):
+    def test_portal_control_retries_after_timeout(self) -> None:
+        class FakeControl:
+            def __init__(self) -> None:
+                self.timeouts: list[int] = []
+
+            def click(self, *, timeout: int) -> None:
+                self.timeouts.append(timeout)
+                if len(self.timeouts) == 1:
+                    raise PlaywrightTimeoutError("temporary portal delay")
+
+        class FakePage:
+            def __init__(self) -> None:
+                self.waits: list[tuple[str, int]] = []
+
+            def wait_for_load_state(self, state: str, *, timeout: int) -> None:
+                self.waits.append((state, timeout))
+
+        control = FakeControl()
+        page = FakePage()
+
+        _click_portal_control(page, control, "test portal control")
+
+        self.assertEqual(control.timeouts, [30_000, 30_000])
+        self.assertEqual(page.waits, [("domcontentloaded", 30_000)])
+
+
+class ElearningNavigationTests(unittest.TestCase):
+    def test_elearning_login_uses_domcontentloaded_and_waits_for_dashboard(self) -> None:
+        class FakeLocator:
+            def __init__(self, page) -> None:
+                self.page = page
+                self.first = self
+
+            def click(self, *, timeout: int) -> None:
+                self.page.actions.append(("click", timeout))
+
+        class FakePage:
+            def __init__(self) -> None:
+                self.url = "https://elearning.tdtu.edu.vn/login/index.php"
+                self.actions = []
+
+            def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
+                self.actions.append(("goto", url, wait_until, timeout))
+                if url.endswith("/my/"):
+                    self.url = url
+
+            def wait_for_selector(self, selector: str, **kwargs) -> None:
+                self.actions.append(("wait_for_selector", selector, kwargs))
+
+            def fill(self, selector: str, value: str) -> None:
+                self.actions.append(("fill", selector, value))
+
+            def locator(self, selector: str) -> FakeLocator:
+                self.actions.append(("locator", selector))
+                return FakeLocator(self)
+
+            def wait_for_url(self, predicate, *, timeout: int) -> None:
+                self.actions.append(("wait_for_url", timeout))
+                self.url = "https://elearning.tdtu.edu.vn/my/"
+                self.asserted_url = predicate(self.url)
+
+        page = FakePage()
+        _login_and_open_elearning_dashboard(page, "student", "password")
+
+        navigations = [action for action in page.actions if action[0] == "goto"]
+        self.assertEqual([action[2] for action in navigations], ["domcontentloaded", "domcontentloaded"])
+        self.assertTrue(page.asserted_url)
+        self.assertIn(("fill", ELEARNING_SELECTOR_USERNAME, "student"), page.actions)
+
+    def test_elearning_login_timeout_reports_stuck_login_page(self) -> None:
+        class FakePage:
+            url = "https://elearning.tdtu.edu.vn/login/index.php"
+
+            def goto(self, *args, **kwargs) -> None:
+                pass
+
+            def wait_for_selector(self, *args, **kwargs) -> None:
+                pass
+
+            def fill(self, *args, **kwargs) -> None:
+                pass
+
+            def locator(self, *args, **kwargs):
+                class Locator:
+                    first = None
+
+                    def click(self, **kwargs) -> None:
+                        pass
+
+                locator = Locator()
+                locator.first = locator
+                return locator
+
+            def wait_for_url(self, *args, **kwargs) -> None:
+                raise PlaywrightTimeoutError("login timed out")
+
+        with self.assertRaisesRegex(RuntimeError, "did not leave the login page"):
+            _login_and_open_elearning_dashboard(FakePage(), "student", "password")
+
+    def test_elearning_dashboard_redirect_to_login_is_rejected(self) -> None:
+        class FakePage:
+            def __init__(self) -> None:
+                self.url = "https://elearning.tdtu.edu.vn/login/index.php"
+
+            def goto(self, url: str, **kwargs) -> None:
+                if url.endswith("/my/"):
+                    self.url = "https://elearning.tdtu.edu.vn/login/index.php"
+
+            def wait_for_selector(self, *args, **kwargs) -> None:
+                pass
+
+            def fill(self, *args, **kwargs) -> None:
+                pass
+
+            def locator(self, *args, **kwargs):
+                class Locator:
+                    first = None
+
+                    def click(self, **kwargs) -> None:
+                        pass
+
+                locator = Locator()
+                locator.first = locator
+                return locator
+
+            def wait_for_url(self, predicate, **kwargs) -> None:
+                self.url = "https://elearning.tdtu.edu.vn/"
+
+        with self.assertRaisesRegex(RuntimeError, "dashboard redirected to the login page"):
+            _login_and_open_elearning_dashboard(FakePage(), "student", "password")
+
+
 class CrawlerParserTests(unittest.TestCase):
+
     def test_sanitize_url_for_log_redacts_portal_session_values(self) -> None:
         url = "https://example.test/tkb?Token=secret-token&RequestId=secret-request&week=1"
 

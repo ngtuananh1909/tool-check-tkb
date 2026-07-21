@@ -20,6 +20,8 @@ from time_utils import local_today
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API_BASE = "https://api.telegram.org/bot{token}/{method}"
+_TELEGRAM_BOT_URL_SECRET = re.compile(r"(https://api\.telegram\.org/bot)[^/\s]+", re.IGNORECASE)
+_TELEGRAM_BOT_PATH_SECRET = re.compile(r"(/bot)[^/\s]+", re.IGNORECASE)
 
 # Period → official time mapping from the provided TDTU timetable image.
 PERIOD_TIME: dict[int, str] = {
@@ -61,6 +63,12 @@ def _escape_code_span(text: str) -> str:
     all other characters are treated as literals by Telegram.
     """
     return str(text).replace("\\", "\\\\").replace("`", "\\`")
+
+
+def _redact_telegram_error(value: object) -> str:
+    """Remove Telegram bot tokens from request errors before they reach logs."""
+    redacted = _TELEGRAM_BOT_URL_SECRET.sub(r"\1[redacted]", str(value))
+    return _TELEGRAM_BOT_PATH_SECRET.sub(r"\1[redacted]", redacted)
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +140,7 @@ def send_error_alert(error: str) -> None:
         _send_message(token, chat_id, text)
     except Exception as exc:
         # Do not raise here – we're already in an error path
-        logger.error("Failed to send error alert to Telegram: %s", exc)
+        logger.error("Failed to send error alert to Telegram: %s", _redact_telegram_error(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -331,11 +339,14 @@ def _send_message(token: str, chat_id: str, text: str) -> None:
             delay = 2 ** (attempt - 1)
             logger.warning(
                 "Telegram send failed due to network issue (%s). Retrying in %ss (%d/3).",
-                exc,
+                _redact_telegram_error(exc),
                 delay,
                 attempt,
             )
             time.sleep(delay)
 
     assert last_exc is not None
-    raise RuntimeError(f"Telegram message send failed after retries: {last_exc}")
+    raise RuntimeError(
+        "Telegram message send failed after retries: "
+        f"{_redact_telegram_error(last_exc)}"
+    )

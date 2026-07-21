@@ -1,9 +1,20 @@
 import unittest
 
-from notifier import _build_combined_message, _compact_course_name
+from notifier import _build_combined_message, _compact_course_name, _redact_telegram_error
 
 
 class NotifierFormattingTests(unittest.TestCase):
+    def test_telegram_request_errors_redact_bot_token(self) -> None:
+        for error in (
+            "HTTPSConnectionPool(https://api.telegram.org/bot123456:secret/sendMessage)",
+            "HTTPSConnectionPool(host='api.telegram.org', url: /bot123456:secret/sendMessage)",
+        ):
+            with self.subTest(error=error):
+                redacted = _redact_telegram_error(error)
+
+                self.assertNotIn("123456:secret", redacted)
+                self.assertIn("bot[redacted]/sendMessage", redacted)
+
     def test_compact_course_name_removes_moodle_prefix(self) -> None:
         self.assertEqual(
             _compact_course_name("HK2_2025_501032_Đại số tuyến tính cho Công nghệ thông tin_N02"),
