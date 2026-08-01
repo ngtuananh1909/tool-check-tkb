@@ -2601,6 +2601,29 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
                 return "scheduled";
             };
 
+            const extractPeriodRange = (text, fallbackStart, fallbackEnd) => {
+                const fallback = {
+                    start: Number.isFinite(fallbackStart) ? fallbackStart : 0,
+                    end: Number.isFinite(fallbackEnd) ? fallbackEnd : 0,
+                };
+                const source = String(text || "");
+                const markerMatch = source.match(/(?:tiết\|period|period|tiết)\s*:\s*([0-9,\-;\s]+)/i);
+                const candidate = markerMatch ? markerMatch[1] : source;
+                const digits = candidate.match(/\d+/g) || [];
+                if (!digits.length) return fallback;
+
+                const compact = candidate.replace(/\s+/g, "");
+                if (/^\d{2,}$/.test(compact)) {
+                    const chars = compact.split("").map((d) => parseInt(d, 10)).filter((n) => Number.isFinite(n));
+                    if (!chars.length) return fallback;
+                    return { start: Math.min(...chars), end: Math.max(...chars) };
+                }
+
+                const nums = digits.map((d) => parseInt(d, 10)).filter((n) => Number.isFinite(n));
+                if (!nums.length) return fallback;
+                return { start: Math.min(...nums), end: Math.max(...nums) };
+            };
+
             // Split a cell that contains multiple schedule sub-entries into an
             // array of plain-text segments, one per sub-entry.  Each sub-entry
             // starts with a non-status <b> node (the subject name).
@@ -2661,8 +2684,13 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
 
                 const hasPeriodHeader = /period|tiết|tiet|buổi|buoi|\bca\b|slot/.test(firstHeader) || /period|tiết|tiet|buổi|buoi|\bca\b|slot/.test(allHeaders);
                 const hasDayHeader = /day|thứ|thu|monday|tuesday|wednesday|thursday|friday|saturday|sunday|cn|chủ nhật|chu nhat/.test(allHeaders);
+                const hasSessionRows = rows.slice(1).some((row) => {
+                    const firstCell = row.querySelector(":scope > td, :scope > th");
+                    const value = (firstCell?.innerText || "").toLowerCase();
+                    return /morning|afternoon|evening|sáng|chieu|chiều|tối|toi/.test(value);
+                });
 
-                if (hasPeriodHeader && hasDayHeader) {
+                if (hasDayHeader && (hasPeriodHeader || hasSessionRows)) {
                     target = tbl;
                     targetRows = rows;
                     break;
@@ -2731,7 +2759,7 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
                         if (periodMatch) {
                             rowPeriod = parseInt(periodMatch[1] || periodMatch[2], 10);
                         }
-                    } else if (rowPeriod > 0) {
+                    } else {
                         for (let c = logicalCol; c < logicalCol + colSpan; c += 1) {
                             const dayOfWeek = dayByColumn[c] || "";
                             const sessionDate = dateByColumn[c] || "";
@@ -2742,13 +2770,19 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
                             for (const entryText of entryTexts) {
                                 const subject = cleanSubject(entryText);
                                 if (!subject) continue;
+                                const parsedPeriod = extractPeriodRange(
+                                    entryText,
+                                    rowPeriod,
+                                    rowPeriod > 0 ? rowPeriod + rowSpan - 1 : 0,
+                                );
+                                if (!(parsedPeriod.start > 0 && parsedPeriod.end >= parsedPeriod.start)) continue;
                                 entries.push({
                                     subject_name: subject,
                                     room: extractRoom(entryText),
                                     day_of_week: dayOfWeek,
                                     session_date: sessionDate,
-                                    start_period: rowPeriod,
-                                    end_period: rowPeriod + rowSpan - 1,
+                                    start_period: parsedPeriod.start,
+                                    end_period: parsedPeriod.end,
                                     status: detectStatus(entryText),
                                 });
                             }
