@@ -483,6 +483,52 @@ class CrawlerParserTests(unittest.TestCase):
         for r in rows:
           self.assertEqual(r["subject_name"], "Lập trình hướng đối tượng")
 
+    def test_parse_weekly_grid_table_with_morning_afternoon_rows(self) -> None:
+        self.page.set_content(
+            """
+            <html><body>
+              <table>
+                <tr>
+                  <th></th>
+                  <th>Thứ 2 | Monday 04/08/2026</th>
+                  <th>Thứ 3 | Tuesday 05/08/2026</th>
+                </tr>
+                <tr>
+                  <td>Morning</td>
+                  <td>
+                    Kinh tế chính trị Mác-Lênin<br>
+                    Tiết|Period: 123 (Phòng:|Room: A101)
+                  </td>
+                  <td></td>
+                </tr>
+                <tr>
+                  <td>Afternoon</td>
+                  <td></td>
+                  <td>
+                    Cấu trúc dữ liệu và giải thuật<br>
+                    Tiết|Period: 789 (Phòng:|Room: B202)
+                  </td>
+                </tr>
+              </table>
+            </body></html>
+            """
+        )
+
+        rows = _parse_weekly_grid_table(self.page, "520H0001")
+        self.assertIsNotNone(rows)
+        assert rows is not None
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["subject_name"], "Kinh tế chính trị Mác-Lênin")
+        self.assertEqual(rows[0]["day_of_week"], "Monday")
+        self.assertEqual(rows[0]["session_date"], "2026-08-04")
+        self.assertEqual(rows[0]["start_period"], 1)
+        self.assertEqual(rows[0]["end_period"], 3)
+        self.assertEqual(rows[1]["subject_name"], "Cấu trúc dữ liệu và giải thuật")
+        self.assertEqual(rows[1]["day_of_week"], "Tuesday")
+        self.assertEqual(rows[1]["session_date"], "2026-08-05")
+        self.assertEqual(rows[1]["start_period"], 7)
+        self.assertEqual(rows[1]["end_period"], 9)
+
 
 if __name__ == "__main__":
     unittest.main()
