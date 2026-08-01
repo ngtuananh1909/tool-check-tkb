@@ -2157,15 +2157,15 @@ def _pick_target_semester(
 
     # 2) Date-based default:
     #    Jan-May  -> HK2/(year-1)-year
-    #    Jun-Aug  -> HK Hè/(year-1)-year  (summer semester: June-August)
-    #    Sep-Dec  -> HK1/year-(year+1)
+    #    Jun-Jul  -> HK Hè/(year-1)-year  (summer semester: June-July)
+    #    Aug-Dec  -> HK1/year-(year+1)
     today = local_today()
     if today.month <= 5:
         hk_num = 2
         start_year = today.year - 1
         end_year = today.year
         hk_label = f"hk{hk_num}"
-    elif today.month <= 8:
+    elif today.month <= 7:
         hk_num = 0  # Hè has no number; matched by keyword below
         start_year = today.year - 1
         end_year = today.year
