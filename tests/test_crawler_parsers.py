@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
@@ -6,6 +7,7 @@ from crawler import (
   ELEARNING_SELECTOR_USERNAME,
   _collect_elearning_course_deadlines,
   _click_portal_control,
+  _configure_schedule_filters,
   _deduplicate_schedule_rows,
   _login_and_open_elearning_dashboard,
   _launch_chromium,
@@ -14,6 +16,7 @@ from crawler import (
   _parse_exam_table,
   _parse_weekly_grid_table,
   _sanitize_url_for_log,
+  _switch_to_week_view_if_available,
 )
 
 
@@ -483,6 +486,95 @@ class CrawlerParserTests(unittest.TestCase):
         for r in rows:
           self.assertEqual(r["subject_name"], "Lập trình hướng đối tượng")
 
+    def test_switch_to_week_view_clicks_exact_label(self) -> None:
+        self.page.set_content(
+            """
+            <label for="ThoiKhoaBieu1_radXemTKBTheoTuan"
+                   onclick="window.weeklyLabelClicks = (window.weeklyLabelClicks || 0) + 1">
+              Xem thời khóa biểu theo tuần | See the weekly schedule
+            </label>
+            <input id="ThoiKhoaBieu1_radXemTKBTheoTuan"
+                   type="radio" name="schedule-view">
+            """
+        )
+
+        changed = _switch_to_week_view_if_available(self.page)
+
+        self.assertTrue(changed)
+        self.assertTrue(self.page.locator("#ThoiKhoaBieu1_radXemTKBTheoTuan").is_checked())
+        self.assertEqual(self.page.evaluate("window.weeklyLabelClicks || 0"), 1)
+
+    def test_configure_schedule_filters_waits_for_weekly_table(self) -> None:
+        events: list[object] = []
+
+        class FakePage:
+            def wait_for_selector(self, selector: str, *, state: str, timeout: int) -> None:
+                events.append(("wait", selector, state, timeout))
+
+        with (
+            patch("crawler._select_semester_if_available", side_effect=lambda page: events.append("semester") or True),
+            patch("crawler._switch_to_week_view_if_available", side_effect=lambda page: events.append("week") or True),
+        ):
+            _configure_schedule_filters(FakePage())
+
+        self.assertEqual(
+            events,
+            [
+                "semester",
+                "week",
+                ("wait", "#ThoiKhoaBieu1_tbTKBTheoTuan", "visible", 30_000),
+            ],
+        )
+
+    def test_parse_real_weekly_grid_uses_week_range_year_and_cleans_room(self) -> None:
+        self.page.set_content(
+            """
+            <input id="ThoiKhoaBieu1_btnTuanHienTai" value="29/12/2025 - 04/01/2026">
+            <table id="ThoiKhoaBieu1_tbTKBTheoTuan">
+              <tr class="Headerrow">
+                <td>Tiết|Thứ<br>Period | Day</td>
+                <td>Thứ 2 | Monday<br>(29/12)</td>
+                <td>Chủ nhật | Sunday<br>(04/01)</td>
+              </tr>
+              <tr>
+                <td class="cellbuoi">1</td>
+                <td class="cell" rowspan="3"><table><tr><td><b>Giải tích</b><br>(501031 - Nhóm|Groups: 1)<br>Phòng|Room:</td></tr></table></td>
+                <td class="cell"></td>
+              </tr>
+              <tr><td class="cellbuoi">2</td><td class="cell"></td></tr>
+              <tr><td class="cellbuoi">3</td><td class="cell">Hệ điều hành<br>Tiết|Period: 3 (Phòng:|Room: A103)</td></tr>
+              <tr>
+                <td class="cellbuoi">4</td>
+                <td class="cell"></td>
+                <td class="cell">Lập trình Python<br>Tiết|Period: 456 (Phòng:|Room: A102)</td>
+              </tr>
+            </table>
+            """
+        )
+
+        rows = _parse_weekly_grid_table(self.page, "520H0001")
+
+        self.assertIsNotNone(rows)
+        assert rows is not None
+        self.assertEqual(
+            [
+                (
+                    row["subject_name"],
+                    row["room"],
+                    row["day_of_week"],
+                    row["session_date"],
+                    row["start_period"],
+                    row["end_period"],
+                )
+                for row in rows
+            ],
+            [
+                ("Giải tích", "", "Monday", "2025-12-29", 1, 3),
+                ("Hệ điều hành", "A103", "Sunday", "2026-01-04", 3, 3),
+                ("Lập trình Python", "A102", "Sunday", "2026-01-04", 4, 6),
+            ],
+        )
+
     def test_parse_weekly_grid_table_with_morning_afternoon_rows(self) -> None:
         self.page.set_content(
             """
@@ -495,7 +587,7 @@ class CrawlerParserTests(unittest.TestCase):
                 </tr>
                 <tr>
                   <td>Morning</td>
-                  <td>
+                  <td class="cell">
                     Kinh tế chính trị Mác-Lênin<br>
                     Tiết|Period: 123 (Phòng:|Room: A101)
                   </td>
@@ -504,7 +596,7 @@ class CrawlerParserTests(unittest.TestCase):
                 <tr>
                   <td>Afternoon</td>
                   <td></td>
-                  <td>
+                  <td class="cell">
                     Cấu trúc dữ liệu và giải thuật<br>
                     Tiết|Period: 789 (Phòng:|Room: B202)
                   </td>

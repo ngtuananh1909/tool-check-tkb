@@ -221,6 +221,9 @@ SCHEDULE_MENU_TEXT = re.compile(r"thời khóa biểu|TKB|lịch học", re.IGNO
 # Filter keywords on the schedule page
 SEMESTER_TEXT = re.compile(r"học kỳ|hoc\s*ky|semester|hk\s*\d", re.IGNORECASE)
 WEEK_VIEW_TEXT = re.compile(r"theo\s*tuần|xem\s*lịch\s*theo\s*tuần|weekly|week", re.IGNORECASE)
+WEEKLY_SCHEDULE_RADIO_SELECTOR = "#ThoiKhoaBieu1_radXemTKBTheoTuan"
+WEEKLY_SCHEDULE_LABEL_SELECTOR = "label[for='ThoiKhoaBieu1_radXemTKBTheoTuan']"
+WEEKLY_SCHEDULE_TABLE_SELECTOR = "#ThoiKhoaBieu1_tbTKBTheoTuan"
 
 # Map Vietnamese day abbreviations / names to English weekday names
 DAY_MAP: dict[str, str] = {
@@ -1972,31 +1975,19 @@ def _goto_next_week(page) -> bool:
 
 
 def _configure_schedule_filters(page) -> None:
-    """Try to select a semester and switch to week view before parsing."""
-    semester_changed = _select_semester_if_available(page)
-    week_view_changed = False
-
+    """Select semester, select weekly view, then wait for its grid."""
+    _select_semester_if_available(page)
+    _switch_to_week_view_if_available(page)
     try:
-        week_view_changed = _switch_to_week_view_if_available(page)
-    except Exception as exc:
-        # Some ASP.NET controls trigger a full postback after semester change.
-        # Retry once after waiting for navigation to stabilize.
-        if semester_changed and "Execution context was destroyed" in str(exc):
-            logger.info("Page reloaded after semester change; retrying week-view selection.")
-            page.wait_for_load_state("domcontentloaded", timeout=30_000)
-            week_view_changed = _switch_to_week_view_if_available(page)
-        else:
-            raise
-
-    if semester_changed or week_view_changed:
-        try:
-            _click_apply_filter_if_available(page)
-        except Exception as exc:
-            if "Execution context was destroyed" in str(exc):
-                logger.info("Page reloaded while applying filters; continuing with latest state.")
-                page.wait_for_load_state("domcontentloaded", timeout=30_000)
-            else:
-                raise
+        page.wait_for_selector(
+            WEEKLY_SCHEDULE_TABLE_SELECTOR,
+            state="visible",
+            timeout=30_000,
+        )
+    except PlaywrightTimeoutError as exc:
+        raise RuntimeError(
+            f"Weekly schedule table {WEEKLY_SCHEDULE_TABLE_SELECTOR} did not become visible."
+        ) from exc
 
 
 def get_current_semester(student_id: str | None = None, password: str | None = None) -> str:
@@ -2225,95 +2216,26 @@ def _pick_target_semester(
 
 
 def _switch_to_week_view_if_available(page) -> bool:
-    """Switch to week-view mode via radio/button/link if that control exists."""
-    # Strategy 1: radio controls commonly used by ASP.NET pages
-    radio = page.locator(
-        "input[type='radio'][id*='Tuan'], "
-        "input[type='radio'][name*='Tuan'], "
-        "input[type='radio'][value*='tuần'], "
-        "input[type='radio'][value*='tuan'], "
-        "input[type='radio'][value*='week'], "
-        "input[type='radio'][id*='Week'], "
-        "input[type='radio'][name*='Week']"
-    )
+    """Click TDTU's exact weekly-schedule label when weekly grid is absent."""
+    weekly_table = page.locator(WEEKLY_SCHEDULE_TABLE_SELECTOR)
+    if weekly_table.count() > 0 and weekly_table.first.is_visible():
+        return False
 
-    if radio.count() > 0:
-        for i in range(radio.count()):
-            try:
-                item = radio.nth(i)
-                if item.is_visible() and not item.is_checked():
-                    item.check()
-                    try:
-                        page.wait_for_load_state("domcontentloaded", timeout=30_000)
-                    except Exception:
-                        pass
-                    logger.info("Switched schedule mode to week view via radio control.")
-                    return True
-            except Exception:
-                continue
+    radio = page.locator(WEEKLY_SCHEDULE_RADIO_SELECTOR)
+    label = page.locator(WEEKLY_SCHEDULE_LABEL_SELECTOR)
+    if radio.count() == 0 or label.count() == 0:
+        raise RuntimeError("TDTU weekly-schedule radio or label was not found.")
+    if not label.first.is_visible():
+        raise RuntimeError("TDTU weekly-schedule label is not visible.")
 
-    # Strategy 2: clickable controls with text
-    candidates = page.locator(
-        "button:has-text('Xem lịch theo tuần'), a:has-text('Xem lịch theo tuần'), "
-        "button:has-text('Theo tuần'), a:has-text('Theo tuần'), "
-        "input[type='button'][value*='tuần'], input[type='submit'][value*='tuần'], "
-        "button:has-text('Weekly'), a:has-text('Weekly')"
-    )
-
-    if candidates.count() > 0:
-        for i in range(candidates.count()):
-            try:
-                item = candidates.nth(i)
-                if item.is_visible():
-                    text = item.inner_text().strip()
-                    if text and not WEEK_VIEW_TEXT.search(text):
-                        continue
-                    item.click()
-                    page.wait_for_load_state("domcontentloaded", timeout=30_000)
-                    logger.info("Switched schedule mode to week view via clickable control.")
-                    return True
-            except Exception:
-                continue
-
-    logger.info("No week-view control detected on schedule page.")
-    return False
-
-
-def _click_apply_filter_if_available(page) -> None:
-    """Click a likely "apply/view" button if filters require explicit submission."""
-    apply_controls = page.locator(
-        "input[type='submit'][value*='Xem'], input[type='button'][value*='Xem'], "
-        "button:has-text('Xem'), a:has-text('Xem'), "
-        "input[type='submit'][value*='Apply'], input[type='button'][value*='Apply'], "
-        "button:has-text('Apply'), a:has-text('Apply')"
-    )
-
+    was_checked = radio.first.is_checked()
+    _click_portal_control(page, label.first, "Weekly-schedule label")
     try:
-        if apply_controls.count() == 0:
-            return
-    except Exception as exc:
-        if "Execution context was destroyed" in str(exc):
-            page.wait_for_load_state("domcontentloaded", timeout=30_000)
-            return
-        raise
-
-    for i in range(apply_controls.count()):
-        try:
-            control = apply_controls.nth(i)
-            if not control.is_visible():
-                continue
-
-            # Avoid clicking unrelated navigation controls.
-            label = (control.inner_text() or "").strip()
-            if label and not re.search(r"xem|apply", label, re.IGNORECASE):
-                continue
-
-            control.click()
-            page.wait_for_load_state("domcontentloaded", timeout=30_000)
-            logger.info("Applied schedule filters.")
-            return
-        except Exception:
-            continue
+        page.wait_for_load_state("domcontentloaded", timeout=30_000)
+    except PlaywrightTimeoutError:
+        pass
+    logger.info("Clicked TDTU weekly-schedule label (was_checked=%s).", was_checked)
+    return not was_checked
 
 
 def _build_schedule_url(current_url: str) -> str:
@@ -2554,19 +2476,54 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
                 return "";
             };
 
-            const extractDate = (headerText) => {
+            const toIsoDate = (day, month, year) => {
+                if (!day || !month || !year) return "";
+                const date = new Date(Date.UTC(year, month - 1, day));
+                if (
+                    date.getUTCFullYear() !== year
+                    || date.getUTCMonth() !== month - 1
+                    || date.getUTCDate() !== day
+                ) return "";
+                return `${year.toString().padStart(4, "0")}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
+            };
+
+            const extractWeekRange = () => {
+                const value = document.querySelector("#ThoiKhoaBieu1_btnTuanHienTai")?.value || "";
+                const matches = Array.from(value.matchAll(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/g));
+                if (matches.length < 2) return null;
+                const dates = matches.slice(0, 2).map((match) => {
+                    let year = parseInt(match[3], 10);
+                    if (year < 100) year += 2000;
+                    return toIsoDate(parseInt(match[1], 10), parseInt(match[2], 10), year);
+                });
+                return dates[0] && dates[1] ? { start: dates[0], end: dates[1] } : null;
+            };
+
+            const extractDate = (headerText, weekRange) => {
                 const text = (headerText || "").replace(/\s+/g, " ");
                 const m = text.match(/(\d{1,2})[\/.\-](\d{1,2})(?:[\/.\-](\d{2,4}))?/);
                 if (!m) return "";
 
                 const day = parseInt(m[1], 10);
                 const month = parseInt(m[2], 10);
-                let year = m[3] ? parseInt(m[3], 10) : (new Date()).getFullYear();
-                if (year < 100) year += 2000;
+                if (m[3]) {
+                    let year = parseInt(m[3], 10);
+                    if (year < 100) year += 2000;
+                    return toIsoDate(day, month, year);
+                }
+                if (!weekRange) return "";
 
-                if (!day || !month || !year) return "";
-                if (month < 1 || month > 12 || day < 1 || day > 31) return "";
-                return `${year.toString().padStart(4, "0")}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
+                const years = new Set([
+                    parseInt(weekRange.start.slice(0, 4), 10),
+                    parseInt(weekRange.end.slice(0, 4), 10),
+                ]);
+                for (const year of years) {
+                    const candidate = toIsoDate(day, month, year);
+                    if (candidate && candidate >= weekRange.start && candidate <= weekRange.end) {
+                        return candidate;
+                    }
+                }
+                return "";
             };
 
             const cleanSubject = (text) => {
@@ -2579,7 +2536,7 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
                     || (text || "").match(/Room:\s*([^\n]+)/i)
                     || (text || "").match(/Phòng:\s*([^\n]+)/i)
                     || (text || "").match(/[Pp]h[oò]ng\s*([A-Za-z0-9]+)/);
-                return roomMatch ? roomMatch[1].trim() : "";
+                return roomMatch ? roomMatch[1].trim().replace(/\s*\)$/, "").trim() : "";
             };
 
             const detectStatus = (text) => {
@@ -2608,7 +2565,8 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
                 };
                 const source = String(text || "");
                 const markerMatch = source.match(/(?:tiết\|period|period|tiết)\s*:\s*([0-9,\-;\s]+)/i);
-                const candidate = markerMatch ? markerMatch[1] : source;
+                if (!markerMatch) return fallback;
+                const candidate = markerMatch[1];
                 const digits = candidate.match(/\d+/g) || [];
                 if (!digits.length) return fallback;
 
@@ -2705,6 +2663,7 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
 
             const dayByColumn = {};
             const dateByColumn = {};
+            const weekRange = extractWeekRange();
             const maxDayCol = headerCells.length - 1;
             // Index 0 = Sunday … 6 = Saturday, matching JavaScript's Date.getUTCDay()
             const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -2712,7 +2671,7 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
                 const headerText = headerCells[col]?.innerText || "";
                 dayByColumn[col] = extractWeekday(headerText);
                 // extractDate always returns "" or "YYYY-MM-DD" (ISO format)
-                dateByColumn[col] = extractDate(headerText);
+                dateByColumn[col] = extractDate(headerText, weekRange);
                 // Derive day of week from the ISO date when the header has no weekday name
                 if (!dayByColumn[col] && dateByColumn[col]) {
                     const d = new Date(dateByColumn[col] + "T00:00:00Z");
@@ -2726,10 +2685,6 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
             const entries = [];
 
             for (let r = 1; r < rows.length; r += 1) {
-                for (const key of Object.keys(carry)) {
-                    if (carry[key] > 0) carry[key] -= 1;
-                }
-
                 const cells = Array.from(rows[r].querySelectorAll(":scope > td, :scope > th"));
                 if (!cells.length) continue;
 
@@ -2744,14 +2699,6 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
                     const rowSpan = Math.max(parseInt(cell.getAttribute("rowspan") || "1", 10) || 1, 1);
                     const colSpan = Math.max(parseInt(cell.getAttribute("colspan") || "1", 10) || 1, 1);
                     const text = (cell.innerText || "").trim();
-
-                    // Skip placeholder cells that are styled as `cell` but have
-                    // no rowspan (these represent empty slots in the matrix).
-                    if (cell.classList && cell.classList.contains("cell") && rowSpan === 1) {
-                        // advance logical column and continue
-                        logicalCol += colSpan;
-                        continue;
-                    }
 
                     if (logicalCol === 0) {
                         // Match bare numbers ("1") or prefixed formats ("Tiết 1", "Ca 1", "Period 2")
@@ -2791,11 +2738,15 @@ def _parse_weekly_grid_table(page, student_id: str) -> list[dict] | None:
 
                     if (rowSpan > 1) {
                         for (let c = logicalCol; c < logicalCol + colSpan; c += 1) {
-                            carry[c] = Math.max(carry[c] || 0, rowSpan - 1);
+                            carry[c] = Math.max(carry[c] || 0, rowSpan);
                         }
                     }
 
                     logicalCol += colSpan;
+                }
+
+                for (const key of Object.keys(carry)) {
+                    if (carry[key] > 0) carry[key] -= 1;
                 }
             }
 
