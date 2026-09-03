@@ -76,40 +76,47 @@ def run_hourly_sync() -> None:
     _load_dotenv()
 
     student_id = os.environ.get("STUDENT_ID")
+    password = os.environ.get("PASSWORD")
 
-    # -------- Pre-check: log active semester --------
-    try:
-        from crawler import get_current_semester
-
-        semester = get_current_semester(student_id=student_id)
-        logger.info("Active semester on portal: %s", semester)
-    except Exception as exc:
-        logger.warning("Could not determine active semester: %s", exc)
-
-    # -------- Step 1: Crawl --------
+    # -------- Pre-check & Step 1: Crawl using shared portal snapshot (1 login) --------
     step_started = time.perf_counter()
-    logger.info("Step 1: Crawling schedule from TDTU portal")
+    logger.info("Step 1: Crawling schedule & exam data from TDTU portal")
     try:
-        from crawler import (
-            fetch_elearning_deadlines,
-            fetch_exam_schedule,
-            fetch_schedule,
-        )
+        from crawler import fetch_elearning_deadlines, fetch_exam_schedule, fetch_schedule, get_current_semester
+        from tdtu import fetch_portal_snapshot
+
         weeks_ahead = _resolve_crawler_weeks_ahead()
         logger.debug("Crawler will fetch current week + %d future week(s).", weeks_ahead)
-        schedule = None
-        try:
-            schedule = fetch_schedule(weeks_ahead=weeks_ahead)
-            logger.info("Schedule crawler returned %d row(s).", len(schedule))
-        except Exception:
-            logger.exception("Schedule crawl failed; continuing without schedule data.")
 
+        schedule = None
         exams = None
-        try:
-            exams = fetch_exam_schedule(weeks_ahead=weeks_ahead)
-            logger.info("Exam crawler returned %d row(s).", len(exams))
-        except Exception:
-            logger.exception("Exam crawl failed; continuing without exam data.")
+
+        # Attempt shared single-login HTTP snapshot
+        snapshot = fetch_portal_snapshot(student_id, password, weeks_ahead=1 + weeks_ahead)
+        if snapshot.success:
+            logger.info("Active semester on portal: %s", snapshot.semester)
+            schedule = snapshot.schedule
+            exams = snapshot.exams
+            logger.info("Shared HTTP snapshot returned %d schedule row(s) and %d exam row(s).", len(schedule), len(exams))
+        else:
+            logger.warning("Shared HTTP snapshot failed (%s); falling back to individual crawlers.", snapshot.error)
+            try:
+                semester = get_current_semester(student_id=student_id, password=password)
+                logger.info("Active semester on portal: %s", semester)
+            except Exception as exc:
+                logger.warning("Could not determine active semester: %s", exc)
+
+            try:
+                schedule = fetch_schedule(weeks_ahead=weeks_ahead)
+                logger.info("Schedule crawler returned %d row(s).", len(schedule))
+            except Exception:
+                logger.exception("Schedule crawl failed; continuing without schedule data.")
+
+            try:
+                exams = fetch_exam_schedule(weeks_ahead=weeks_ahead)
+                logger.info("Exam crawler returned %d row(s).", len(exams))
+            except Exception:
+                logger.exception("Exam crawl failed; continuing without exam data.")
 
         elearning_deadlines = None
         try:

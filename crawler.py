@@ -25,6 +25,13 @@ from urllib.parse import parse_qs, urlparse
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 from time_utils import local_today
+from tdtu import (
+    TDTUClient,
+    fetch_schedule_http,
+    fetch_exam_schedule_http,
+    get_current_semester_http,
+    TDTUError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +306,16 @@ def fetch_schedule(
     extra_weeks = _resolve_weeks_ahead(weeks_ahead)
     total_weeks = 1 + extra_weeks
 
+    # --- PRIMARY: Authenticated HTTP Crawler ---
+    try:
+        with TDTUClient(sid, pwd) as client:
+            http_schedule = fetch_schedule_http(client, max_weeks=total_weeks)
+            logger.info("[crawler] HTTP fetch_schedule succeeded with %d rows", len(http_schedule))
+            return http_schedule
+    except Exception as exc:
+        logger.warning("[crawler] HTTP fetch_schedule failed (%s), falling back to Playwright", exc)
+
+    # --- FALLBACK: Playwright Chromium Browser ---
     with sync_playwright() as p:
         browser = _launch_chromium(p)
         context = browser.new_context(
@@ -551,6 +568,16 @@ def fetch_exam_schedule(
         raise ValueError("Credentials missing. Set STUDENT_ID and PASSWORD environment variables.")
 
     exams: list[dict] = []
+    # --- PRIMARY: Authenticated HTTP Exam Crawler ---
+    try:
+        with TDTUClient(sid, pwd) as client:
+            http_exams = fetch_exam_schedule_http(client)
+            if http_exams:
+                logger.info("[crawler] HTTP fetch_exam_schedule succeeded with %d rows", len(http_exams))
+                return http_exams
+    except Exception as exc:
+        logger.warning("[crawler] HTTP fetch_exam_schedule failed (%s), falling back to Playwright", exc)
+
     try:
         exams = _fetch_exam_schedule_from_portal(sid, pwd, weeks_ahead=weeks_ahead)
         if exams:
@@ -1997,6 +2024,17 @@ def get_current_semester(student_id: str | None = None, password: str | None = N
     if not sid or not pwd:
         return "unknown"
 
+    # --- PRIMARY: Authenticated HTTP ---
+    try:
+        with TDTUClient(sid, pwd) as client:
+            sem = get_current_semester_http(client)
+            if sem:
+                logger.info("[crawler] HTTP get_current_semester resolved: %s", sem)
+                return sem
+    except Exception as exc:
+        logger.warning("[crawler] HTTP get_current_semester failed (%s), falling back to Playwright", exc)
+
+    # --- FALLBACK: Playwright ---
     with sync_playwright() as p:
         browser = _launch_chromium(p)
         context = browser.new_context(
