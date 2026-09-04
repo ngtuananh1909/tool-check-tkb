@@ -32,10 +32,21 @@ def parse_date_iso(text: str, semester_hint: str = "") -> str:
             y += 2000
 
     if y is None and semester_hint:
-        # Try extracting year from semester string e.g. HK1/2025-2026
-        sem_m = re.search(r"20\d{2}", semester_hint)
-        if sem_m:
-            y = int(sem_m.group(0))
+        sem_match = re.search(r"HK\s*(\d)?.*?(\d{4})\s*-\s*(\d{4})", semester_hint, re.IGNORECASE)
+        if sem_match:
+            hk_num = sem_match.group(1)
+            y1 = int(sem_match.group(2))
+            y2 = int(sem_match.group(3))
+            if hk_num == "1":
+                y = y1 if mo >= 8 else y2
+            elif hk_num == "2":
+                y = y2
+            else:
+                y = y1
+        else:
+            m_year = re.search(r"20\d{2}", semester_hint)
+            if m_year:
+                y = int(m_year.group(0))
 
     if y is None:
         y = local_today().year

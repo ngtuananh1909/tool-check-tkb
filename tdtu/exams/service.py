@@ -51,36 +51,57 @@ def fetch_exam_schedule_http(
 
     # 1. Semester selection if requested
     target_sem = selected_semester or os.environ.get("TARGET_SEMESTER")
-    if target_sem:
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(page.html, "html.parser")
-        select = soup.find("select", id=re.compile(r".*cboHocKy.*", re.IGNORECASE))
-        if select:
-            opts = select.find_all("option")
-            target_val = None
-            for opt in opts:
-                txt = opt.get_text().strip()
-                val = opt.get("value", "").strip()
-                if target_sem.lower() in txt.lower() or val == target_sem:
-                    target_val = val
-                    break
-            if target_val:
-                logger.info("[tdtu.exams] Switching exam semester to value=%s", target_val)
-                page.postback(
-                    event_target="LichThi1$cboHocKy",
-                    extra={"LichThi1$cboHocKy": target_val},
-                )
-            else:
-                raise TDTUProtocolError(f"Requested exam semester '{target_sem}' not found in dropdown")
+    active_sem = ""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(page.html, "html.parser")
+    select = soup.find("select", id=re.compile(r".*cboHocKy.*", re.IGNORECASE))
+    if select:
+        selected_opt = select.find("option", selected=True)
+        if selected_opt:
+            active_sem = selected_opt.get_text().strip()
 
-    # 2. Iterate requested exam tabs
+    if target_sem:
+        if not select:
+            raise TDTUProtocolError(f"Requested exam semester {target_sem!r} but dropdown control is missing")
+        opts = select.find_all("option")
+        target_val = None
+        for opt in opts:
+            txt = opt.get_text().strip()
+            val = opt.get("value", "").strip()
+            if target_sem.lower() in txt.lower() or val == target_sem:
+                target_val = val
+                break
+        if not target_val:
+            raise TDTUProtocolError(f"Requested exam semester {target_sem!r} not found in dropdown options")
+
+        if not (select.find("option", selected=True) and select.find("option", selected=True).get("value") == target_val):
+            logger.info("[tdtu.exams] Switching exam semester to value=%s", target_val)
+            page.postback(
+                event_target="LichThi1$cboHocKy",
+                extra={"LichThi1$cboHocKy": target_val},
+            )
+            # Re-verify selected semester (Bug 14)
+            soup_after = BeautifulSoup(page.html, "html.parser")
+            sel_after = soup_after.find("select", id=re.compile(r".*cboHocKy.*", re.IGNORECASE))
+            if sel_after:
+                sel_opt = sel_after.find("option", selected=True)
+                if sel_opt:
+                    active_sem = sel_opt.get_text().strip()
+                    if target_sem.lower() not in active_sem.lower():
+                        raise TDTUProtocolError(
+                            f"Exam semester postback failed to select {target_sem!r} (active: {active_sem!r})"
+                        )
+
+    # 2. Iterate requested exam tabs (Bug 11, 12)
     desired_tabs = _desired_exam_types()
+    if "LichThi1$Menu1" not in page.html:
+        raise TDTUProtocolError("Exam page missing LichThi1$Menu1 tab control")
+
     all_exams: list[dict[str, Any]] = []
 
     for arg, label in desired_tabs:
         if "LichThi1$Menu1" not in page.html:
-            logger.warning("[tdtu.exams] Menu control missing on exam page")
-            break
+            raise TDTUProtocolError(f"Exam page missing LichThi1$Menu1 tab control for tab '{label}'")
 
         logger.debug("[tdtu.exams] Executing postback for exam tab '%s' (arg=%s)...", label, arg)
         try:
@@ -88,10 +109,9 @@ def fetch_exam_schedule_http(
                 event_target="LichThi1$Menu1",
                 event_argument=arg,
             )
-            tab_exams = parse_exam_html(page.html, default_exam_type=label)
+            tab_exams = parse_exam_html(page.html, default_exam_type=label, semester_hint=active_sem)
             all_exams.extend(tab_exams)
         except Exception as exc:
-            # Do NOT swallow postback errors! Raise TDTUProtocolError so operations fail cleanly (Blocker 10)
             logger.error("[tdtu.exams] Tab postback failed for '%s': %s", label, exc)
             raise TDTUProtocolError(f"Exam tab postback failed for '{label}': {exc}") from exc
 
