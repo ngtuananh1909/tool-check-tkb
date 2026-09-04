@@ -63,6 +63,23 @@ class TestTDTUWebForms(unittest.TestCase):
         post_data_2 = mock_sess.request.call_args_list[1][1]["data"]
         self.assertEqual(post_data_2["__VIEWSTATE"], "STATE_B")
 
+    def test_postback_authentication_error_propagates_without_retry(self) -> None:
+        from tdtu.exceptions import TDTUAuthenticationError
+
+        mock_sess = MagicMock()
+        mock_sess.request.side_effect = TDTUAuthenticationError("Insecure redirect")
+
+        page = WebFormsPage(
+            session=mock_sess,
+            url="https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx?Token=123",
+            html='<html><input type="hidden" name="__VIEWSTATE" value="STATE1" /></html>',
+        )
+
+        with self.assertRaises(TDTUAuthenticationError):
+            page.postback(event_target="Btn1")
+
+        self.assertEqual(mock_sess.request.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

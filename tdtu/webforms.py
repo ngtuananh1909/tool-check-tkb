@@ -95,19 +95,6 @@ class WebFormsPage:
                 timeout=self.timeout,
             )
             resp.raise_for_status()
-        except TDTUAuthenticationError as auth_exc:
-            # Recover from legacy HTTP SSO downgrade redirect via HTTPS SSO endpoint
-            token = (parse_qs(parsed_target.query).get("Token") or parse_qs(parsed_target.query).get("token") or [""])[0]
-            if not token:
-                token = (parse_qs(urlparse(self.url).query).get("Token") or [""])[0]
-
-            if token:
-                base_url = f"https://{parsed_target.netloc}{parsed_target.path}"
-                sso_refresh_url = f"https://sso.tdtu.edu.vn/Authenticate.aspx?ReturnUrl={base_url}&Token={token}"
-                resp = safe_request(self.session, "GET", sso_refresh_url, timeout=self.timeout)
-                resp.raise_for_status()
-            else:
-                raise auth_exc
         except requests.RequestException as exc:
             raise TDTUProtocolError(
                 f"Postback request to {sanitize_url(target_url)} failed: {sanitize_url(exc)}"

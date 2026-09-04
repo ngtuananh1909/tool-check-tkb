@@ -178,6 +178,7 @@ class TDTUClient:
                 PORTAL_SIGNIN_URL,
                 data=payload,
                 headers={"Referer": PORTAL_LOGIN_URL},
+                allow_redirects=False,
                 timeout=self.timeout,
             )
             r2.raise_for_status()

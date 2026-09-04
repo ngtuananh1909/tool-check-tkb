@@ -100,6 +100,26 @@ def parse_exam_html(
         if target_table_ids and not (t_id in target_table_ids or t_name in target_table_ids):
             continue
 
+        trs = table.find_all("tr")
+        if not trs:
+            continue
+
+        # Check for non-header data rows in target exam tables before header parsing
+        table_data_rows = 0
+        for tr in trs[1:]:
+            if "Headerrow" in tr.get("class", []):
+                continue
+            tds = [td.get_text().strip() for td in tr.find_all("td")]
+            row_text = " ".join(tds).lower()
+            if not tds or not any(tds):
+                continue
+            if any(k in row_text for k in ("không có lịch", "chưa có lịch", "no data", "không tìm thấy")):
+                continue
+            table_data_rows += 1
+
+        if table_data_rows > 0:
+            non_header_data_rows_found += table_data_rows
+
         head_cells = table.find_all(["th", "td"])
         headers = [c.get_text().strip().lower() for c in head_cells[:15]]
         all_head = " ".join(headers)
@@ -122,11 +142,6 @@ def parse_exam_html(
             if "Headerrow" in tr.get("class", []):
                 continue
             tds = [td.get_text().strip() for td in tr.find_all("td")]
-            if not tds or not any(tds):
-                continue
-
-            non_header_data_rows_found += 1
-
             subject = tds[idx_subject] if idx_subject >= 0 and idx_subject < len(tds) else ""
             if not subject:
                 continue

@@ -52,6 +52,8 @@ class TestTDTUClient(unittest.TestCase):
         self.assertTrue(client.is_logged_in)
         self.assertEqual(client.token, "MOCK_TOK")
         self.assertEqual(client.request_id, "MOCK_REQ")
+        post_kwargs = mock_sess.post.call_args[1]
+        self.assertFalse(post_kwargs.get("allow_redirects", True))
 
     @patch("requests.Session")
     def test_login_failed_code(self, mock_session_cls: MagicMock) -> None:
