@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 15
 PORTAL_LOGIN_URL = "https://old-stdportal.tdtu.edu.vn/Login/"
-PORTAL_SIGNIN_URL = "https://old-stdportal.tdtu.edu.vn/Login/SignIn"
+PORTAL_SIGNIN_URL = "https://old-stdportal.tdtu.edu.vn/Login/SignIn?ReturnURL="
 SCHEDULE_BASE_URL = "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx"
 EXAM_BASE_URL = "https://lichhoc-lichthi.tdtu.edu.vn/xemlichthi.aspx"
 ALLOWED_HOSTS = {
@@ -129,8 +129,8 @@ class TDTUClient:
         timeout: int = DEFAULT_TIMEOUT,
         session: requests.Session | None = None,
     ) -> None:
-        self.student_id = student_id
-        self.password = password
+        self.student_id = (student_id or "").strip()
+        self.password = (password or "").strip()
         self.timeout = timeout
         self.session = session or requests.Session()
         self.session.headers.update(
@@ -190,6 +190,12 @@ class TDTUClient:
                 "X-Requested-With": "XMLHttpRequest",
                 "Accept": "application/json, text/javascript, */*; q=0.01",
                 "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
             }
             r2 = self.session.post(
                 PORTAL_SIGNIN_URL,
