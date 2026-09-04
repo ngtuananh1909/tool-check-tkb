@@ -1,5 +1,6 @@
 """
 Unit tests for TDTUClient HTTP authentication and session handling.
+Uses fake test credentials only.
 """
 
 import unittest
@@ -26,7 +27,6 @@ class TestTDTUClient(unittest.TestCase):
         mock_sess = MagicMock()
         mock_session_cls.return_value = mock_sess
 
-        # Setup responses
         r1 = MagicMock()
         r1.status_code = 200
         
@@ -44,7 +44,7 @@ class TestTDTUClient(unittest.TestCase):
         mock_sess.get.side_effect = [r1, r3]
         mock_sess.post.return_value = r2
 
-        client = TDTUClient("52500028", "pass123", session=mock_sess)
+        client = TDTUClient("TEST_STUDENT_001", "TEST_PASSWORD_NOT_A_SECRET", session=mock_sess)
         client.login()
 
         self.assertTrue(client.is_logged_in)
@@ -65,7 +65,7 @@ class TestTDTUClient(unittest.TestCase):
         mock_sess.get.return_value = r1
         mock_sess.post.return_value = r2
 
-        client = TDTUClient("52500028", "wrongpass", session=mock_sess)
+        client = TDTUClient("TEST_STUDENT_001", "TEST_PASSWORD_WRONG", session=mock_sess)
         with self.assertRaises(TDTUAuthenticationError):
             client.login()
 
@@ -83,7 +83,7 @@ class TestTDTUClient(unittest.TestCase):
         mock_sess.get.return_value = r1
         mock_sess.post.return_value = r2
 
-        client = TDTUClient("52500028", "pass123", session=mock_sess)
+        client = TDTUClient("TEST_STUDENT_001", "TEST_PASSWORD_NOT_A_SECRET", session=mock_sess)
         with self.assertRaises(TDTUAuthenticationError) as ctx:
             client.login()
         self.assertIn("Untrusted redirect domain", str(ctx.exception))

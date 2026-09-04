@@ -38,17 +38,17 @@ class TestTDTUWebForms(unittest.TestCase):
 
         r1 = MagicMock()
         r1.status_code = 200
-        r1.url = "http://example.com/page"
+        r1.url = "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx"
         r1.text = html_resp_1
 
         r2 = MagicMock()
         r2.status_code = 200
-        r2.url = "http://example.com/page"
+        r2.url = "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx"
         r2.text = html_resp_2
 
         mock_sess.post.side_effect = [r1, r2]
 
-        page = WebFormsPage(session=mock_sess, url="http://example.com/page", html=html_initial)
+        page = WebFormsPage(session=mock_sess, url="https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx", html=html_initial)
 
         # POST #1: Should use STATE_A
         page.postback(event_target="Btn1")

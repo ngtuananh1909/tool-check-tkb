@@ -11,7 +11,6 @@ from urllib.parse import parse_qs, urlparse
 import requests
 
 from tdtu.exceptions import TDTUAuthenticationError, TDTUProtocolError
-from tdtu.webforms import WebFormsPage
 
 logger = logging.getLogger(__name__)
 
@@ -20,17 +19,27 @@ PORTAL_LOGIN_URL = "https://old-stdportal.tdtu.edu.vn/Login/"
 PORTAL_SIGNIN_URL = "https://old-stdportal.tdtu.edu.vn/Login/SignIn"
 SCHEDULE_BASE_URL = "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx"
 EXAM_BASE_URL = "https://lichhoc-lichthi.tdtu.edu.vn/xemlichthi.aspx"
+ALLOWED_HOSTS = {
+    "old-stdportal.tdtu.edu.vn",
+    "lichhoc-lichthi.tdtu.edu.vn",
+    "sso.tdtu.edu.vn",
+    "stdportal.tdtu.edu.vn",
+}
 
 
 def sanitize_url(url: Any) -> str:
-    """Redact sensitive query parameters and tokens from URLs before logging."""
+    """Redact sensitive query parameters, tokens, and cookies from URLs and messages."""
     url_str = str(url or "")
-    return re.sub(
-        r"([?&](?:token|requestid|sessionid)=)[^&]+",
+    # Redact Token, RequestId, SessionId
+    sanitized = re.sub(
+        r"([?&](?:token|requestid|sessionid|asp.net_sessionid)=)[^&]+",
         r"\1[REDACTED]",
         url_str,
         flags=re.IGNORECASE,
     )
+    # Redact raw passwords or credentials if present in string
+    sanitized = re.sub(r'(pass(?:word)?=["\']?)[^"\'&\s]+', r'\1[REDACTED]', sanitized, flags=re.IGNORECASE)
+    return sanitized
 
 
 class TDTUClient:
@@ -132,10 +141,13 @@ class TDTUClient:
             elif not redirect_url.startswith("http"):
                 redirect_url = f"https://old-stdportal.tdtu.edu.vn/{redirect_url.lstrip('/')}"
 
-            # 4. Domain security check: ensure redirect URL is within tdtu.edu.vn
+            # 4. Strict Domain and HTTPS Security Check
             parsed_redirect = urlparse(redirect_url)
+            if parsed_redirect.scheme != "https":
+                raise TDTUAuthenticationError(f"Insecure non-HTTPS redirect scheme: {parsed_redirect.scheme}")
+
             hostname = parsed_redirect.hostname or ""
-            if not hostname.endswith("tdtu.edu.vn"):
+            if hostname not in ALLOWED_HOSTS:
                 raise TDTUAuthenticationError(
                     f"Untrusted redirect domain in login response: {hostname}"
                 )
@@ -145,10 +157,16 @@ class TDTUClient:
             r3 = self.session.get(redirect_url, allow_redirects=True, timeout=self.timeout)
             r3.raise_for_status()
 
+            # Verify final destination host
+            final_parsed = urlparse(r3.url)
+            if final_parsed.hostname not in ALLOWED_HOSTS:
+                raise TDTUAuthenticationError(
+                    f"Final redirect landed on untrusted host: {final_parsed.hostname}"
+                )
+
             # Extract Token and RequestId from final URL or history
             params = parse_qs(parsed_redirect.query)
             if not params:
-                final_parsed = urlparse(r3.url)
                 params = parse_qs(final_parsed.query)
 
             self.token = (params.get("Token") or params.get("token") or [""])[0]
@@ -159,10 +177,12 @@ class TDTUClient:
             logger.info("[tdtu.auth] Authenticated successfully.")
 
         except requests.RequestException as exc:
-            raise TDTUAuthenticationError(f"Network error during authentication: {exc}") from exc
+            raise TDTUAuthenticationError(f"Network error during authentication: {sanitize_url(exc)}") from exc
 
-    def open_schedule_page(self) -> WebFormsPage:
+    def open_schedule_page(self) -> Any:
         """Fetch schedule page (tkb2.aspx) and return a WebFormsPage instance."""
+        from tdtu.webforms import WebFormsPage
+
         if not self.is_logged_in:
             self.login()
 
@@ -185,10 +205,12 @@ class TDTUClient:
             return WebFormsPage(session=self.session, url=resp.url, html=resp.text, timeout=self.timeout)
 
         except requests.RequestException as exc:
-            raise TDTUProtocolError(f"Failed to fetch schedule page: {exc}") from exc
+            raise TDTUProtocolError(f"Failed to fetch schedule page: {sanitize_url(exc)}") from exc
 
-    def open_exam_page(self) -> WebFormsPage:
+    def open_exam_page(self) -> Any:
         """Fetch exam page (xemlichthi.aspx) and return a WebFormsPage instance."""
+        from tdtu.webforms import WebFormsPage
+
         if not self.is_logged_in:
             self.login()
 
@@ -210,4 +232,4 @@ class TDTUClient:
             return WebFormsPage(session=self.session, url=resp.url, html=resp.text, timeout=self.timeout)
 
         except requests.RequestException as exc:
-            raise TDTUProtocolError(f"Failed to fetch exam page: {exc}") from exc
+            raise TDTUProtocolError(f"Failed to fetch exam page: {sanitize_url(exc)}") from exc

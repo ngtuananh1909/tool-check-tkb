@@ -2,11 +2,21 @@
 Generic ASP.NET WebForms state management and postback helper.
 """
 
+import logging
 from typing import Any
+from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 
-from tdtu.exceptions import TDTUProtocolError
+from tdtu.exceptions import TDTUAuthenticationError, TDTUProtocolError
+
+logger = logging.getLogger(__name__)
+
+
+def sanitize_url(url: Any) -> str:
+    """Import sanitize_url helper from tdtu.client."""
+    from tdtu.client import sanitize_url as _san
+    return _san(url)
 
 
 def extract_hidden_fields(html: str) -> dict[str, str]:
@@ -55,6 +65,7 @@ class WebFormsPage:
         """
         Execute an ASP.NET postback with current WebForms state.
         Updates self.html and self.url with the new response content.
+        Validates postback response semantically.
         """
         payload = self.hidden_fields()
         payload["__EVENTTARGET"] = event_target
@@ -74,7 +85,20 @@ class WebFormsPage:
             )
             resp.raise_for_status()
         except requests.RequestException as exc:
-            raise TDTUProtocolError(f"Postback request to {target_url} failed: {exc}") from exc
+            raise TDTUProtocolError(
+                f"Postback request to {sanitize_url(target_url)} failed: {sanitize_url(exc)}"
+            ) from exc
+
+        # Semantic validation of postback response
+        if "login" in resp.url.lower() or "đăng nhập" in resp.text[:500].lower():
+            raise TDTUAuthenticationError("Postback response redirected to login (session expired)")
+
+        parsed_url = urlparse(resp.url)
+        if not parsed_url.hostname or not parsed_url.hostname.endswith("tdtu.edu.vn"):
+            raise TDTUProtocolError(f"Postback redirected to unexpected host: {parsed_url.hostname}")
+
+        if "__VIEWSTATE" not in resp.text:
+            raise TDTUProtocolError("Postback response missing ASP.NET __VIEWSTATE")
 
         self.url = resp.url
         self.html = resp.text
