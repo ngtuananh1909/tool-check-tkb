@@ -306,7 +306,7 @@ def parse_weekly_grid_table(html: str, student_id: str = "") -> list[dict[str, A
                     raise TDTUProtocolError(
                         f"Header date {candidate_dt} ({candidate_dt.strftime('%A')}) weekday does not match column '{day_name}'"
                     )
-                if not (start_dt - datetime.timedelta(days=1) <= candidate_dt <= end_dt + datetime.timedelta(days=1)):
+                if not (start_dt <= candidate_dt <= end_dt):
                     raise TDTUProtocolError(f"Header date {candidate_dt} falls outside week range {start_dt}..{end_dt}")
                 dt_obj = candidate_dt
             except ValueError as exc:
