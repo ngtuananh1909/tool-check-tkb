@@ -81,6 +81,12 @@ class WebFormsPage:
 
         # Validate target_url before posting (Bug 22)
         parsed_target = urlparse(target_url)
+        if parsed_target.scheme == "http" and (parsed_target.hostname or "") in ALLOWED_HOSTS:
+            target_url = f"https://{parsed_target.netloc}{parsed_target.path}"
+            if parsed_target.query:
+                target_url += f"?{parsed_target.query}"
+            parsed_target = urlparse(target_url)
+
         if parsed_target.scheme != "https":
             raise TDTUProtocolError(f"Insecure non-HTTPS target URL for postback: {sanitize_url(target_url)}")
         if (parsed_target.hostname or "") not in ALLOWED_HOSTS:

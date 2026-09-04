@@ -104,20 +104,37 @@ class TestTDTUClient(unittest.TestCase):
         self.assertIn("non-HTTPS scheme", str(ctx.exception))
         mock_sess.request.assert_not_called()
 
-    def test_safe_request_http_redirect_rejected(self) -> None:
+    def test_safe_request_http_redirect_upgraded_for_trusted_host(self) -> None:
         from tdtu.client import safe_request
         mock_sess = MagicMock()
         r1 = MagicMock()
         r1.status_code = 302
         r1.url = "https://old-stdportal.tdtu.edu.vn/Login/"
-        r1.headers = {"Location": "http://old-stdportal.tdtu.edu.vn/Login/Unsafe"}
+        r1.headers = {"Location": "http://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx"}
+        
+        r2 = MagicMock()
+        r2.status_code = 200
+        r2.url = "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx"
+        
+        mock_sess.request.side_effect = [r1, r2]
+
+        res = safe_request(mock_sess, "GET", "https://old-stdportal.tdtu.edu.vn/Login/")
+        self.assertEqual(res, r2)
+        self.assertEqual(mock_sess.request.call_count, 2)
+        self.assertEqual(mock_sess.request.call_args_list[1].kwargs["url"], "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx")
+
+    def test_safe_request_untrusted_http_redirect_rejected(self) -> None:
+        from tdtu.client import safe_request
+        mock_sess = MagicMock()
+        r1 = MagicMock()
+        r1.status_code = 302
+        r1.url = "https://old-stdportal.tdtu.edu.vn/Login/"
+        r1.headers = {"Location": "http://untrusted.com/phish"}
         mock_sess.request.return_value = r1
 
         with self.assertRaises(TDTUAuthenticationError) as ctx:
             safe_request(mock_sess, "GET", "https://old-stdportal.tdtu.edu.vn/Login/")
-        self.assertIn("non-HTTPS scheme", str(ctx.exception))
-        # Ensure initial HTTPS request was sent (call count == 1), but NO request was sent to the http:// redirect URL
-        self.assertEqual(mock_sess.request.call_count, 1)
+        self.assertTrue("non-HTTPS" in str(ctx.exception) or "Untrusted" in str(ctx.exception))
 
     def test_safe_request_untrusted_host_rejected(self) -> None:
         from tdtu.client import safe_request

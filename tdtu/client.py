@@ -55,7 +55,8 @@ def safe_request(
 ) -> requests.Response:
     """
     Execute HTTP request with strict step-by-step redirect validation.
-    Ensures every redirect destination uses HTTPS and stays within ALLOWED_HOSTS (Bug 21).
+    Ensures every request destination uses HTTPS and stays within ALLOWED_HOSTS (Bug 21).
+    Automatically upgrades HTTP redirect locations to HTTPS for trusted ALLOWED_HOSTS.
     """
     current_url = url
     current_method = method.upper()
@@ -81,6 +82,14 @@ def safe_request(
             location = resp.headers.get("Location")
             if not location:
                 return resp
+
+            # Upgrade HTTP redirect location to HTTPS for trusted ALLOWED_HOSTS
+            if location.startswith("http://"):
+                loc_p = urlparse(location)
+                if (loc_p.hostname or "") in ALLOWED_HOSTS:
+                    location = f"https://{loc_p.netloc}{loc_p.path}"
+                    if loc_p.query:
+                        location += f"?{loc_p.query}"
 
             base_parsed = urlparse(current_url)
             loc_parsed = urlparse(location)
