@@ -93,30 +93,45 @@ def run_hourly_sync() -> None:
 
         # Attempt shared single-login HTTP snapshot
         snapshot = fetch_portal_snapshot(student_id, password, weeks_ahead=1 + weeks_ahead)
-        if snapshot.success:
-            logger.info("Active semester on portal: %s", snapshot.semester)
-            schedule = snapshot.schedule
-            exams = snapshot.exams
-            logger.info("Shared HTTP snapshot returned %d schedule row(s) and %d exam row(s).", len(schedule), len(exams))
+
+        # 1. Semester logging
+        if snapshot.semester.success and snapshot.semester.data:
+            logger.info("Active semester on portal: %s", snapshot.semester.data)
         else:
-            logger.warning("Shared HTTP snapshot failed (%s); falling back to individual crawlers.", snapshot.error)
             try:
-                semester = get_current_semester(student_id=student_id, password=password)
-                logger.info("Active semester on portal: %s", semester)
+                from crawler import _get_current_semester_playwright
+                sem = _get_current_semester_playwright(student_id, password)
+                logger.info("Active semester on portal (Playwright fallback): %s", sem)
             except Exception as exc:
                 logger.warning("Could not determine active semester: %s", exc)
 
+        # 2. Schedule operation
+        if snapshot.schedule.success:
+            schedule = snapshot.schedule.data
+            logger.info("Schedule HTTP crawler returned %d row(s).", len(schedule) if schedule is not None else 0)
+        else:
+            logger.warning("Schedule HTTP crawler failed (%s); triggering Playwright fallback...", snapshot.schedule.error)
             try:
-                schedule = fetch_schedule(weeks_ahead=weeks_ahead)
-                logger.info("Schedule crawler returned %d row(s).", len(schedule))
+                from crawler import _fetch_schedule_playwright
+                schedule = _fetch_schedule_playwright(student_id, password, weeks_ahead=weeks_ahead)
+                logger.info("Schedule Playwright fallback returned %d row(s).", len(schedule))
             except Exception:
-                logger.exception("Schedule crawl failed; continuing without schedule data.")
+                logger.exception("Schedule Playwright fallback failed; preserving existing schedule data.")
+                schedule = None
 
+        # 3. Exam operation
+        if snapshot.exams.success:
+            exams = snapshot.exams.data
+            logger.info("Exam HTTP crawler returned %d row(s).", len(exams) if exams is not None else 0)
+        else:
+            logger.warning("Exam HTTP crawler failed (%s); triggering Playwright fallback...", snapshot.exams.error)
             try:
-                exams = fetch_exam_schedule(weeks_ahead=weeks_ahead)
-                logger.info("Exam crawler returned %d row(s).", len(exams))
+                from crawler import _fetch_exam_schedule_from_portal
+                exams = _fetch_exam_schedule_from_portal(student_id, password, weeks_ahead=weeks_ahead)
+                logger.info("Exam Playwright fallback returned %d row(s).", len(exams))
             except Exception:
-                logger.exception("Exam crawl failed; continuing without exam data.")
+                logger.exception("Exam Playwright fallback failed; preserving existing exam data.")
+                exams = None
 
         elearning_deadlines = None
         try:

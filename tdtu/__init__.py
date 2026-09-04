@@ -12,10 +12,11 @@ from tdtu.exceptions import (
 )
 from tdtu.exams.service import fetch_exam_schedule_http
 from tdtu.schedule.service import fetch_schedule_http, get_current_semester_http
-from tdtu.snapshot import PortalSnapshot, fetch_portal_snapshot
+from tdtu.snapshot import FetchResult, PortalSnapshot, fetch_portal_snapshot
 
 __all__ = [
     "TDTUClient",
+    "FetchResult",
     "PortalSnapshot",
     "fetch_portal_snapshot",
     "fetch_schedule_http",

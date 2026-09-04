@@ -5,7 +5,7 @@ Regression and backward compatibility tests for crawler.py facade and tdtu packa
 import unittest
 from unittest.mock import MagicMock, patch
 
-from tdtu.snapshot import PortalSnapshot, fetch_portal_snapshot
+from tdtu.snapshot import FetchResult, PortalSnapshot, fetch_portal_snapshot
 
 
 class TestCrawlerCompatibility(unittest.TestCase):
@@ -30,10 +30,11 @@ class TestCrawlerCompatibility(unittest.TestCase):
 
         snapshot = fetch_portal_snapshot("52500028", "pass123")
 
-        self.assertTrue(snapshot.success)
-        self.assertEqual(snapshot.semester, "HK1/2026-2027")
-        self.assertEqual(len(snapshot.schedule), 1)
-        self.assertEqual(len(snapshot.exams), 1)
+        self.assertTrue(snapshot.schedule.success)
+        self.assertTrue(snapshot.exams.success)
+        self.assertEqual(snapshot.semester.data, "HK1/2026-2027")
+        self.assertEqual(len(snapshot.schedule.data), 1)
+        self.assertEqual(len(snapshot.exams.data), 1)
 
         # Confirm client entered context once and fetched all 3 components
         mock_client_cls.assert_called_once_with(student_id="52500028", password="pass123")

@@ -302,10 +302,6 @@ def fetch_schedule(
             "Credentials missing. Set STUDENT_ID and PASSWORD environment variables."
         )
 
-    schedule: list[dict] = []
-    extra_weeks = _resolve_weeks_ahead(weeks_ahead)
-    total_weeks = 1 + extra_weeks
-
     # --- PRIMARY: Authenticated HTTP Crawler ---
     try:
         with TDTUClient(sid, pwd) as client:
@@ -315,7 +311,15 @@ def fetch_schedule(
     except Exception as exc:
         logger.warning("[crawler] HTTP fetch_schedule failed (%s), falling back to Playwright", exc)
 
-    # --- FALLBACK: Playwright Chromium Browser ---
+    return _fetch_schedule_playwright(sid, pwd, weeks_ahead=weeks_ahead)
+
+
+def _fetch_schedule_playwright(sid: str, pwd: str, weeks_ahead: int | None = None) -> list[dict]:
+    """Execute Playwright schedule crawl strictly (no HTTP attempt)."""
+    schedule: list[dict] = []
+    extra_weeks = _resolve_weeks_ahead(weeks_ahead)
+    total_weeks = 1 + extra_weeks
+
     with sync_playwright() as p:
         browser = _launch_chromium(p)
         context = browser.new_context(
@@ -2034,7 +2038,11 @@ def get_current_semester(student_id: str | None = None, password: str | None = N
     except Exception as exc:
         logger.warning("[crawler] HTTP get_current_semester failed (%s), falling back to Playwright", exc)
 
-    # --- FALLBACK: Playwright ---
+    return _get_current_semester_playwright(sid, pwd)
+
+
+def _get_current_semester_playwright(sid: str, pwd: str) -> str:
+    """Execute Playwright semester pre-check strictly (no HTTP attempt)."""
     with sync_playwright() as p:
         browser = _launch_chromium(p)
         context = browser.new_context(
