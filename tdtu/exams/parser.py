@@ -1,4 +1,4 @@
-"""
+""""
 Pure HTML parser for TDTU student exam schedule pages.
 Does NOT access network, environment variables, or external services.
 """
@@ -10,8 +10,15 @@ from typing import Any
 from bs4 import BeautifulSoup
 
 from time_utils import local_today
+from tdtu.exceptions import TDTUParsingError
 
 logger = logging.getLogger(__name__)
+
+EXPECTED_EXAM_TABLE_IDS: dict[str, set[str]] = {
+    "0": {"lichthi1_giuakytable", "giuakytable"},
+    "1": {"lichthi1_cuoikytable", "cuoikytable"},
+    "2": {"lichthi1_cuoiky2table", "cuoiky2table"},
+}
 
 
 def parse_date_iso(text: str, semester_hint: str = "") -> str:
@@ -66,17 +73,33 @@ def parse_time_str(text: str) -> str:
     return f"{int(m.group(1)):02d}:{m.group(2)}"
 
 
-def parse_exam_html(html: str, default_exam_type: str = "", semester_hint: str = "") -> list[dict[str, Any]]:
+def parse_exam_html(
+    html: str,
+    default_exam_type: str = "",
+    semester_hint: str = "",
+    tab_arg: str | None = None,
+) -> list[dict[str, Any]]:
     """
     Parse exam schedule HTML and extract exam records.
-    Parses table structures (#LichThi1_GiuaKyTable, #LichThi1_CuoiKyTable, etc.) and grid cell blocks.
+    Optionally scoped to exact table ID corresponding to tab_arg ('0', '1', '2').
+    Raises TDTUParsingError if target exam table contains non-header data rows but 0 records could be parsed.
     """
     soup = BeautifulSoup(html, "html.parser")
     rows: list[dict[str, Any]] = []
 
+    target_table_ids = EXPECTED_EXAM_TABLE_IDS.get(str(tab_arg), set()) if tab_arg is not None else set()
+
     # 1. Parse standard tables
     tables = soup.find_all("table")
+    non_header_data_rows_found = 0
+
     for table in tables:
+        t_id = (table.get("id") or "").lower()
+        t_name = (table.get("name") or "").lower()
+
+        if target_table_ids and not (t_id in target_table_ids or t_name in target_table_ids):
+            continue
+
         head_cells = table.find_all(["th", "td"])
         headers = [c.get_text().strip().lower() for c in head_cells[:15]]
         all_head = " ".join(headers)
@@ -96,9 +119,13 @@ def parse_exam_html(html: str, default_exam_type: str = "", semester_hint: str =
 
         trs = table.find_all("tr")[1:]
         for tr in trs:
-            tds = [td.get_text().strip() for td in tr.find_all("td")]
-            if not tds:
+            if "Headerrow" in tr.get("class", []):
                 continue
+            tds = [td.get_text().strip() for td in tr.find_all("td")]
+            if not tds or not any(tds):
+                continue
+
+            non_header_data_rows_found += 1
 
             subject = tds[idx_subject] if idx_subject >= 0 and idx_subject < len(tds) else ""
             if not subject:
@@ -129,54 +156,61 @@ def parse_exam_html(html: str, default_exam_type: str = "", semester_hint: str =
                 "notes": "Crawled from exam schedule",
             })
 
-    # 2. Parse grid cell blocks containing "Ngày thi:" / "Giờ thi:"
-    cells = soup.find_all(["td", "div"])
-    for cell in cells:
-        text = cell.get_text("\n").strip()
-        if not text:
-            continue
-        lowered = text.lower()
-        if not ("ngày thi" in lowered or "ngay thi" in lowered or "date:" in lowered):
-            continue
-        if not ("giờ thi" in lowered or "gio thi" in lowered or "time:" in lowered):
-            continue
+    # Distinguish valid empty table from parser failure on non-empty data rows
+    if target_table_ids and non_header_data_rows_found > 0 and len(rows) == 0:
+        raise TDTUParsingError(
+            f"Exam table for tab '{default_exam_type}' (arg={tab_arg}) contained {non_header_data_rows_found} data rows but no records could be parsed"
+        )
 
-        lines = [line.strip() for line in text.split("\n") if line.strip()]
-        if not lines:
-            continue
+    # 2. Parse grid cell blocks ONLY if no tab_arg is specified
+    if tab_arg is None:
+        cells = soup.find_all(["td", "div"])
+        for cell in cells:
+            text = cell.get_text("\n").strip()
+            if not text:
+                continue
+            lowered = text.lower()
+            if not ("ngày thi" in lowered or "ngay thi" in lowered or "date:" in lowered):
+                continue
+            if not ("giờ thi" in lowered or "gio thi" in lowered or "time:" in lowered):
+                continue
 
-        subject = lines[0].split("|")[0].strip()
-        if not subject:
-            continue
+            lines = [line.strip() for line in text.split("\n") if line.strip()]
+            if not lines:
+                continue
 
-        date_line = next((line for line in lines if re.search(r"(ngày|ngay|date)", line, re.IGNORECASE)), text)
-        time_line = next((line for line in lines if re.search(r"(giờ|gio|time)", line, re.IGNORECASE)), text)
-        room_line = next((line for line in lines if re.search(r"(phòng|phong|room)", line, re.IGNORECASE)), "")
+            subject = lines[0].split("|")[0].strip()
+            if not subject:
+                continue
 
-        date_iso = parse_date_iso(date_line, semester_hint=semester_hint)
-        if not date_iso:
-            continue
+            date_line = next((line for line in lines if re.search(r"(ngày|ngay|date)", line, re.IGNORECASE)), text)
+            time_line = next((line for line in lines if re.search(r"(giờ|gio|time)", line, re.IGNORECASE)), text)
+            room_line = next((line for line in lines if re.search(r"(phòng|phong|room)", line, re.IGNORECASE)), "")
 
-        start_t = parse_time_str(time_line)
-        end_t = ""
-        range_m = re.search(r"(\d{1,2}[:h]\d{2})\s*(?:-|–|—|to|đến|den|->|~)\s*(\d{1,2}[:h]\d{2})", time_line, re.IGNORECASE)
-        if range_m:
-            end_t = parse_time_str(range_m.group(2))
+            date_iso = parse_date_iso(date_line, semester_hint=semester_hint)
+            if not date_iso:
+                continue
 
-        room = ""
-        room_m = re.search(r"(?:phòng|phong|room)\s*[:\-]?\s*(.+)$", room_line, re.IGNORECASE)
-        if room_m:
-            room = room_m.group(1).strip()
+            start_t = parse_time_str(time_line)
+            end_t = ""
+            range_m = re.search(r"(\d{1,2}[:h]\d{2})\s*(?:-|–|—|to|đến|den|->|~)\s*(\d{1,2}[:h]\d{2})", time_line, re.IGNORECASE)
+            if range_m:
+                end_t = parse_time_str(range_m.group(2))
 
-        rows.append({
-            "subject_name": subject,
-            "exam_date": date_iso,
-            "start_time": start_t,
-            "end_time": end_t,
-            "exam_room": room,
-            "exam_type": default_exam_type,
-            "notes": "Crawled from exam grid",
-        })
+            room = ""
+            room_m = re.search(r"(?:phòng|phong|room)\s*[:\-]?\s*(.+)$", room_line, re.IGNORECASE)
+            if room_m:
+                room = room_m.group(1).strip()
+
+            rows.append({
+                "subject_name": subject,
+                "exam_date": date_iso,
+                "start_time": start_t,
+                "end_time": end_t,
+                "exam_room": room,
+                "exam_type": default_exam_type,
+                "notes": "Crawled from exam grid",
+            })
 
     return deduplicate_exam_rows(rows)
 
@@ -202,27 +236,21 @@ def deduplicate_exam_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def validate_exam_tab_structure(html: str, tab_arg: str) -> bool:
     """
-    Verify expected tab container/table exists in the HTML page after postback.
-    tab_arg "0" -> GiuaKyTable (or LichThi1_GiuaKyTable)
-    tab_arg "1" -> CuoiKyTable (or LichThi1_CuoiKyTable)
-    tab_arg "2" -> CuoiKy2Table (or LichThi1_CuoiKy2Table)
-    Returns True if structurally valid expected table/container exists, False if missing.
+    Verify exact expected tab container/table exists in the HTML page after postback.
+    tab_arg "0" -> LichThi1_GiuaKyTable or GiuaKyTable
+    tab_arg "1" -> LichThi1_CuoiKyTable or CuoiKyTable
+    tab_arg "2" -> LichThi1_CuoiKy2Table or CuoiKy2Table
+    Returns True if exact expected table/container exists, False if missing.
     """
     if not html:
         return False
     soup = BeautifulSoup(html, "html.parser")
-
-    target_ids = {
-        "0": ["lichthi1_giuakytable", "giuakytable", "giuaky"],
-        "1": ["lichthi1_cuoikytable", "cuoikytable", "cuoiky"],
-        "2": ["lichthi1_cuoiky2table", "cuoiky2table", "cuoiky2"],
-    }
-    kws = target_ids.get(str(tab_arg), ["table"])
+    expected = EXPECTED_EXAM_TABLE_IDS.get(str(tab_arg), set())
 
     for tag in soup.find_all(["table", "div", "span"]):
         tag_id = (tag.get("id") or "").lower()
         tag_name = (tag.get("name") or "").lower()
-        if any(kw in tag_id or kw in tag_name for kw in kws):
+        if tag_id in expected or tag_name in expected:
             return True
 
     return False

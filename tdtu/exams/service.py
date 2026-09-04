@@ -7,7 +7,7 @@ import os
 import re
 from typing import Any
 
-from tdtu.client import TDTUClient
+from tdtu.client import TDTUClient, sanitize_url
 from tdtu.exceptions import TDTUProtocolError
 from tdtu.exams.parser import deduplicate_exam_rows, parse_exam_html, validate_exam_tab_structure
 
@@ -140,8 +140,9 @@ def fetch_exam_schedule_http(
                 event_argument=arg,
             )
         except Exception as exc:
-            logger.error("[tdtu.exams] Tab postback failed for '%s': %s", label, exc)
-            raise TDTUProtocolError(f"Exam tab postback failed for '{label}': {exc}") from exc
+            safe_err = sanitize_url(exc)
+            logger.error("[tdtu.exams] Tab postback failed for '%s': %s", label, safe_err)
+            raise TDTUProtocolError(f"Exam tab postback failed for '{label}': {safe_err}") from exc
 
         # Structural validation of expected tab container/table
         if not validate_exam_tab_structure(page.html, arg):
@@ -149,7 +150,7 @@ def fetch_exam_schedule_http(
                 f"Expected exam table container for tab '{label}' (arg={arg}) missing from page HTML"
             )
 
-        tab_exams = parse_exam_html(page.html, default_exam_type=label, semester_hint=active_sem)
+        tab_exams = parse_exam_html(page.html, default_exam_type=label, semester_hint=active_sem, tab_arg=arg)
         all_exams.extend(tab_exams)
 
     deduped = deduplicate_exam_rows(all_exams)
