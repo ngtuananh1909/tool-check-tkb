@@ -5,10 +5,11 @@ Does NOT access network, environment variables, or external services.
 
 import logging
 import re
+import unicodedata
 from typing import Any
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup
 
-from tdtu.exceptions import TDTUParsingError
+from tdtu.exceptions import TDTUParsingError, TDTUProtocolError
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,40 @@ VN_DAY_MAP = [
     ("chu nhat", "Sunday"),
     ("cn", "Sunday"),
 ]
+
+
+def _normalize_text(text: str) -> str:
+    """Normalize text by stripping diacritics and extra spaces for pattern matching."""
+    s = (text or "").strip()
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return re.sub(r"\s+", " ", s).lower()
+
+
+def detect_status(text: str) -> str:
+    """
+    Detect internal status code matching existing Playwright crawler contract.
+    Returns: 'absent', 'makeup', 'cancelled', 'moved', or 'scheduled'.
+    """
+    norm = _normalize_text(text)
+
+    # Absence keywords: "báo vắng", "GV vắng", "nghỉ học", "nghỉ tiết", "vắng tiết", "GV báo vắng", "lớp nghỉ"
+    if re.search(r"\b(bao\s*vang|gv\s*vang|nghi\s*hoc|nghi\s*tiet|vang\s*tiet|gv\s*bao\s*vang|lop\s*nghi)\b", norm):
+        return "absent"
+
+    # Makeup class keywords: "học bù", "lịch bù", "dạy bù", "bù học", "bù tiết", "LHB"
+    if re.search(r"\b(hoc\s*bu|lich\s*bu|day\s*bu|bu\s*hoc|bu\s*tiet|lhb)\b", norm):
+        return "makeup"
+
+    # Cancelled keywords: "hủy lớp", "hủy môn"
+    if re.search(r"\b(huy\s*lop|huy\s*mon|cancel)\b", norm):
+        return "cancelled"
+
+    # Moved keywords: "dời lịch", "đổi phòng"
+    if re.search(r"\b(doi\s*lich|doi\s*phong|rescheduled|moved)\b", norm):
+        return "moved"
+
+    return "scheduled"
 
 
 def _normalize_day(raw: str) -> str:
@@ -88,7 +123,6 @@ def parse_active_semester(html: str) -> str:
         if selected_opt:
             return selected_opt.get_text().strip()
 
-    # Fallback to text label matching HK...
     match = re.search(r"HK\s*\d*(?:\s*hè)?/\d{4}-\d{4}", html, re.IGNORECASE)
     if match:
         return match.group(0).strip()
@@ -118,40 +152,37 @@ def parse_general_schedule_table(html: str, student_id: str = "") -> list[dict[s
     """
     Parse general schedule table (#ThoiKhoaBieu1_Table1).
     Matrix layout: Rows (Morning, Afternoon, Evening), Columns (Monday - Sunday).
+    Explicitly skips Headerrow to avoid header text being parsed as course titles.
     """
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table", id=re.compile(r".*Table1.*", re.IGNORECASE))
     if not table:
-        # Fallback to column-based table matching headers
         return _parse_column_based_schedule(soup, student_id=student_id)
 
-    # Days mapping from header row
     header_tr = table.find("tr", class_="Headerrow") or table.find("tr")
     if not header_tr:
         return []
 
     headers = [th.get_text().strip() for th in header_tr.find_all(["td", "th"])]
-    col_days = []
-    for h in headers:
-        col_days.append(_normalize_day(h))
+    col_days = [_normalize_day(h) for h in headers]
 
     entries: list[dict[str, Any]] = []
 
-    # Iterate content rows (skip Headerrow)
     for row in table.find_all("tr"):
         if "Headerrow" in row.get("class", []):
             continue
+
         cells = row.find_all("td", recursive=False)
         if len(cells) < 2:
             continue
 
-        # Process each day column (cells[1] onwards)
         for col_idx, cell in enumerate(cells[1:], start=1):
-            day_of_week = col_days[col_idx] if col_idx < len(col_days) else ""
+            if col_idx >= len(col_days):
+                break
+            day_of_week = col_days[col_idx]
             if not day_of_week:
                 continue
 
-            # Check spans inside cell (each subject block is usually in a <span> or <p>)
             spans = cell.find_all("span") or [cell]
             for span in spans:
                 text = span.get_text("\n").strip()
@@ -167,26 +198,34 @@ def parse_general_schedule_table(html: str, student_id: str = "") -> list[dict[s
 
 def parse_weekly_grid_table(html: str, student_id: str = "") -> list[dict[str, Any]] | None:
     """
-    Parse weekly grid timetable (when weekly view is selected).
-    Matrix layout: Rows (Periods 1..15), Columns (Monday..Sunday).
+    Parse weekly grid timetable when weekly view is active.
+    Extracts dates from #ThoiKhoaBieu1_btnTuanHienTai or column headers.
+    Raises TDTUProtocolError if weekly dates cannot be resolved.
     """
     soup = BeautifulSoup(html, "html.parser")
+
+    # Check for week button or weekly view indicator
+    week_btn = soup.find("input", id=re.compile(r".*btnTuanHienTai.*"))
+    if not week_btn:
+        # Check if weekly view radio button is selected or page has weekly indicators
+        weekly_radio = soup.find("input", id=re.compile(r".*radXemTKBTheoTuan.*"))
+        if not (weekly_radio and weekly_radio.has_attr("checked")):
+            return None
+
     table = soup.find("table", id=re.compile(r".*Table1.*|.*Grid.*", re.IGNORECASE))
     if not table:
         return None
 
-    # Check if table headers contain week dates or weekday names
     header_tr = table.find("tr", class_="Headerrow") or table.find("tr")
     if not header_tr:
         return None
 
     headers = [th.get_text().strip() for th in header_tr.find_all(["td", "th"])]
     if len(headers) < 8:
-        return None  # Needs period column + 7 day columns
+        return None
 
-    # Extract week date range if available in #ThoiKhoaBieu1_btnTuanHienTai
-    week_btn = soup.find("input", id=re.compile(r".*btnTuanHienTai.*"))
-    dates_map = {}
+    # Derive session dates from #ThoiKhoaBieu1_btnTuanHienTai
+    dates_map: dict[str, str] = {}
     if week_btn:
         btn_val = week_btn.get("value", "")
         matches = re.findall(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})", btn_val)
@@ -203,21 +242,19 @@ def parse_weekly_grid_table(html: str, student_id: str = "") -> list[dict[str, A
             except ValueError:
                 pass
 
-    col_days = []
-    col_dates = []
-    for h in headers:
-        day_en = _normalize_day(h)
-        col_days.append(day_en)
-        col_dates.append(dates_map.get(day_en, ""))
+    col_days = [_normalize_day(h) for h in headers]
+    col_dates = [dates_map.get(d, "") for d in col_days]
 
     entries: list[dict[str, Any]] = []
 
-    for row in table.find_all("tr", class_=re.compile(r"rowContent|.*")):
+    for row in table.find_all("tr"):
+        if "Headerrow" in row.get("class", []):
+            continue
+
         cells = row.find_all(["td", "th"], recursive=False)
         if len(cells) < 2:
             continue
 
-        # Check period number from first cell
         p_match = re.search(r"\d+", cells[0].get_text().strip())
         row_period = int(p_match.group(0)) if p_match else 0
 
@@ -225,7 +262,7 @@ def parse_weekly_grid_table(html: str, student_id: str = "") -> list[dict[str, A
             if col_idx >= len(col_days):
                 break
             day_of_week = col_days[col_idx]
-            session_date = col_dates[col_idx]
+            session_date = col_dates[col_idx] if col_idx < len(col_dates) else ""
             if not day_of_week:
                 continue
 
@@ -257,43 +294,40 @@ def _parse_schedule_cell_text(text: str, day_of_week: str, student_id: str) -> d
     if not lines:
         return None
 
-    # First line is usually subject name
-    subject_name = lines[0]
-    # Clean language labels like "| Political Economics"
-    subject_name = re.sub(r"\s*\|\s*.*$", "", subject_name).strip()
+    # Skip header-like texts accidentally passed
+    if any(h in lines[0] for h in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]):
+        return None
+
+    subject_name = re.sub(r"\s*\|\s*.*$", "", lines[0]).strip()
     if not subject_name:
         return None
 
+    full_text = " ".join(lines)
     room = ""
     start_period = 0
     end_period = 0
-    status = "Học"
+    status = detect_status(full_text)
 
-    full_text = " ".join(lines)
-
-    # Extract Room: (Phòng: B204) or (Room: B204)
-    room_match = re.search(r"(?:Phòng|Room)[:\s]*([A-Z0-9._-]+)", full_text, re.IGNORECASE)
+    room_match = re.search(r"(?:Phòng|Room)[:\s]*([A-Z0-9._\s-]+?)(?=\s*Tuần|\s*Week|\s*Tiết|\s*Period|\s*\n|\)|$)", full_text, re.IGNORECASE)
     if room_match:
         room = room_match.group(1).strip()
 
-    # Extract Period: Tiết 123 or Period 123 or Tiết: 1-3
-    period_match = re.search(r"(?:Tiết|Period)[:\s]*(\d+)(?:\s*[-to]+\s*(\d+))?", full_text, re.IGNORECASE)
+    period_match = re.search(r"(?:Tiết|Period)[^0-9]*(\d+)", full_text, re.IGNORECASE)
     if period_match:
-        p_str = period_match.group(1)
-        p_end_str = period_match.group(2)
-        if p_end_str:
-            start_period = int(p_str)
-            end_period = int(p_end_str)
-        elif len(p_str) == 1:
-            start_period = int(p_str)
-            end_period = int(p_str)
-        elif len(p_str) > 1:
-            start_period = int(p_str[0])
-            end_period = int(p_str[-1])
-
-    # Check status (e.g. Nghỉ / Cancelled)
-    if re.search(r"\b(nghỉ|tạm nghỉ|cancel|cancelled)\b", full_text, re.IGNORECASE):
-        status = "Nghỉ"
+        p_raw = period_match.group(1).strip()
+        m_range = re.search(r"(\d+)\s*[-to]+\s*(\d+)", p_raw)
+        if m_range:
+            start_period = int(m_range.group(1))
+            end_period = int(m_range.group(2))
+        else:
+            multi_digit_matches = re.findall(r"(1[0-6])", p_raw)
+            if multi_digit_matches and "".join(multi_digit_matches) == p_raw:
+                periods = [int(x) for x in multi_digit_matches]
+                start_period, end_period = min(periods), max(periods)
+            else:
+                digits = [int(d) for d in re.findall(r"\d", p_raw)]
+                if digits:
+                    start_period, end_period = min(digits), max(digits)
 
     return {
         "student_id": student_id,
@@ -350,6 +384,9 @@ def _parse_column_based_schedule(soup: BeautifulSoup, student_id: str) -> list[d
                 em = re.search(r"\d+", cells[end_col])
                 if em: end_p = int(em.group())
 
+            full_row_text = " ".join(cells)
+            status = detect_status(full_row_text)
+
             entries.append({
                 "student_id": student_id,
                 "subject_name": subj,
@@ -358,24 +395,29 @@ def _parse_column_based_schedule(soup: BeautifulSoup, student_id: str) -> list[d
                 "session_date": "",
                 "start_period": start_p,
                 "end_period": end_p,
-                "status": "Học",
+                "status": status,
             })
 
     return _deduplicate_schedule(entries)
 
 
 def _deduplicate_schedule(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Deduplicate schedule items by key fields."""
+    """
+    Deduplicate schedule items by key fields.
+    MUST include `status` in deduplication signature so paired rows (e.g. absent and makeup)
+    are preserved! (Addresses Blocker 2).
+    """
     seen = set()
     deduped = []
     for e in entries:
         key = (
-            e.get("subject_name"),
-            e.get("room"),
-            e.get("day_of_week"),
-            e.get("session_date"),
-            e.get("start_period"),
-            e.get("end_period"),
+            str(e.get("subject_name") or "").strip().lower(),
+            str(e.get("room") or "").strip().lower(),
+            str(e.get("day_of_week") or "").strip().lower(),
+            str(e.get("session_date") or "").strip(),
+            int(e.get("start_period", 0) or 0),
+            int(e.get("end_period", 0) or 0),
+            str(e.get("status") or "").strip().lower(),
         )
         if key in seen:
             continue

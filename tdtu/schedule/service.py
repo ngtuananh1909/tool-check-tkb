@@ -6,10 +6,14 @@ import logging
 from typing import Any
 
 from tdtu.client import TDTUClient
+from tdtu.exceptions import TDTUProtocolError
 from tdtu.schedule.parser import (
+    _deduplicate_schedule,
     parse_active_semester,
+    parse_general_schedule_table,
     parse_schedule_html,
     parse_semester_options,
+    parse_weekly_grid_table,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,12 +35,14 @@ def fetch_schedule_http(
     """
     Fetch schedule entries via authenticated HTTP.
     Optionally switches semester if selected_semester is specified.
-    Optionally navigates future weeks if max_weeks > 1.
+    If max_weeks > 0 (or multi-week requested), switches to weekly view FIRST
+    and iterates weekly postbacks without mixing general schedule rows.
     """
     page = client.open_schedule_page()
+    initial_html = page.html
     sid = client.student_id
 
-    # Semester selection check
+    # 1. Semester selection check
     if selected_semester:
         options = parse_semester_options(page.html)
         target_opt = None
@@ -51,48 +57,47 @@ def fetch_schedule_http(
                 event_target="ThoiKhoaBieu1$cboHocKy",
                 extra={"ThoiKhoaBieu1$cboHocKy": target_opt["value"]},
             )
+            initial_html = page.html
 
-    entries = parse_schedule_html(page.html, student_id=sid)
-
-    # If max_weeks is specified and > 1, check if weekly view postback is available
-    if max_weeks and max_weeks > 1:
-        # Check if weekly view radio button is present
+    # 2. Multi-week crawl check (Blocker 4)
+    # If max_weeks > 1 is requested, attempt weekly view.
+    if max_weeks and max_weeks > 1 and "btnTuanSau" in page.html:
+        logger.info("[tdtu.schedule] Multi-week crawl requested (max_weeks=%d). Switching to weekly view...", max_weeks)
         if "radXemTKBTheoTuan" in page.html:
-            logger.info("[tdtu.schedule] Switching to weekly timetable view...")
             page.postback(
                 event_target="ThoiKhoaBieu1$radXemTKBTheoTuan",
                 extra={"ThoiKhoaBieu1$radChonLua": "radXemTKBTheoTuan"},
             )
-            week_entries = parse_schedule_html(page.html, student_id=sid)
+
+        entries: list[dict[str, Any]] = []
+
+        # Parse initial week
+        week_entries = parse_weekly_grid_table(page.html, student_id=sid)
+        if week_entries is not None:
             entries.extend(week_entries)
 
-            # Navigate future weeks
-            for week_idx in range(1, max_weeks):
-                if "btnTuanSau" not in page.html:
-                    break
-                logger.debug("[tdtu.schedule] Navigating to week +%d", week_idx)
-                page.postback(
-                    event_target="",
-                    extra={"ThoiKhoaBieu1$btnTuanSau": ">>"},
-                )
-                w_entries = parse_schedule_html(page.html, student_id=sid)
+        # Navigate future weeks
+        for week_idx in range(1, max_weeks):
+            if "btnTuanSau" not in page.html:
+                break
+            logger.debug("[tdtu.schedule] Navigating to week +%d", week_idx)
+            page.postback(
+                event_target="",
+                extra={"ThoiKhoaBieu1$btnTuanSau": ">>"},
+            )
+            w_entries = parse_weekly_grid_table(page.html, student_id=sid)
+            if w_entries:
                 entries.extend(w_entries)
 
-    # Deduplicate combined entries
-    seen = set()
-    deduped = []
-    for e in entries:
-        key = (
-            e.get("subject_name"),
-            e.get("room"),
-            e.get("day_of_week"),
-            e.get("session_date"),
-            e.get("start_period"),
-            e.get("end_period"),
-        )
-        if key not in seen:
-            seen.add(key)
-            deduped.append(e)
+        if entries:
+            deduped = _deduplicate_schedule(entries)
+            logger.info("[tdtu.schedule] Fetched %d weekly schedule entries via HTTP", len(deduped))
+            return deduped
 
+        logger.info("[tdtu.schedule] Weekly grid view empty or unnavigable; using general schedule parser...")
+
+    # Single-week or general schedule crawl fallback
+    entries = parse_schedule_html(initial_html, student_id=sid)
+    deduped = _deduplicate_schedule(entries)
     logger.info("[tdtu.schedule] Fetched %d schedule entries via HTTP", len(deduped))
     return deduped

@@ -3,27 +3,48 @@ Pure HTML parser for TDTU student exam schedule pages.
 Does NOT access network, environment variables, or external services.
 """
 
+import datetime
 import logging
 import re
 from typing import Any
 from bs4 import BeautifulSoup
 
+from time_utils import local_today
+
 logger = logging.getLogger(__name__)
 
 
-def parse_date_iso(text: str) -> str:
-    """Parse date from string like '15/09/2026' or '15-09-2026' into 'YYYY-MM-DD'."""
+def parse_date_iso(text: str, semester_hint: str = "") -> str:
+    """
+    Parse date from string like '15/09/2026' or '15-09-2026' into 'YYYY-MM-DD'.
+    Derives year dynamically without hardcoding.
+    """
     m = re.search(r"(\d{1,2})[/\.-](\d{1,2})(?:[/\.-](\d{2,4}))?", text or "")
     if not m:
         return ""
     d = int(m.group(1))
     mo = int(m.group(2))
-    y = int(m.group(3)) if m.group(3) else 2026
-    if y < 100:
-        y += 2000
-    if not (1 <= d <= 31 and 1 <= mo <= 12 and y > 2000):
+
+    y = None
+    if m.group(3):
+        y = int(m.group(3))
+        if y < 100:
+            y += 2000
+
+    if y is None and semester_hint:
+        # Try extracting year from semester string e.g. HK1/2025-2026
+        sem_m = re.search(r"20\d{2}", semester_hint)
+        if sem_m:
+            y = int(sem_m.group(0))
+
+    if y is None:
+        y = local_today().year
+
+    try:
+        dt = datetime.date(y, mo, d)
+        return dt.strftime("%Y-%m-%d")
+    except ValueError:
         return ""
-    return f"{y:04d}-{mo:02d}-{d:02d}"
 
 
 def parse_time_str(text: str) -> str:
@@ -34,7 +55,7 @@ def parse_time_str(text: str) -> str:
     return f"{int(m.group(1)):02d}:{m.group(2)}"
 
 
-def parse_exam_html(html: str, default_exam_type: str = "") -> list[dict[str, Any]]:
+def parse_exam_html(html: str, default_exam_type: str = "", semester_hint: str = "") -> list[dict[str, Any]]:
     """
     Parse exam schedule HTML and extract exam records.
     Parses table structures (#LichThi1_GiuaKyTable, #LichThi1_CuoiKyTable, etc.) and grid cell blocks.
@@ -73,7 +94,7 @@ def parse_exam_html(html: str, default_exam_type: str = "") -> list[dict[str, An
                 continue
 
             date_text = tds[idx_date] if idx_date >= 0 and idx_date < len(tds) else " ".join(tds)
-            date_iso = parse_date_iso(date_text)
+            date_iso = parse_date_iso(date_text, semester_hint=semester_hint)
             if not date_iso:
                 continue
 
@@ -121,7 +142,7 @@ def parse_exam_html(html: str, default_exam_type: str = "") -> list[dict[str, An
         time_line = next((line for line in lines if re.search(r"(giờ|gio|time)", line, re.IGNORECASE)), text)
         room_line = next((line for line in lines if re.search(r"(phòng|phong|room)", line, re.IGNORECASE)), "")
 
-        date_iso = parse_date_iso(date_line)
+        date_iso = parse_date_iso(date_line, semester_hint=semester_hint)
         if not date_iso:
             continue
 
@@ -150,16 +171,16 @@ def parse_exam_html(html: str, default_exam_type: str = "") -> list[dict[str, An
 
 
 def deduplicate_exam_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Deduplicate exam items by subject_name, exam_date, start_time, and exam_room."""
+    """Deduplicate exam items by key fields."""
     seen = set()
     deduped = []
     for r in rows:
         key = (
-            r.get("subject_name"),
-            r.get("exam_date"),
-            r.get("start_time"),
-            r.get("exam_room"),
-            r.get("exam_type"),
+            str(r.get("subject_name") or "").strip().lower(),
+            str(r.get("exam_date") or "").strip(),
+            str(r.get("start_time") or "").strip(),
+            str(r.get("exam_room") or "").strip().lower(),
+            str(r.get("exam_type") or "").strip().lower(),
         )
         if key in seen:
             continue
