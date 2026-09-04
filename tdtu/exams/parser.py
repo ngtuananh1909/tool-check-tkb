@@ -198,3 +198,32 @@ def deduplicate_exam_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen.add(key)
         deduped.append(r)
     return deduped
+
+
+def validate_exam_tab_structure(html: str, tab_arg: str) -> bool:
+    """
+    Verify expected tab container/table exists in the HTML page after postback.
+    tab_arg "0" -> GiuaKyTable (or LichThi1_GiuaKyTable)
+    tab_arg "1" -> CuoiKyTable (or LichThi1_CuoiKyTable)
+    tab_arg "2" -> CuoiKy2Table (or LichThi1_CuoiKy2Table)
+    Returns True if structurally valid expected table/container exists, False if missing.
+    """
+    if not html:
+        return False
+    soup = BeautifulSoup(html, "html.parser")
+
+    target_ids = {
+        "0": ["lichthi1_giuakytable", "giuakytable", "giuaky"],
+        "1": ["lichthi1_cuoikytable", "cuoikytable", "cuoiky"],
+        "2": ["lichthi1_cuoiky2table", "cuoiky2table", "cuoiky2"],
+    }
+    kws = target_ids.get(str(tab_arg), ["table"])
+
+    for tag in soup.find_all(["table", "div", "span"]):
+        tag_id = (tag.get("id") or "").lower()
+        tag_name = (tag.get("name") or "").lower()
+        if any(kw in tag_id or kw in tag_name for kw in kws):
+            return True
+
+    return False
+

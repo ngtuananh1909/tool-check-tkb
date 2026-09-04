@@ -45,6 +45,26 @@ class TestExamParser(unittest.TestCase):
         self.assertEqual(parse_date_iso("15/09/2026"), "2026-09-15")
         self.assertEqual(parse_date_iso("31/02/2026"), "")  # Invalid date rejected
 
+    def test_validate_exam_tab_structure(self) -> None:
+        from tdtu.exams.parser import validate_exam_tab_structure
+        # Valid final exam tab structure
+        self.assertTrue(validate_exam_tab_structure(self.html, "1"))
+
+        # Valid empty table container for midterm ("0")
+        valid_empty_midterm = """
+        <select name="LichThi1$cboHocKy"><option selected="selected" value="136">HK1/2026-2027</option></select>
+        <table id="LichThi1_GiuaKyTable"><tr><td>No data</td></tr></table>
+        """
+        self.assertTrue(validate_exam_tab_structure(valid_empty_midterm, "0"))
+
+        # Malformed page missing midterm table container
+        malformed_midterm = """
+        <select name="LichThi1$cboHocKy"><option selected="selected" value="136">HK1/2026-2027</option></select>
+        <table id="LichThi1_Menu1"><tr><td><a href="...">Xem lịch thi giữa kỳ</a></td></tr></table>
+        <div>Some random text without exam table</div>
+        """
+        self.assertFalse(validate_exam_tab_structure(malformed_midterm, "0"))
+
 
 if __name__ == "__main__":
     unittest.main()
