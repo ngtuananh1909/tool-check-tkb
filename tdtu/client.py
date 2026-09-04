@@ -220,13 +220,12 @@ class TDTUClient:
                 data = r2.json()
             except ValueError as exc:
                 logger.warning(
-                    "[tdtu.auth.diag] Step 2 POST /Login/SignIn non-JSON: status=%d, content_type=%s, excerpt=%s",
+                    "[tdtu.auth.diag] Step 2 POST /Login/SignIn non-JSON: status=%d, content_type=%s",
                     r2.status_code,
                     r2.headers.get("Content-Type", ""),
-                    r2.text[:100],
                 )
                 raise TDTUAuthenticationError(
-                    f"SignIn response is not valid JSON: {r2.text[:100]}"
+                    "SignIn response is not valid JSON"
                 ) from exc
 
             if not isinstance(data, dict):

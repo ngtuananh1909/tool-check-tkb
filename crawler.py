@@ -2050,10 +2050,11 @@ def get_current_semester(student_id: str | None = None, password: str | None = N
                 logger.info("[crawler] HTTP get_current_semester resolved: %s", sem)
                 return sem
     except Exception as exc:
+        sanitized_exc = _sanitize_url_for_log(exc)
         if http_required:
-            logger.error("[crawler] HTTP get_current_semester failed while TDTU_HTTP_REQUIRED=true: %s", exc)
-            raise RuntimeError(f"TDTU HTTP semester fetch failed while TDTU_HTTP_REQUIRED=true: {exc}") from exc
-        logger.warning("[crawler] HTTP get_current_semester failed (%s), falling back to Playwright", exc)
+            logger.error("[crawler] HTTP get_current_semester failed while TDTU_HTTP_REQUIRED=true: %s", sanitized_exc)
+            raise RuntimeError(f"TDTU HTTP semester fetch failed while TDTU_HTTP_REQUIRED=true: {sanitized_exc}") from exc
+        logger.warning("[crawler] HTTP get_current_semester failed (%s), falling back to Playwright", sanitized_exc)
 
     return _get_current_semester_playwright(sid, pwd)
 

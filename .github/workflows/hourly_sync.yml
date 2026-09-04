@@ -16,8 +16,14 @@ on:
     # "0 * * * *" = every hour at :00
     - cron: "0 * * * *"
 
-  # Allow manual triggers from the GitHub Actions UI
+  # Allow manual triggers from the GitHub Actions UI with strict HTTP verification toggle
   workflow_dispatch:
+    inputs:
+      strict_http:
+        description: "Require TDTU HTTP path and disable Playwright fallback"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   sync:
@@ -83,5 +89,5 @@ jobs:
       - name: Run hourly data collection and sync
         env:
           GOOGLE_SERVICE_ACCOUNT_FILE: ${{ github.workspace }}/service-account.json
-          TDTU_HTTP_REQUIRED: "true"
+          TDTU_HTTP_REQUIRED: ${{ inputs.strict_http == true && 'true' || 'false' }}
         run: python run_hour.py

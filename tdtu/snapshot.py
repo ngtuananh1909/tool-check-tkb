@@ -17,14 +17,6 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
-def mask_student_id(student_id: str) -> str:
-    """Mask student ID for log privacy, showing at most last 3 characters."""
-    sid = str(student_id or "")
-    if len(sid) <= 3:
-        return "***"
-    return f"***{sid[-3:]}"
-
-
 @dataclass
 class FetchResult(Generic[T]):
     """Represents the outcome of an individual crawler operation."""
@@ -54,7 +46,7 @@ def fetch_portal_snapshot(
     Perform a complete hourly portal sync using ONE login session.
     Isolated per-operation error handling so failure in exams does NOT discard schedule.
     """
-    logger.info("[tdtu.snapshot] Starting single-login portal snapshot for ID: %s", mask_student_id(student_id))
+    logger.info("[tdtu.snapshot] Starting single-login portal snapshot")
     snapshot = PortalSnapshot()
 
     try:
