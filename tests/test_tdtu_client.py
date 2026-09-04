@@ -98,8 +98,24 @@ class TestTDTUClient(unittest.TestCase):
         from tdtu.client import safe_request
         mock_sess = MagicMock()
         with self.assertRaises(TDTUAuthenticationError) as ctx:
-            safe_request(mock_sess, "GET", "ftp://old-stdportal.tdtu.edu.vn/Login/")
+            safe_request(mock_sess, "GET", "http://old-stdportal.tdtu.edu.vn/Login/")
         self.assertIn("non-HTTPS scheme", str(ctx.exception))
+        mock_sess.request.assert_not_called()
+
+    def test_safe_request_http_redirect_rejected(self) -> None:
+        from tdtu.client import safe_request
+        mock_sess = MagicMock()
+        r1 = MagicMock()
+        r1.status_code = 302
+        r1.url = "https://old-stdportal.tdtu.edu.vn/Login/"
+        r1.headers = {"Location": "http://untrusted-host.com/Login/Insecure"}
+        mock_sess.request.return_value = r1
+
+        with self.assertRaises(TDTUAuthenticationError) as ctx:
+            safe_request(mock_sess, "GET", "https://old-stdportal.tdtu.edu.vn/Login/")
+        self.assertIn("non-HTTPS scheme", str(ctx.exception))
+        # Ensure initial HTTPS request was sent (call count == 1), but NO request was sent to the http:// redirect URL
+        self.assertEqual(mock_sess.request.call_count, 1)
 
     def test_safe_request_untrusted_host_rejected(self) -> None:
         from tdtu.client import safe_request
@@ -107,6 +123,7 @@ class TestTDTUClient(unittest.TestCase):
         with self.assertRaises(TDTUAuthenticationError) as ctx:
             safe_request(mock_sess, "GET", "https://malicious.com/phishing")
         self.assertIn("Untrusted host", str(ctx.exception))
+        mock_sess.request.assert_not_called()
 
     def test_safe_request_too_many_redirects(self) -> None:
         from tdtu.client import safe_request

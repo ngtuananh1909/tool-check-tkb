@@ -62,9 +62,6 @@ def safe_request(
     current_data = data
 
     for _ in range(max_redirects + 1):
-        if current_url.startswith("http://"):
-            current_url = "https://" + current_url[7:]
-
         parsed = urlparse(current_url)
         if parsed.scheme != "https":
             raise TDTUAuthenticationError(f"Insecure non-HTTPS scheme: {parsed.scheme}")
@@ -85,7 +82,13 @@ def safe_request(
             if not location:
                 return resp
 
-            if location.startswith("/"):
+            if location.startswith("http://"):
+                loc_parsed = urlparse(location)
+                if loc_parsed.hostname in ALLOWED_HOSTS:
+                    current_url = f"https://{location[7:]}"
+                else:
+                    current_url = location
+            elif location.startswith("/"):
                 base_parsed = urlparse(current_url)
                 current_url = f"https://{base_parsed.netloc}{location}"
             elif location.startswith("./"):
@@ -199,8 +202,12 @@ class TDTUClient:
             if not redirect_url or redirect_url.lower() in ("success", "true", "1", "ok"):
                 redirect_url = r2.headers.get("Location") or "https://old-stdportal.tdtu.edu.vn/StdPortalMain"
 
-            # Format relative redirect URLs if returned as relative path
-            if redirect_url.startswith("/"):
+            # Format relative or http redirect URLs for allowed hosts
+            if redirect_url.startswith("http://"):
+                p_tmp = urlparse(redirect_url)
+                if p_tmp.hostname in ALLOWED_HOSTS:
+                    redirect_url = f"https://{redirect_url[7:]}"
+            elif redirect_url.startswith("/"):
                 redirect_url = f"https://old-stdportal.tdtu.edu.vn{redirect_url}"
             elif redirect_url.startswith("./"):
                 redirect_url = f"https://old-stdportal.tdtu.edu.vn/Login/{redirect_url[2:]}"
