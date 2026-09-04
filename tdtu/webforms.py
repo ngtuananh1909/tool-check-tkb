@@ -65,8 +65,10 @@ class WebFormsPage:
         """
         Execute an ASP.NET postback with current WebForms state.
         Updates self.html and self.url with the new response content.
-        Validates postback response semantically.
+        Validates postback response semantically and structurally.
         """
+        from tdtu.client import ALLOWED_HOSTS, safe_request
+
         payload = self.hidden_fields()
         payload["__EVENTTARGET"] = event_target
         payload["__EVENTARGUMENT"] = event_argument
@@ -76,11 +78,19 @@ class WebFormsPage:
 
         target_url = action_url or self.url
 
+        # Validate target_url before posting (Bug 22)
+        parsed_target = urlparse(target_url)
+        if parsed_target.scheme != "https":
+            raise TDTUProtocolError(f"Insecure non-HTTPS target URL for postback: {target_url}")
+        if (parsed_target.hostname or "") not in ALLOWED_HOSTS:
+            raise TDTUProtocolError(f"Untrusted host in postback target URL: {parsed_target.hostname}")
+
         try:
-            resp = self.session.post(
+            resp = safe_request(
+                self.session,
+                "POST",
                 target_url,
                 data=payload,
-                allow_redirects=True,
                 timeout=self.timeout,
             )
             resp.raise_for_status()
@@ -94,7 +104,7 @@ class WebFormsPage:
             raise TDTUAuthenticationError("Postback response redirected to login (session expired)")
 
         parsed_url = urlparse(resp.url)
-        if not parsed_url.hostname or not parsed_url.hostname.endswith("tdtu.edu.vn"):
+        if (parsed_url.hostname or "") not in ALLOWED_HOSTS:
             raise TDTUProtocolError(f"Postback redirected to unexpected host: {parsed_url.hostname}")
 
         if "__VIEWSTATE" not in resp.text:

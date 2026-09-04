@@ -23,7 +23,9 @@ ALLOWED_HOSTS = {
     "old-stdportal.tdtu.edu.vn",
     "lichhoc-lichthi.tdtu.edu.vn",
     "sso.tdtu.edu.vn",
+    "sso.tdt.edu.vn",
     "stdportal.tdtu.edu.vn",
+    "stdportal.tdt.edu.vn",
 }
 
 
@@ -40,6 +42,70 @@ def sanitize_url(url: Any) -> str:
     # Redact raw passwords or credentials if present in string
     sanitized = re.sub(r'(pass(?:word)?=["\']?)[^"\'&\s]+', r'\1[REDACTED]', sanitized, flags=re.IGNORECASE)
     return sanitized
+
+
+def safe_request(
+    session: requests.Session,
+    method: str,
+    url: str,
+    data: Any = None,
+    headers: dict[str, str] | None = None,
+    timeout: int = DEFAULT_TIMEOUT,
+    max_redirects: int = 5,
+) -> requests.Response:
+    """
+    Execute HTTP request with strict step-by-step redirect validation.
+    Ensures every redirect destination uses HTTPS and stays within ALLOWED_HOSTS (Bug 21).
+    """
+    current_url = url
+    current_method = method.upper()
+    current_data = data
+
+    for _ in range(max_redirects + 1):
+        if current_url.startswith("http://"):
+            current_url = "https://" + current_url[7:]
+
+        parsed = urlparse(current_url)
+        if parsed.scheme != "https":
+            raise TDTUAuthenticationError(f"Insecure non-HTTPS scheme: {parsed.scheme}")
+        if (parsed.hostname or "") not in ALLOWED_HOSTS:
+            raise TDTUAuthenticationError(f"Untrusted host in request/redirect: {parsed.hostname}")
+
+        resp = session.request(
+            method=current_method,
+            url=current_url,
+            data=current_data,
+            headers=headers,
+            allow_redirects=False,
+            timeout=timeout,
+        )
+
+        if resp.status_code in (301, 302, 303, 307, 308):
+            location = resp.headers.get("Location")
+            if not location:
+                return resp
+
+            if location.startswith("/"):
+                base_parsed = urlparse(current_url)
+                current_url = f"https://{base_parsed.netloc}{location}"
+            elif location.startswith("./"):
+                base_parsed = urlparse(current_url)
+                base_path = base_parsed.path.rsplit("/", 1)[0]
+                current_url = f"https://{base_parsed.netloc}{base_path}/{location[2:]}"
+            elif not location.startswith("http"):
+                base_parsed = urlparse(current_url)
+                current_url = f"https://{base_parsed.netloc}/{location.lstrip('/')}"
+            else:
+                current_url = location
+
+            if resp.status_code in (301, 302, 303):
+                current_method = "GET"
+                current_data = None
+            continue
+
+        return resp
+
+    raise TDTUProtocolError("Too many redirects during authenticated navigation")
 
 
 class TDTUClient:
@@ -96,11 +162,11 @@ class TDTUClient:
         if self.is_logged_in:
             return
 
-        logger.info("[tdtu.auth] Starting login for student ID: %s", self.student_id)
+        logger.info("[tdtu.auth] Starting portal authentication...")
 
         try:
             # 1. Establish initial cookies
-            r1 = self.session.get(PORTAL_LOGIN_URL, timeout=self.timeout)
+            r1 = safe_request(self.session, "GET", PORTAL_LOGIN_URL, timeout=self.timeout)
             r1.raise_for_status()
 
             # 2. POST login credentials
@@ -152,9 +218,9 @@ class TDTUClient:
                     f"Untrusted redirect domain in login response: {hostname}"
                 )
 
-            # 5. Follow redirect to establish session on lichhoc-lichthi domain
+            # 5. Follow redirect step-by-step with domain validation
             logger.debug("[tdtu.auth] Following authenticated redirect to %s", sanitize_url(redirect_url))
-            r3 = self.session.get(redirect_url, allow_redirects=True, timeout=self.timeout)
+            r3 = safe_request(self.session, "GET", redirect_url, timeout=self.timeout)
             r3.raise_for_status()
 
             # Verify final destination host
@@ -192,7 +258,7 @@ class TDTUClient:
 
         logger.debug("[tdtu.schedule] Fetching schedule page: %s", sanitize_url(url))
         try:
-            resp = self.session.get(url, allow_redirects=True, timeout=self.timeout)
+            resp = safe_request(self.session, "GET", url, timeout=self.timeout)
             resp.raise_for_status()
 
             # Semantic validation: check for login redirect or missing elements
@@ -220,7 +286,7 @@ class TDTUClient:
 
         logger.debug("[tdtu.exams] Fetching exam page: %s", sanitize_url(url))
         try:
-            resp = self.session.get(url, allow_redirects=True, timeout=self.timeout)
+            resp = safe_request(self.session, "GET", url, timeout=self.timeout)
             resp.raise_for_status()
 
             if "login" in resp.url.lower() or "đăng nhập" in resp.text[:500].lower():
