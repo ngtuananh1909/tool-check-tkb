@@ -82,22 +82,27 @@ def safe_request(
             if not location:
                 return resp
 
-            if location.startswith("http://"):
-                loc_parsed = urlparse(location)
-                if loc_parsed.hostname in ALLOWED_HOSTS:
-                    current_url = f"https://{location[7:]}"
-                else:
-                    current_url = location
-            elif location.startswith("/"):
-                base_parsed = urlparse(current_url)
-                current_url = f"https://{base_parsed.netloc}{location}"
+            base_parsed = urlparse(current_url)
+            loc_parsed = urlparse(location)
+
+            query = loc_parsed.query
+            if not query and base_parsed.query:
+                query = base_parsed.query
+
+            if location.startswith("/"):
+                path_part = loc_parsed.path
             elif location.startswith("./"):
-                base_parsed = urlparse(current_url)
                 base_path = base_parsed.path.rsplit("/", 1)[0]
-                current_url = f"https://{base_parsed.netloc}{base_path}/{location[2:]}"
+                path_part = f"{base_path}/{loc_parsed.path[2:]}"
             elif not location.startswith("http"):
-                base_parsed = urlparse(current_url)
-                current_url = f"https://{base_parsed.netloc}/{location.lstrip('/')}"
+                path_part = f"/{loc_parsed.path.lstrip('/')}"
+            else:
+                path_part = None
+
+            if path_part is not None:
+                current_url = f"https://{base_parsed.netloc}{path_part}"
+                if query:
+                    current_url += f"?{query}"
             else:
                 current_url = location
 
@@ -137,10 +142,10 @@ class TDTUClient:
                 ),
             }
         )
-        self.is_logged_in = False
-        self.token: str | None = None
-        self.request_id: str | None = None
-        self.authenticated_schedule_url: str | None = None
+        self.token: str = ""
+        self.request_id: str = ""
+        self.authenticated_schedule_url: str = ""
+        self.is_logged_in: bool = False
 
     def __enter__(self) -> "TDTUClient":
         self.login()
@@ -150,33 +155,29 @@ class TDTUClient:
         self.close()
 
     def close(self) -> None:
-        """Close the underlying HTTP session."""
+        """Close the underlying requests Session."""
         self.session.close()
 
     def login(self) -> None:
         """
-        Authenticate against TDTU student portal.
-        Follows the verified protocol:
-        1. GET login page for initial cookies.
-        2. POST credentials to /Login/SignIn.
-        3. Extract redirect URL from JSON result.
-        4. Validate domain and GET redirect URL to obtain Token and RequestId.
+        Authenticate with TDTU student portal.
+        Performs 2-step login: GET /Login/ -> POST /Login/SignIn -> Follow redirect URL.
+        Captures Token and RequestId parameters for subsequent API postbacks.
         """
-        if self.is_logged_in:
-            return
-
-        logger.info("[tdtu.auth] Starting portal authentication...")
-
         try:
-            # 1. Establish initial cookies
+            # 1. Open login page to acquire initial cookies / session
             r1 = safe_request(self.session, "GET", PORTAL_LOGIN_URL, timeout=self.timeout)
             r1.raise_for_status()
 
-            # 2. POST login credentials
+            # 2. Submit credentials to SignIn API endpoint
+            payload = {
+                "user": self.student_id,
+                "pass": self.password,
+            }
             r2 = self.session.post(
                 PORTAL_SIGNIN_URL,
-                data={"user": self.student_id, "pass": self.password},
-                allow_redirects=False,
+                data=payload,
+                headers={"Referer": PORTAL_LOGIN_URL},
                 timeout=self.timeout,
             )
             r2.raise_for_status()
@@ -184,9 +185,9 @@ class TDTUClient:
             # 3. Parse JSON response
             try:
                 data = r2.json()
-            except Exception as exc:
+            except ValueError as exc:
                 raise TDTUAuthenticationError(
-                    f"Login endpoint returned non-JSON response: {r2.text[:100]}"
+                    f"SignIn response is not valid JSON: {r2.text[:100]}"
                 ) from exc
 
             if not isinstance(data, dict):
@@ -202,12 +203,8 @@ class TDTUClient:
             if not redirect_url or redirect_url.lower() in ("success", "true", "1", "ok"):
                 redirect_url = r2.headers.get("Location") or "https://old-stdportal.tdtu.edu.vn/StdPortalMain"
 
-            # Format relative or http redirect URLs for allowed hosts
-            if redirect_url.startswith("http://"):
-                p_tmp = urlparse(redirect_url)
-                if p_tmp.hostname in ALLOWED_HOSTS:
-                    redirect_url = f"https://{redirect_url[7:]}"
-            elif redirect_url.startswith("/"):
+            # Format relative redirect URLs if returned as relative path
+            if redirect_url.startswith("/"):
                 redirect_url = f"https://old-stdportal.tdtu.edu.vn{redirect_url}"
             elif redirect_url.startswith("./"):
                 redirect_url = f"https://old-stdportal.tdtu.edu.vn/Login/{redirect_url[2:]}"
@@ -237,10 +234,11 @@ class TDTUClient:
                     f"Final redirect landed on untrusted host: {final_parsed.hostname}"
                 )
 
-            # Extract Token and RequestId from final URL or history
-            params = parse_qs(parsed_redirect.query)
-            if not params:
-                params = parse_qs(final_parsed.query)
+            # Extract Token and RequestId from final URL or redirect URL
+            params = parse_qs(final_parsed.query)
+            for k, v in parse_qs(parsed_redirect.query).items():
+                if k not in params:
+                    params[k] = v
 
             self.token = (params.get("Token") or params.get("token") or [""])[0]
             self.request_id = (params.get("RequestId") or params.get("requestid") or [""])[0]
@@ -260,8 +258,8 @@ class TDTUClient:
             self.login()
 
         url = SCHEDULE_BASE_URL
-        if self.token and self.request_id:
-            url = f"{SCHEDULE_BASE_URL}?Token={self.token}&RequestId={self.request_id}"
+        if self.token:
+            url = f"https://sso.tdtu.edu.vn/Authenticate.aspx?ReturnUrl={SCHEDULE_BASE_URL}&Token={self.token}"
 
         logger.debug("[tdtu.schedule] Fetching schedule page: %s", sanitize_url(url))
         try:
@@ -288,8 +286,8 @@ class TDTUClient:
             self.login()
 
         url = EXAM_BASE_URL
-        if self.token and self.request_id:
-            url = f"{EXAM_BASE_URL}?Token={self.token}&RequestId={self.request_id}"
+        if self.token:
+            url = f"https://sso.tdtu.edu.vn/Authenticate.aspx?ReturnUrl={EXAM_BASE_URL}&Token={self.token}"
 
         logger.debug("[tdtu.exams] Fetching exam page: %s", sanitize_url(url))
         try:

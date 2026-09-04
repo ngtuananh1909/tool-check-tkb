@@ -10,8 +10,6 @@ from tdtu.exceptions import TDTUProtocolError
 from tdtu.schedule.parser import (
     _deduplicate_schedule,
     parse_active_semester,
-    parse_general_schedule_table,
-    parse_schedule_html,
     parse_semester_options,
     parse_weekly_grid_table,
 )
