@@ -25,6 +25,13 @@ from urllib.parse import parse_qs, urlparse
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 from time_utils import local_today
+from tdtu import (
+    TDTUClient,
+    fetch_schedule_http,
+    fetch_exam_schedule_http,
+    get_current_semester_http,
+    TDTUError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +302,28 @@ def fetch_schedule(
             "Credentials missing. Set STUDENT_ID and PASSWORD environment variables."
         )
 
+    extra_weeks = _resolve_weeks_ahead(weeks_ahead)
+    total_weeks = 1 + extra_weeks
+
+    http_required = os.environ.get("TDTU_HTTP_REQUIRED", "").lower() in ("true", "1", "yes")
+
+    # --- PRIMARY: Authenticated HTTP Crawler ---
+    try:
+        with TDTUClient(sid, pwd) as client:
+            http_schedule = fetch_schedule_http(client, max_weeks=total_weeks)
+            logger.info("[crawler] HTTP fetch_schedule succeeded with %d rows", len(http_schedule))
+            return http_schedule
+    except Exception as exc:
+        if http_required:
+            logger.error("[crawler] HTTP fetch_schedule failed while TDTU_HTTP_REQUIRED=true: %s", _sanitize_url_for_log(exc))
+            raise RuntimeError(f"TDTU HTTP schedule fetch failed while TDTU_HTTP_REQUIRED=true: {_sanitize_url_for_log(exc)}") from exc
+        logger.warning("[crawler] HTTP fetch_schedule failed (%s), falling back to Playwright", _sanitize_url_for_log(exc))
+
+    return _fetch_schedule_playwright(sid, pwd, weeks_ahead=weeks_ahead)
+
+
+def _fetch_schedule_playwright(sid: str, pwd: str, weeks_ahead: int | None = None) -> list[dict]:
+    """Execute Playwright schedule crawl strictly (no HTTP attempt)."""
     schedule: list[dict] = []
     extra_weeks = _resolve_weeks_ahead(weeks_ahead)
     total_weeks = 1 + extra_weeks
@@ -468,9 +497,9 @@ def fetch_schedule(
                 logger.warning("No schedule entries found in the crawled week range.")
             else:
                 logger.info("Parsed %d unique schedule entries across crawled weeks.", len(schedule))
-                logger.info("=== FINAL DEDUPLICATED SCHEDULE ===")
+                logger.debug("=== FINAL DEDUPLICATED SCHEDULE ===")
                 for i, entry in enumerate(schedule):
-                    logger.info(
+                    logger.debug(
                         "  [%d] student=%s subject=%r room=%r day=%r date=%r period=%s-%s status=%s",
                         i + 1,
                         entry.get("student_id"),
@@ -482,7 +511,7 @@ def fetch_schedule(
                         entry.get("end_period"),
                         entry.get("status"),
                     )
-                logger.info("=== END FINAL SCHEDULE ===")
+                logger.debug("=== END FINAL SCHEDULE ===")
 
         except PlaywrightTimeoutError as exc:
             raise RuntimeError(f"Playwright timed out: {exc}") from exc
@@ -551,6 +580,20 @@ def fetch_exam_schedule(
         raise ValueError("Credentials missing. Set STUDENT_ID and PASSWORD environment variables.")
 
     exams: list[dict] = []
+    http_required = os.environ.get("TDTU_HTTP_REQUIRED", "").lower() in ("true", "1", "yes")
+
+    # --- PRIMARY: Authenticated HTTP Exam Crawler ---
+    try:
+        with TDTUClient(sid, pwd) as client:
+            http_exams = fetch_exam_schedule_http(client)
+            logger.info("[crawler] HTTP fetch_exam_schedule succeeded with %d rows", len(http_exams))
+            return http_exams
+    except Exception as exc:
+        if http_required:
+            logger.error("[crawler] HTTP fetch_exam_schedule failed while TDTU_HTTP_REQUIRED=true: %s", _sanitize_url_for_log(exc))
+            raise RuntimeError(f"TDTU HTTP exam fetch failed while TDTU_HTTP_REQUIRED=true: {_sanitize_url_for_log(exc)}") from exc
+        logger.warning("[crawler] HTTP fetch_exam_schedule failed (%s), falling back to Playwright", _sanitize_url_for_log(exc))
+
     try:
         exams = _fetch_exam_schedule_from_portal(sid, pwd, weeks_ahead=weeks_ahead)
         if exams:
@@ -1997,6 +2040,27 @@ def get_current_semester(student_id: str | None = None, password: str | None = N
     if not sid or not pwd:
         return "unknown"
 
+    http_required = os.environ.get("TDTU_HTTP_REQUIRED", "").lower() in ("true", "1", "yes")
+
+    # --- PRIMARY: Authenticated HTTP ---
+    try:
+        with TDTUClient(sid, pwd) as client:
+            sem = get_current_semester_http(client)
+            if sem:
+                logger.info("[crawler] HTTP get_current_semester resolved: %s", sem)
+                return sem
+    except Exception as exc:
+        sanitized_exc = _sanitize_url_for_log(exc)
+        if http_required:
+            logger.error("[crawler] HTTP get_current_semester failed while TDTU_HTTP_REQUIRED=true: %s", sanitized_exc)
+            raise RuntimeError(f"TDTU HTTP semester fetch failed while TDTU_HTTP_REQUIRED=true: {sanitized_exc}") from exc
+        logger.warning("[crawler] HTTP get_current_semester failed (%s), falling back to Playwright", sanitized_exc)
+
+    return _get_current_semester_playwright(sid, pwd)
+
+
+def _get_current_semester_playwright(sid: str, pwd: str) -> str:
+    """Execute Playwright semester pre-check strictly (no HTTP attempt)."""
     with sync_playwright() as p:
         browser = _launch_chromium(p)
         context = browser.new_context(
@@ -2292,9 +2356,9 @@ def _log_all_table_tds(page) -> None:
     """
     try:
         tds = page.evaluate(script) or []
-        logger.info("=== RAW TABLE TD DUMP: %d non-empty <td> cells found ===", len(tds))
+        logger.debug("=== RAW TABLE TD DUMP: %d non-empty <td> cells found ===", len(tds))
         for item in tds:
-            logger.info(
+            logger.debug(
                 "  doc[%d] table[%d] row[%d] col[%d]: %s",
                 item.get("doc", 0),
                 item.get("table", -1),
@@ -2302,7 +2366,7 @@ def _log_all_table_tds(page) -> None:
                 item.get("col", -1),
                 item.get("text", ""),
             )
-        logger.info("=== END RAW TABLE TD DUMP ===")
+        logger.debug("=== END RAW TABLE TD DUMP ===")
     except Exception as exc:
         logger.warning("Failed to dump raw table <td> cells: %s", exc)
 
@@ -2325,9 +2389,9 @@ def _parse_schedule_table(page, student_id: str) -> list[dict]:
         # Grid table structure was detected (weekly_entries may be [] for an empty week).
         if weekly_entries:
             logger.info("Parsed %d entries from weekly grid table.", len(weekly_entries))
-            logger.info("=== WEEKLY GRID ENTRIES ===")
+            logger.debug("=== WEEKLY GRID ENTRIES ===")
             for i, entry in enumerate(weekly_entries):
-                logger.info(
+                logger.debug(
                     "  [%d] subject=%r room=%r day=%r date=%r period=%s-%s status=%s",
                     i + 1,
                     entry.get("subject_name"),
@@ -2338,7 +2402,7 @@ def _parse_schedule_table(page, student_id: str) -> list[dict]:
                     entry.get("end_period"),
                     entry.get("status"),
                 )
-            logger.info("=== END WEEKLY GRID ENTRIES ===")
+            logger.debug("=== END WEEKLY GRID ENTRIES ===")
         else:
             logger.info("Weekly grid table found but contains no entries for this week.")
         return weekly_entries
@@ -2404,11 +2468,11 @@ def _parse_schedule_table(page, student_id: str) -> list[dict]:
             )
 
         if entries:
-            logger.info("=== COLUMN-BASED TABLE ENTRIES ===")
-            logger.info("  Headers: %s", headers_raw)
-            logger.info("  Column mapping: %s", col)
+            logger.debug("=== COLUMN-BASED TABLE ENTRIES ===")
+            logger.debug("  Headers: %s", headers_raw)
+            logger.debug("  Column mapping: %s", col)
             for i, entry in enumerate(entries):
-                logger.info(
+                logger.debug(
                     "  [%d] subject=%r room=%r day=%r period=%s-%s",
                     i + 1,
                     entry.get("subject_name"),
@@ -2417,7 +2481,7 @@ def _parse_schedule_table(page, student_id: str) -> list[dict]:
                     entry.get("start_period"),
                     entry.get("end_period"),
                 )
-            logger.info("=== END COLUMN-BASED TABLE ENTRIES ===")
+            logger.debug("=== END COLUMN-BASED TABLE ENTRIES ===")
             return entries
 
     raise RuntimeError(
