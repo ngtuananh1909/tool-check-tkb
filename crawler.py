@@ -302,6 +302,9 @@ def fetch_schedule(
             "Credentials missing. Set STUDENT_ID and PASSWORD environment variables."
         )
 
+    extra_weeks = _resolve_weeks_ahead(weeks_ahead)
+    total_weeks = 1 + extra_weeks
+
     # --- PRIMARY: Authenticated HTTP Crawler ---
     try:
         with TDTUClient(sid, pwd) as client:
@@ -309,7 +312,7 @@ def fetch_schedule(
             logger.info("[crawler] HTTP fetch_schedule succeeded with %d rows", len(http_schedule))
             return http_schedule
     except Exception as exc:
-        logger.warning("[crawler] HTTP fetch_schedule failed (%s), falling back to Playwright", exc)
+        logger.warning("[crawler] HTTP fetch_schedule failed (%s), falling back to Playwright", _sanitize_url_for_log(exc))
 
     return _fetch_schedule_playwright(sid, pwd, weeks_ahead=weeks_ahead)
 
@@ -576,11 +579,10 @@ def fetch_exam_schedule(
     try:
         with TDTUClient(sid, pwd) as client:
             http_exams = fetch_exam_schedule_http(client)
-            if http_exams:
-                logger.info("[crawler] HTTP fetch_exam_schedule succeeded with %d rows", len(http_exams))
-                return http_exams
+            logger.info("[crawler] HTTP fetch_exam_schedule succeeded with %d rows", len(http_exams))
+            return http_exams
     except Exception as exc:
-        logger.warning("[crawler] HTTP fetch_exam_schedule failed (%s), falling back to Playwright", exc)
+        logger.warning("[crawler] HTTP fetch_exam_schedule failed (%s), falling back to Playwright", _sanitize_url_for_log(exc))
 
     try:
         exams = _fetch_exam_schedule_from_portal(sid, pwd, weeks_ahead=weeks_ahead)

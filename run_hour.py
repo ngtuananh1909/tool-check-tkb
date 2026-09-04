@@ -82,7 +82,7 @@ def run_hourly_sync() -> None:
     step_started = time.perf_counter()
     logger.info("Step 1: Crawling schedule & exam data from TDTU portal")
     try:
-        from crawler import fetch_elearning_deadlines, fetch_exam_schedule, fetch_schedule, get_current_semester
+        from crawler import fetch_elearning_deadlines
         from tdtu import fetch_portal_snapshot
 
         weeks_ahead = _resolve_crawler_weeks_ahead()

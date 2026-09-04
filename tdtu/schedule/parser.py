@@ -212,7 +212,7 @@ def parse_weekly_grid_table(html: str, student_id: str = "") -> list[dict[str, A
         if not (weekly_radio and weekly_radio.has_attr("checked")):
             return None
 
-    table = soup.find("table", id=re.compile(r".*Table1.*|.*Grid.*", re.IGNORECASE))
+    table = soup.find("table", id=re.compile(r".*tbTKBTheoTuan.*|.*Table1.*|.*Grid.*", re.IGNORECASE))
     if not table:
         return None
 
@@ -224,8 +224,10 @@ def parse_weekly_grid_table(html: str, student_id: str = "") -> list[dict[str, A
     if len(headers) < 8:
         return None
 
-    # Derive session dates from #ThoiKhoaBieu1_btnTuanHienTai
+    # Derive session dates from #ThoiKhoaBieu1_btnTuanHienTai or column headers
     dates_map: dict[str, str] = {}
+    col_days = [_normalize_day(h) for h in headers]
+
     if week_btn:
         btn_val = week_btn.get("value", "")
         matches = re.findall(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})", btn_val)
@@ -233,16 +235,35 @@ def parse_weekly_grid_table(html: str, student_id: str = "") -> list[dict[str, A
             try:
                 import datetime
                 d1, m1, y1 = int(matches[0][0]), int(matches[0][1]), int(matches[0][2])
+                d2, m2, y2 = int(matches[1][0]), int(matches[1][1]), int(matches[1][2])
                 if y1 < 100: y1 += 2000
+                if y2 < 100: y2 += 2000
                 start_dt = datetime.date(y1, m1, d1)
+                end_dt = datetime.date(y2, m2, d2)
+                if end_dt < start_dt or (end_dt - start_dt).days > 7:
+                    raise TDTUProtocolError(f"Invalid week date range bounds in control: {btn_val}")
                 for i in range(7):
                     day_dt = start_dt + datetime.timedelta(days=i)
                     day_name = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][i]
                     dates_map[day_name] = day_dt.strftime("%Y-%m-%d")
-            except ValueError:
-                pass
+            except ValueError as exc:
+                raise TDTUProtocolError(f"Invalid date format in week range control '{btn_val}': {exc}") from exc
 
-    col_days = [_normalize_day(h) for h in headers]
+    # Fallback: check header text for explicit dates if week_btn map is empty
+    if not dates_map:
+        for idx, h_text in enumerate(headers):
+            dm = re.search(r"(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2,4}))?", h_text)
+            if dm and idx < len(col_days):
+                d_val, m_val = int(dm.group(1)), int(dm.group(2))
+                y_val = int(dm.group(3)) if dm.group(3) else 2026
+                if y_val < 100: y_val += 2000
+                try:
+                    import datetime
+                    dt_obj = datetime.date(y_val, m_val, d_val)
+                    dates_map[col_days[idx]] = dt_obj.strftime("%Y-%m-%d")
+                except ValueError:
+                    pass
+
     col_dates = [dates_map.get(d, "") for d in col_days]
 
     entries: list[dict[str, Any]] = []
@@ -278,14 +299,53 @@ def parse_weekly_grid_table(html: str, student_id: str = "") -> list[dict[str, A
 
                 entry = _parse_schedule_cell_text(cell_text, day_of_week, student_id)
                 if entry:
-                    if session_date:
-                        entry["session_date"] = session_date
+                    if not session_date:
+                        raise TDTUProtocolError(
+                            f"Weekly schedule entry '{entry['subject_name']}' is missing concrete session_date"
+                        )
+                    try:
+                        import datetime
+                        datetime.date.fromisoformat(session_date)
+                    except ValueError as exc:
+                        raise TDTUProtocolError(f"Invalid session_date '{session_date}': {exc}") from exc
+
+                    entry["session_date"] = session_date
                     if entry["start_period"] == 0 and row_period > 0:
                         entry["start_period"] = row_period
-                        entry["end_period"] = row_period
+                        entry["end_period"] = row_period + 2
                     entries.append(entry)
 
     return _deduplicate_schedule(entries)
+
+
+def parse_period_range(text: str) -> tuple[int, int]:
+    """
+    Parse start and end period from cell text containing 'Tiết' or 'Period'.
+    Supports single digits (123->1-3), ranges (10-12, 1 to 3), and multi-digit sequences (101112, 131415).
+    """
+    period_match = re.search(r"(?:Tiết|Period)[:\s]*([0-9\s\-to]+)", text, re.IGNORECASE)
+    if not period_match:
+        return 0, 0
+
+    p_raw = period_match.group(1).strip()
+    if not p_raw:
+        return 0, 0
+
+    m_range = re.search(r"(\d+)\s*[-to]+\s*(\d+)", p_raw)
+    if m_range:
+        return int(m_range.group(1)), int(m_range.group(2))
+
+    clean_p = re.sub(r"\s+", "", p_raw)
+    if len(clean_p) == 6 and clean_p.isdigit():
+        p1, p2, p3 = int(clean_p[0:2]), int(clean_p[2:4]), int(clean_p[4:6])
+        if 10 <= p1 <= 16 and 10 <= p2 <= 16 and 10 <= p3 <= 16:
+            return min(p1, p2, p3), max(p1, p2, p3)
+
+    digits = [int(d) for d in clean_p if d.isdigit()]
+    if digits:
+        return min(digits), max(digits)
+
+    return 0, 0
 
 
 def _parse_schedule_cell_text(text: str, day_of_week: str, student_id: str) -> dict[str, Any] | None:
@@ -304,30 +364,17 @@ def _parse_schedule_cell_text(text: str, day_of_week: str, student_id: str) -> d
 
     full_text = " ".join(lines)
     room = ""
-    start_period = 0
-    end_period = 0
     status = detect_status(full_text)
 
-    room_match = re.search(r"(?:Phòng|Room)[:\s]*([A-Z0-9._\s-]+?)(?=\s*Tuần|\s*Week|\s*Tiết|\s*Period|\s*\n|\)|$)", full_text, re.IGNORECASE)
+    room_match = re.search(
+        r"(?:Phòng|Room)\b(?:[\s\n|]*(?:Room|Phòng)\b)*[\s\n|:]*([A-Z0-9._-]+(?:\s+[A-Z0-9._-]+)*)(?=\s*(?:\n|\(|Tuần|Week|Tiết|Period|GV|báo|vắng|nghỉ|học|bù|lhb|hủy|dời|$))",
+        full_text,
+        re.IGNORECASE,
+    )
     if room_match:
         room = room_match.group(1).strip()
 
-    period_match = re.search(r"(?:Tiết|Period)[^0-9]*(\d+)", full_text, re.IGNORECASE)
-    if period_match:
-        p_raw = period_match.group(1).strip()
-        m_range = re.search(r"(\d+)\s*[-to]+\s*(\d+)", p_raw)
-        if m_range:
-            start_period = int(m_range.group(1))
-            end_period = int(m_range.group(2))
-        else:
-            multi_digit_matches = re.findall(r"(1[0-6])", p_raw)
-            if multi_digit_matches and "".join(multi_digit_matches) == p_raw:
-                periods = [int(x) for x in multi_digit_matches]
-                start_period, end_period = min(periods), max(periods)
-            else:
-                digits = [int(d) for d in re.findall(r"\d", p_raw)]
-                if digits:
-                    start_period, end_period = min(digits), max(digits)
+    start_period, end_period = parse_period_range(full_text)
 
     return {
         "student_id": student_id,
