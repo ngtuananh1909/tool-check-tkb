@@ -13,7 +13,7 @@ from tdtu.snapshot import FetchResult, PortalSnapshot
 
 class RunHourlySyncTests(unittest.TestCase):
 
-    @patch.dict(os.environ, {"STUDENT_ID": "52500028", "PASSWORD": "pass"})
+    @patch.dict(os.environ, {"STUDENT_ID": "TEST_STUDENT_001", "PASSWORD": "TEST_PASSWORD_NOT_A_SECRET"})
     @patch("tdtu.fetch_portal_snapshot")
     @patch.object(calendar_sync, "sync_crawled_data_to_google_calendar", return_value=("", True))
     @patch("crawler.fetch_elearning_deadlines", return_value=[])
@@ -32,11 +32,11 @@ class RunHourlySyncTests(unittest.TestCase):
         mock_sync.assert_called_once_with(
             [{"subject_name": "CSDL"}],
             [{"subject_name": "Exam CSDL"}],
-            student_id="52500028",
+            student_id="TEST_STUDENT_001",
             deadlines=[],
         )
 
-    @patch.dict(os.environ, {"STUDENT_ID": "52500028", "PASSWORD": "pass"})
+    @patch.dict(os.environ, {"STUDENT_ID": "TEST_STUDENT_001", "PASSWORD": "TEST_PASSWORD_NOT_A_SECRET"})
     @patch("tdtu.fetch_portal_snapshot")
     @patch.object(calendar_sync, "sync_crawled_data_to_google_calendar", return_value=("", True))
     @patch("crawler.fetch_elearning_deadlines", return_value=[])
@@ -55,11 +55,11 @@ class RunHourlySyncTests(unittest.TestCase):
         mock_sync.assert_called_once_with(
             [],
             [],
-            student_id="52500028",
+            student_id="TEST_STUDENT_001",
             deadlines=[],
         )
 
-    @patch.dict(os.environ, {"STUDENT_ID": "52500028", "PASSWORD": "pass"})
+    @patch.dict(os.environ, {"STUDENT_ID": "TEST_STUDENT_001", "PASSWORD": "TEST_PASSWORD_NOT_A_SECRET"})
     @patch("crawler._fetch_schedule_playwright", return_value=[{"subject_name": "Fallback Class"}])
     @patch("tdtu.fetch_portal_snapshot")
     @patch.object(calendar_sync, "sync_crawled_data_to_google_calendar", return_value=("", True))
@@ -80,11 +80,11 @@ class RunHourlySyncTests(unittest.TestCase):
         mock_sync.assert_called_once_with(
             [{"subject_name": "Fallback Class"}],
             [{"subject_name": "Exam CSDL"}],
-            student_id="52500028",
+            student_id="TEST_STUDENT_001",
             deadlines=[],
         )
 
-    @patch.dict(os.environ, {"STUDENT_ID": "52500028", "PASSWORD": "pass"})
+    @patch.dict(os.environ, {"STUDENT_ID": "TEST_STUDENT_001", "PASSWORD": "TEST_PASSWORD_NOT_A_SECRET"})
     @patch("crawler._fetch_exam_schedule_from_portal", return_value=[{"subject_name": "Fallback Exam"}])
     @patch("tdtu.fetch_portal_snapshot")
     @patch.object(calendar_sync, "sync_crawled_data_to_google_calendar", return_value=("", True))
@@ -105,11 +105,11 @@ class RunHourlySyncTests(unittest.TestCase):
         mock_sync.assert_called_once_with(
             [{"subject_name": "CSDL"}],
             [{"subject_name": "Fallback Exam"}],
-            student_id="52500028",
+            student_id="TEST_STUDENT_001",
             deadlines=[],
         )
 
-    @patch.dict(os.environ, {"STUDENT_ID": "52500028", "PASSWORD": "pass"})
+    @patch.dict(os.environ, {"STUDENT_ID": "TEST_STUDENT_001", "PASSWORD": "TEST_PASSWORD_NOT_A_SECRET"})
     @patch("crawler._fetch_schedule_playwright", side_effect=RuntimeError("Playwright failed"))
     @patch("crawler._fetch_exam_schedule_from_portal", side_effect=RuntimeError("Playwright failed"))
     @patch("tdtu.fetch_portal_snapshot")
@@ -131,7 +131,7 @@ class RunHourlySyncTests(unittest.TestCase):
         mock_sync.assert_called_once_with(
             None,
             None,
-            student_id="52500028",
+            student_id="TEST_STUDENT_001",
             deadlines=[],
         )
 

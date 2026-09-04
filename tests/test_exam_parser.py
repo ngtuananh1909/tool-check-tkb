@@ -38,5 +38,13 @@ class TestExamParser(unittest.TestCase):
         self.assertEqual(ex2["exam_type"], "Trắc nghiệm")
 
 
+    def test_parse_date_iso_semester_boundary(self) -> None:
+        from tdtu.exams.parser import parse_date_iso
+        self.assertEqual(parse_date_iso("15/12", semester_hint="HK1/2026-2027"), "2026-12-15")
+        self.assertEqual(parse_date_iso("15/04", semester_hint="HK2/2026-2027"), "2027-04-15")
+        self.assertEqual(parse_date_iso("15/09/2026"), "2026-09-15")
+        self.assertEqual(parse_date_iso("31/02/2026"), "")  # Invalid date rejected
+
+
 if __name__ == "__main__":
     unittest.main()

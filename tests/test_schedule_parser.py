@@ -81,5 +81,68 @@ class TestScheduleParser(unittest.TestCase):
         self.assertTrue(opts[1]["selected"])
 
 
+    def test_parse_period_range(self) -> None:
+        from tdtu.schedule.parser import parse_period_range
+        self.assertEqual(parse_period_range("Tiết: 123"), (1, 3))
+        self.assertEqual(parse_period_range("Tiết: 456"), (4, 6))
+        self.assertEqual(parse_period_range("Tiết: 10-12"), (10, 12))
+        self.assertEqual(parse_period_range("Tiết: 101112"), (10, 12))
+        self.assertEqual(parse_period_range("Tiết: 131415"), (13, 15))
+        self.assertEqual(parse_period_range("Tiết: 1 - 3"), (1, 3))
+        self.assertEqual(parse_period_range("Period: 10 to 12"), (10, 12))
+
+    def test_parse_weekly_grid_table_current_week(self) -> None:
+        from tdtu.schedule.parser import parse_weekly_grid_table
+        path = FIXTURES_DIR / "schedule_weekly_current.html"
+        with open(path, "r", encoding="utf-8") as f:
+            html = f.read()
+
+        entries = parse_weekly_grid_table(html, student_id="TEST_STUDENT_001")
+        self.assertIsNotNone(entries)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["subject_name"], "Công nghệ phần mềm")
+        self.assertEqual(entries[0]["room"], "A0101")
+        self.assertEqual(entries[0]["day_of_week"], "Monday")
+        self.assertEqual(entries[0]["session_date"], "2026-09-01")
+        self.assertEqual(entries[0]["start_period"], 1)
+        self.assertEqual(entries[0]["end_period"], 3)
+
+    def test_parse_weekly_grid_table_next_week(self) -> None:
+        from tdtu.schedule.parser import parse_weekly_grid_table
+        path = FIXTURES_DIR / "schedule_weekly_next.html"
+        with open(path, "r", encoding="utf-8") as f:
+            html = f.read()
+
+        entries = parse_weekly_grid_table(html, student_id="TEST_STUDENT_001")
+        self.assertIsNotNone(entries)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["subject_name"], "Hệ quản trị CSDL")
+        self.assertEqual(entries[0]["room"], "B0202")
+        self.assertEqual(entries[0]["day_of_week"], "Tuesday")
+        self.assertEqual(entries[0]["session_date"], "2026-09-09")
+        self.assertEqual(entries[0]["start_period"], 4)
+        self.assertEqual(entries[0]["end_period"], 6)
+
+    def test_parse_weekly_grid_table_valid_empty_week(self) -> None:
+        from tdtu.schedule.parser import parse_weekly_grid_table
+        path = FIXTURES_DIR / "schedule_weekly_empty.html"
+        with open(path, "r", encoding="utf-8") as f:
+            html = f.read()
+
+        entries = parse_weekly_grid_table(html, student_id="TEST_STUDENT_001")
+        self.assertIsNotNone(entries)
+        self.assertEqual(entries, [])
+
+    def test_parse_weekly_grid_table_missing_dates_raises_protocol_error(self) -> None:
+        from tdtu.exceptions import TDTUProtocolError
+        from tdtu.schedule.parser import parse_weekly_grid_table
+        path = FIXTURES_DIR / "schedule_weekly_missing_dates.html"
+        with open(path, "r", encoding="utf-8") as f:
+            html = f.read()
+
+        with self.assertRaises(TDTUProtocolError):
+            parse_weekly_grid_table(html, student_id="TEST_STUDENT_001")
+
+
 if __name__ == "__main__":
     unittest.main()

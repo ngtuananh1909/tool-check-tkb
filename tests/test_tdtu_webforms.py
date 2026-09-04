@@ -46,13 +46,13 @@ class TestTDTUWebForms(unittest.TestCase):
         r2.url = "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx"
         r2.text = html_resp_2
 
-        mock_sess.post.side_effect = [r1, r2]
+        mock_sess.request.side_effect = [r1, r2]
 
         page = WebFormsPage(session=mock_sess, url="https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx", html=html_initial)
 
         # POST #1: Should use STATE_A
         page.postback(event_target="Btn1")
-        post_data_1 = mock_sess.post.call_args_list[0][1]["data"]
+        post_data_1 = mock_sess.request.call_args_list[0][1]["data"]
         self.assertEqual(post_data_1["__VIEWSTATE"], "STATE_A")
 
         # Page state should now be updated to STATE_B
@@ -60,7 +60,7 @@ class TestTDTUWebForms(unittest.TestCase):
 
         # POST #2: Must use STATE_B (returned by POST #1), NOT stale STATE_A
         page.postback(event_target="Btn2")
-        post_data_2 = mock_sess.post.call_args_list[1][1]["data"]
+        post_data_2 = mock_sess.request.call_args_list[1][1]["data"]
         self.assertEqual(post_data_2["__VIEWSTATE"], "STATE_B")
 
 

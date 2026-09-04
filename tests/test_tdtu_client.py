@@ -29,9 +29,11 @@ class TestTDTUClient(unittest.TestCase):
 
         r1 = MagicMock()
         r1.status_code = 200
+        r1.url = "https://old-stdportal.tdtu.edu.vn/Login/"
         
         r2 = MagicMock()
         r2.status_code = 200
+        r2.url = "https://old-stdportal.tdtu.edu.vn/Login/SignIn"
         r2.json.return_value = {
             "result": "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx?Token=MOCK_TOK&RequestId=MOCK_REQ"
         }
@@ -41,7 +43,7 @@ class TestTDTUClient(unittest.TestCase):
         r3.url = "https://lichhoc-lichthi.tdtu.edu.vn/tkb2.aspx?Token=MOCK_TOK&RequestId=MOCK_REQ"
         r3.text = '<html><input type="hidden" name="__VIEWSTATE" value="VS"/></html>'
 
-        mock_sess.get.side_effect = [r1, r3]
+        mock_sess.request.side_effect = [r1, r3]
         mock_sess.post.return_value = r2
 
         client = TDTUClient("TEST_STUDENT_001", "TEST_PASSWORD_NOT_A_SECRET", session=mock_sess)
@@ -57,12 +59,14 @@ class TestTDTUClient(unittest.TestCase):
 
         r1 = MagicMock()
         r1.status_code = 200
+        r1.url = "https://old-stdportal.tdtu.edu.vn/Login/"
         
         r2 = MagicMock()
         r2.status_code = 200
+        r2.url = "https://old-stdportal.tdtu.edu.vn/Login/SignIn"
         r2.json.return_value = {"result": "fail"}
 
-        mock_sess.get.return_value = r1
+        mock_sess.request.return_value = r1
         mock_sess.post.return_value = r2
 
         client = TDTUClient("TEST_STUDENT_001", "TEST_PASSWORD_WRONG", session=mock_sess)
@@ -75,18 +79,48 @@ class TestTDTUClient(unittest.TestCase):
 
         r1 = MagicMock()
         r1.status_code = 200
+        r1.url = "https://old-stdportal.tdtu.edu.vn/Login/"
         
         r2 = MagicMock()
         r2.status_code = 200
+        r2.url = "https://old-stdportal.tdtu.edu.vn/Login/SignIn"
         r2.json.return_value = {"result": "https://evil-site.com/steal-creds"}
 
-        mock_sess.get.return_value = r1
+        mock_sess.request.return_value = r1
         mock_sess.post.return_value = r2
 
         client = TDTUClient("TEST_STUDENT_001", "TEST_PASSWORD_NOT_A_SECRET", session=mock_sess)
         with self.assertRaises(TDTUAuthenticationError) as ctx:
             client.login()
         self.assertIn("Untrusted redirect domain", str(ctx.exception))
+
+    def test_safe_request_http_downgrade_rejected(self) -> None:
+        from tdtu.client import safe_request
+        mock_sess = MagicMock()
+        with self.assertRaises(TDTUAuthenticationError) as ctx:
+            safe_request(mock_sess, "GET", "ftp://old-stdportal.tdtu.edu.vn/Login/")
+        self.assertIn("non-HTTPS scheme", str(ctx.exception))
+
+    def test_safe_request_untrusted_host_rejected(self) -> None:
+        from tdtu.client import safe_request
+        mock_sess = MagicMock()
+        with self.assertRaises(TDTUAuthenticationError) as ctx:
+            safe_request(mock_sess, "GET", "https://malicious.com/phishing")
+        self.assertIn("Untrusted host", str(ctx.exception))
+
+    def test_safe_request_too_many_redirects(self) -> None:
+        from tdtu.client import safe_request
+        from tdtu.exceptions import TDTUProtocolError
+        mock_sess = MagicMock()
+        r = MagicMock()
+        r.status_code = 302
+        r.url = "https://old-stdportal.tdtu.edu.vn/Login/"
+        r.headers = {"Location": "https://old-stdportal.tdtu.edu.vn/Login/"}
+        mock_sess.request.return_value = r
+
+        with self.assertRaises(TDTUProtocolError) as ctx:
+            safe_request(mock_sess, "GET", "https://old-stdportal.tdtu.edu.vn/Login/", max_redirects=2)
+        self.assertIn("Too many redirects", str(ctx.exception))
 
 
 if __name__ == "__main__":
