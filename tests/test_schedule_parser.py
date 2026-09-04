@@ -224,6 +224,59 @@ class TestScheduleParser(unittest.TestCase):
             parse_weekly_grid_table(html)
         self.assertIn("weekday does not match", str(ctx.exception))
 
+    def test_exact_week_range_containment_out_of_bounds_sunday_raises_error(self) -> None:
+        from tdtu.exceptions import TDTUProtocolError
+        from tdtu.schedule.parser import parse_weekly_grid_table
+        # Case 1: week range 31/08/2026 - 06/09/2026, Sunday header claims 30/08 (outside range)
+        html = """
+        <input type="submit" name="ThoiKhoaBieu1$btnTuanHienTai" value="Tuần: 31/08/2026 - 06/09/2026" />
+        <table id="ThoiKhoaBieu1_Table1">
+            <tr class="Headerrow">
+                <td>Tiết</td>
+                <td>Thứ 2 (31/08)</td><td>Thứ 3 (01/09)</td><td>Thứ 4 (02/09)</td>
+                <td>Thứ 5 (03/09)</td><td>Thứ 6 (04/09)</td><td>Thứ 7 (05/09)</td><td>Chủ nhật (30/08)</td>
+            </tr>
+        </table>
+        """
+        with self.assertRaises(TDTUProtocolError) as ctx:
+            parse_weekly_grid_table(html)
+        self.assertIn("falls outside week range", str(ctx.exception))
+
+    def test_exact_week_range_containment_out_of_bounds_monday_raises_error(self) -> None:
+        from tdtu.exceptions import TDTUProtocolError
+        from tdtu.schedule.parser import parse_weekly_grid_table
+        # Case 2: week range 31/08/2026 - 06/09/2026, Monday header claims 07/09 (outside range)
+        html = """
+        <input type="submit" name="ThoiKhoaBieu1$btnTuanHienTai" value="Tuần: 31/08/2026 - 06/09/2026" />
+        <table id="ThoiKhoaBieu1_Table1">
+            <tr class="Headerrow">
+                <td>Tiết</td>
+                <td>Thứ 2 (07/09)</td><td>Thứ 3 (01/09)</td><td>Thứ 4 (02/09)</td>
+                <td>Thứ 5 (03/09)</td><td>Thứ 6 (04/09)</td><td>Thứ 7 (05/09)</td><td>Chủ nhật (06/09)</td>
+            </tr>
+        </table>
+        """
+        with self.assertRaises(TDTUProtocolError) as ctx:
+            parse_weekly_grid_table(html)
+        self.assertIn("falls outside week range", str(ctx.exception))
+
+    def test_exact_week_range_containment_all_seven_dates_inside_success(self) -> None:
+        from tdtu.schedule.parser import parse_weekly_grid_table
+        # Case 3: all seven exact dates inside range
+        html = """
+        <input type="submit" name="ThoiKhoaBieu1$btnTuanHienTai" value="Tuần: 31/08/2026 - 06/09/2026" />
+        <table id="ThoiKhoaBieu1_Table1">
+            <tr class="Headerrow">
+                <td>Tiết</td>
+                <td>Thứ 2 (31/08)</td><td>Thứ 3 (01/09)</td><td>Thứ 4 (02/09)</td>
+                <td>Thứ 5 (03/09)</td><td>Thứ 6 (04/09)</td><td>Thứ 7 (05/09)</td><td>Chủ nhật (06/09)</td>
+            </tr>
+            <tr><td>Tiết 1</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>
+        </table>
+        """
+        entries = parse_weekly_grid_table(html)
+        self.assertEqual(entries, [])
+
 
 if __name__ == "__main__":
     unittest.main()

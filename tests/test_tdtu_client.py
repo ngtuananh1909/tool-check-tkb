@@ -108,7 +108,7 @@ class TestTDTUClient(unittest.TestCase):
         r1 = MagicMock()
         r1.status_code = 302
         r1.url = "https://old-stdportal.tdtu.edu.vn/Login/"
-        r1.headers = {"Location": "http://untrusted-host.com/Login/Insecure"}
+        r1.headers = {"Location": "http://old-stdportal.tdtu.edu.vn/Login/Unsafe"}
         mock_sess.request.return_value = r1
 
         with self.assertRaises(TDTUAuthenticationError) as ctx:
