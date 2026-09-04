@@ -135,6 +135,30 @@ class RunHourlySyncTests(unittest.TestCase):
             deadlines=[],
         )
 
+    @patch.dict(os.environ, {"STUDENT_ID": "TEST_STUDENT_001", "PASSWORD": "TEST_PASSWORD_NOT_A_SECRET", "TDTU_HTTP_REQUIRED": "true"})
+    @patch("crawler._fetch_schedule_playwright")
+    @patch("crawler._fetch_exam_schedule_from_portal")
+    @patch("tdtu.fetch_portal_snapshot")
+    @patch.object(calendar_sync, "sync_crawled_data_to_google_calendar")
+    @patch("crawler.fetch_elearning_deadlines")
+    @patch.object(run_hour, "_load_dotenv")
+    def test_http_required_fails_fast_without_playwright_fallback(
+        self, mock_dotenv: MagicMock, mock_deadlines: MagicMock, mock_sync: MagicMock, mock_snapshot: MagicMock, mock_pw_exam: MagicMock, mock_pw_sched: MagicMock
+    ) -> None:
+        mock_snapshot.return_value = PortalSnapshot(
+            semester=FetchResult(success=True, data="HK1/2026-2027"),
+            schedule=FetchResult(success=False, data=None, error="HTTP Schedule Fail"),
+            exams=FetchResult(success=True, data=[]),
+        )
+
+        with self.assertRaises(SystemExit) as cm:
+            run_hour.run_hourly_sync()
+
+        self.assertEqual(cm.exception.code, 1)
+        mock_pw_sched.assert_not_called()
+        mock_pw_exam.assert_not_called()
+        mock_sync.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

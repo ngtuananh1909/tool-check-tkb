@@ -83,4 +83,5 @@ jobs:
       - name: Run hourly data collection and sync
         env:
           GOOGLE_SERVICE_ACCOUNT_FILE: ${{ github.workspace }}/service-account.json
+          TDTU_HTTP_REQUIRED: "true"
         run: python run_hour.py

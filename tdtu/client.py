@@ -140,6 +140,8 @@ class TDTUClient:
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/124.0.0.0 Safari/537.36"
                 ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
             }
         )
         self.token: str = ""
@@ -169,15 +171,30 @@ class TDTUClient:
             r1 = safe_request(self.session, "GET", PORTAL_LOGIN_URL, timeout=self.timeout)
             r1.raise_for_status()
 
-            # 2. Submit credentials to SignIn API endpoint
+            logger.info(
+                "[tdtu.auth.diag] Step 1 GET /Login/: status=%d, content_type=%s, cookies=%s, headers=%s",
+                r1.status_code,
+                r1.headers.get("Content-Type", ""),
+                list(r1.cookies.keys()),
+                list(r1.request.headers.keys()),
+            )
+
+            # 2. Submit credentials to SignIn API endpoint with full browser AJAX headers
             payload = {
                 "user": self.student_id,
                 "pass": self.password,
             }
+            signin_headers = {
+                "Referer": PORTAL_LOGIN_URL,
+                "Origin": "https://old-stdportal.tdtu.edu.vn",
+                "X-Requested-With": "XMLHttpRequest",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            }
             r2 = self.session.post(
                 PORTAL_SIGNIN_URL,
                 data=payload,
-                headers={"Referer": PORTAL_LOGIN_URL},
+                headers=signin_headers,
                 allow_redirects=False,
                 timeout=self.timeout,
             )
@@ -187,6 +204,12 @@ class TDTUClient:
             try:
                 data = r2.json()
             except ValueError as exc:
+                logger.warning(
+                    "[tdtu.auth.diag] Step 2 POST /Login/SignIn non-JSON: status=%d, content_type=%s, excerpt=%s",
+                    r2.status_code,
+                    r2.headers.get("Content-Type", ""),
+                    r2.text[:100],
+                )
                 raise TDTUAuthenticationError(
                     f"SignIn response is not valid JSON: {r2.text[:100]}"
                 ) from exc
@@ -196,6 +219,16 @@ class TDTUClient:
 
             result_val = str(data.get("result", "")).strip()
             url_val = str(data.get("url", "")).strip()
+
+            result_category = result_val if result_val in ("fail", "success", "T", "*") else "other"
+            logger.info(
+                "[tdtu.auth.diag] Step 2 POST /Login/SignIn: status=%d, content_type=%s, cookies=%s, json_keys=%s, result_category=%s",
+                r2.status_code,
+                r2.headers.get("Content-Type", ""),
+                list(r2.cookies.keys()),
+                list(data.keys()),
+                result_category,
+            )
 
             if result_val in ("fail", "T", "*", "chualamcamketgiaothong", "chualamcamketmatuy", "chuathuchienshcd"):
                 raise TDTUAuthenticationError(f"Login failed with code: {result_val}")
@@ -234,6 +267,14 @@ class TDTUClient:
                 raise TDTUAuthenticationError(
                     f"Final redirect landed on untrusted host: {final_parsed.hostname}"
                 )
+
+            logger.info(
+                "[tdtu.auth.diag] Step 3 Redirect GET: status=%d, content_type=%s, cookies=%s, final_host=%s",
+                r3.status_code,
+                r3.headers.get("Content-Type", ""),
+                list(r3.cookies.keys()),
+                final_parsed.hostname,
+            )
 
             # Extract Token and RequestId from final URL or redirect URL
             params = parse_qs(final_parsed.query)

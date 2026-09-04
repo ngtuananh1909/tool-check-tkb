@@ -1029,11 +1029,9 @@ def _replace_bot_events_for_range(
 
     if skipped_other_owner:
         logger.warning(
-            "Sync (managed=%s) skipped %d event(s) owned by other source types. "
-            "Sample source_keys: %s",
+            "Sync (managed=%s) skipped %d event(s) owned by other source types.",
             sorted(managed),
             len(skipped_other_owner),
-            skipped_other_owner[:5],
         )
     if deleted_count:
         logger.info(

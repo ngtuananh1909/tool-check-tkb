@@ -101,6 +101,58 @@ class TestCrawlerCompatibility(unittest.TestCase):
         self.assertEqual(res, [{"subject_name": "Math Exam"}])
         mock_portal.assert_called_once()
 
+    @patch.dict("os.environ", {"TDTU_HTTP_REQUIRED": "true"})
+    @patch("crawler._fetch_schedule_playwright")
+    @patch("crawler.fetch_schedule_http")
+    @patch("crawler.TDTUClient")
+    def test_fetch_schedule_http_required_failure_raises_runtime_error(self, mock_client, mock_http, mock_playwright):
+        mock_http.side_effect = Exception("HTTP login fail")
+        with self.assertRaises(RuntimeError) as cm:
+            fetch_schedule("TEST_STUDENT_001", "TEST_PASSWORD_NOT_A_SECRET")
+        self.assertIn("TDTU_HTTP_REQUIRED=true", str(cm.exception))
+        mock_playwright.assert_not_called()
+
+    @patch.dict("os.environ", {"TDTU_HTTP_REQUIRED": "true"})
+    @patch("crawler._fetch_exam_schedule_from_portal")
+    @patch("crawler.fetch_exam_schedule_http")
+    @patch("crawler.TDTUClient")
+    def test_fetch_exam_schedule_http_required_failure_raises_runtime_error(self, mock_client, mock_http, mock_portal):
+        mock_http.side_effect = Exception("HTTP exam fail")
+        with self.assertRaises(RuntimeError) as cm:
+            fetch_exam_schedule("TEST_STUDENT_001", "TEST_PASSWORD_NOT_A_SECRET")
+        self.assertIn("TDTU_HTTP_REQUIRED=true", str(cm.exception))
+        mock_portal.assert_not_called()
+
+    def test_privacy_logging_no_timetable_content_in_info_logs(self):
+        import logging
+        from crawler import _parse_schedule_table
+
+        mock_page = MagicMock()
+        mock_page.evaluate.return_value = [
+            {"doc": 0, "table": 0, "row": 1, "col": 0, "text": "Secret Subject Name 101"},
+        ]
+        # Return weekly entries
+        with patch("crawler._parse_weekly_grid_table") as mock_grid:
+            mock_grid.return_value = [
+                {
+                    "student_id": "S123",
+                    "subject_name": "Secret Course Alpha",
+                    "room": "A0101",
+                    "day_of_week": "Monday",
+                    "session_date": "2026-09-07",
+                    "start_period": 1,
+                    "end_period": 3,
+                    "status": "normal",
+                }
+            ]
+            with self.assertLogs("crawler", level="INFO") as log_ctx:
+                _parse_schedule_table(mock_page, "S123")
+
+            info_logs = "\n".join(log_ctx.output)
+            self.assertNotIn("Secret Course Alpha", info_logs)
+            self.assertNotIn("Secret Subject Name 101", info_logs)
+            self.assertIn("Parsed 1 entries from weekly grid table.", info_logs)
+
 
 if __name__ == "__main__":
     unittest.main()

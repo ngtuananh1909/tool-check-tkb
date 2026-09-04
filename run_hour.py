@@ -90,6 +90,7 @@ def run_hourly_sync() -> None:
 
         schedule = None
         exams = None
+        http_required = os.environ.get("TDTU_HTTP_REQUIRED", "").lower() in ("true", "1", "yes")
 
         # Attempt shared single-login HTTP snapshot
         snapshot = fetch_portal_snapshot(student_id, password, weeks_ahead=1 + weeks_ahead)
@@ -98,6 +99,8 @@ def run_hourly_sync() -> None:
         if snapshot.semester.success and snapshot.semester.data:
             logger.info("Active semester on portal: %s", snapshot.semester.data)
         else:
+            if http_required:
+                raise RuntimeError(f"Semester HTTP fetch failed while TDTU_HTTP_REQUIRED=true: {snapshot.semester.error}")
             try:
                 from crawler import _get_current_semester_playwright
                 sem = _get_current_semester_playwright(student_id, password)
@@ -110,6 +113,8 @@ def run_hourly_sync() -> None:
             schedule = snapshot.schedule.data
             logger.info("Schedule HTTP crawler returned %d row(s).", len(schedule) if schedule is not None else 0)
         else:
+            if http_required:
+                raise RuntimeError(f"Schedule HTTP fetch failed while TDTU_HTTP_REQUIRED=true: {snapshot.schedule.error}")
             logger.warning("Schedule HTTP crawler failed (%s); triggering Playwright fallback...", snapshot.schedule.error)
             try:
                 from crawler import _fetch_schedule_playwright
@@ -124,6 +129,8 @@ def run_hourly_sync() -> None:
             exams = snapshot.exams.data
             logger.info("Exam HTTP crawler returned %d row(s).", len(exams) if exams is not None else 0)
         else:
+            if http_required:
+                raise RuntimeError(f"Exam HTTP fetch failed while TDTU_HTTP_REQUIRED=true: {snapshot.exams.error}")
             logger.warning("Exam HTTP crawler failed (%s); triggering Playwright fallback...", snapshot.exams.error)
             try:
                 from crawler import _fetch_exam_schedule_from_portal
