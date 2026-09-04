@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 import logging
 from typing import Any, Generic, TypeVar
 
-from tdtu.client import TDTUClient
+from tdtu.client import TDTUClient, sanitize_url
 from tdtu.exceptions import TDTUError
 from tdtu.exams.service import fetch_exam_schedule_http
 from tdtu.schedule.service import fetch_schedule_http, get_current_semester_http
@@ -15,6 +15,14 @@ from tdtu.schedule.service import fetch_schedule_http, get_current_semester_http
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+def mask_student_id(student_id: str) -> str:
+    """Mask student ID for log privacy, showing at most last 3 characters."""
+    sid = str(student_id or "")
+    if len(sid) <= 3:
+        return "***"
+    return f"***{sid[-3:]}"
 
 
 @dataclass
@@ -46,7 +54,7 @@ def fetch_portal_snapshot(
     Perform a complete hourly portal sync using ONE login session.
     Isolated per-operation error handling so failure in exams does NOT discard schedule.
     """
-    logger.info("[tdtu.snapshot] Starting single-login portal snapshot for ID: %s", student_id)
+    logger.info("[tdtu.snapshot] Starting single-login portal snapshot for ID: %s", mask_student_id(student_id))
     snapshot = PortalSnapshot()
 
     try:
@@ -56,8 +64,9 @@ def fetch_portal_snapshot(
                 sem = get_current_semester_http(client)
                 snapshot.semester = FetchResult(success=True, data=sem, source="http")
             except Exception as exc:
-                logger.warning("[tdtu.snapshot] Semester HTTP fetch failed: %s", exc)
-                snapshot.semester = FetchResult(success=False, data=None, error=str(exc), source="http")
+                err_msg = sanitize_url(exc)
+                logger.warning("[tdtu.snapshot] Semester HTTP fetch failed: %s", err_msg)
+                snapshot.semester = FetchResult(success=False, data=None, error=err_msg, source="http")
 
             # 2. Schedule operation
             try:
@@ -68,8 +77,9 @@ def fetch_portal_snapshot(
                 )
                 snapshot.schedule = FetchResult(success=True, data=sched, source="http")
             except Exception as exc:
-                logger.warning("[tdtu.snapshot] Schedule HTTP fetch failed: %s", exc)
-                snapshot.schedule = FetchResult(success=False, data=None, error=str(exc), source="http")
+                err_msg = sanitize_url(exc)
+                logger.warning("[tdtu.snapshot] Schedule HTTP fetch failed: %s", err_msg)
+                snapshot.schedule = FetchResult(success=False, data=None, error=err_msg, source="http")
 
             # 3. Exam operation
             try:
@@ -79,17 +89,19 @@ def fetch_portal_snapshot(
                 )
                 snapshot.exams = FetchResult(success=True, data=exams, source="http")
             except Exception as exc:
-                logger.warning("[tdtu.snapshot] Exam HTTP fetch failed: %s", exc)
-                snapshot.exams = FetchResult(success=False, data=None, error=str(exc), source="http")
+                err_msg = sanitize_url(exc)
+                logger.warning("[tdtu.snapshot] Exam HTTP fetch failed: %s", err_msg)
+                snapshot.exams = FetchResult(success=False, data=None, error=err_msg, source="http")
 
     except TDTUError as exc:
-        logger.warning("[tdtu.snapshot] Client authentication / connection failed: %s", exc)
-        snapshot.semester = FetchResult(success=False, data=None, error=str(exc), source="http")
-        snapshot.schedule = FetchResult(success=False, data=None, error=str(exc), source="http")
-        snapshot.exams = FetchResult(success=False, data=None, error=str(exc), source="http")
+        err_msg = sanitize_url(exc)
+        logger.warning("[tdtu.snapshot] Client authentication / connection failed: %s", err_msg)
+        snapshot.semester = FetchResult(success=False, data=None, error=err_msg, source="http")
+        snapshot.schedule = FetchResult(success=False, data=None, error=err_msg, source="http")
+        snapshot.exams = FetchResult(success=False, data=None, error=err_msg, source="http")
     except Exception as exc:
-        logger.error("[tdtu.snapshot] Unexpected error during portal snapshot: %s", exc)
-        err_msg = f"Unexpected error: {exc}"
+        err_msg = sanitize_url(f"Unexpected error: {exc}")
+        logger.error("[tdtu.snapshot] Unexpected error during portal snapshot: %s", err_msg)
         snapshot.semester = FetchResult(success=False, data=None, error=err_msg, source="http")
         snapshot.schedule = FetchResult(success=False, data=None, error=err_msg, source="http")
         snapshot.exams = FetchResult(success=False, data=None, error=err_msg, source="http")
