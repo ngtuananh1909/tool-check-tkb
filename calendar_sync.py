@@ -141,6 +141,7 @@ def sync_crawled_data_to_google_calendar(
     exams: list[dict] | None,
     student_id: str | None = None,
     deadlines: list[dict] | None = None,
+    deadline_window: tuple[dt.datetime, dt.datetime] | None = None,
 ) -> tuple[str, bool]:
     """Sync raw crawled data without deleting sources whose crawl failed.
 
@@ -149,6 +150,13 @@ def sync_crawled_data_to_google_calendar(
     collected source types are reconciled, protecting existing Calendar events
     during a partial crawler outage.
     """
+    if deadlines is not None and deadline_window is None:
+        raise ValueError(
+            "deadlines list provided without authoritative deadline_window; sync aborted to prevent global deletion"
+        )
+    if deadlines is None and deadline_window is not None:
+        raise ValueError("deadline_window provided while deadlines is None")
+
     target_date = local_today()
 
     session_rows = class_sessions or []
@@ -191,7 +199,7 @@ def sync_crawled_data_to_google_calendar(
 
     service, service_account_email = _build_calendar_service(service_account_json, service_account_file)
     _validate_calendar_target(service, calendar_id, service_account_email)
-    _replace_bot_events_for_range(service, calendar_id, sync_items, student_id, managed)
+    _replace_bot_events_for_range(service, calendar_id, sync_items, student_id, managed, deadline_window=deadline_window)
 
     logger.info(
         "Synced %d event(s) to Google Calendar '%s' directly from crawler (managed=%s).",
@@ -949,12 +957,38 @@ def _build_calendar_events(
     return [item["payload"] for item in _build_sync_items(schedule_rows, appointments, [], target_date)]
 
 
+def _parse_calendar_event_start(event: dict) -> dt.datetime | None:
+    start = event.get("start") or {}
+    if not isinstance(start, dict):
+        return None
+    timezone = os.environ.get("APP_TIMEZONE", "Asia/Ho_Chi_Minh")
+    try:
+        tz = ZoneInfo(timezone)
+    except Exception:
+        tz = ZoneInfo("Asia/Ho_Chi_Minh")
+
+    if start.get("dateTime"):
+        try:
+            dt_obj = dt.datetime.fromisoformat(str(start["dateTime"]).replace("Z", "+00:00"))
+            return dt_obj.replace(tzinfo=tz) if dt_obj.tzinfo is None else dt_obj.astimezone(tz)
+        except ValueError:
+            return None
+    elif start.get("date"):
+        try:
+            d = dt.date.fromisoformat(str(start["date"]))
+            return dt.datetime.combine(d, dt.time.min).replace(tzinfo=tz)
+        except ValueError:
+            return None
+    return None
+
+
 def _replace_bot_events_for_range(
     service: Resource,
     calendar_id: str,
     sync_items: list[dict],
     student_id: str | None,
     managed_source_types: frozenset[str] | set[str],
+    deadline_window: tuple[dt.datetime, dt.datetime] | None = None,
 ) -> None:
     """Reconcile bot-owned events with the desired ``sync_items``.
 
@@ -1010,6 +1044,18 @@ def _replace_bot_events_for_range(
         if event_source_type not in managed:
             skipped_other_owner.append(source_key)
             continue
+
+        # Window safety guard for deadlines: PRESERVE deadlines outside [window_start, window_end)
+        if event_source_type == SYNC_SOURCE_DEADLINE:
+            if deadline_window is None:
+                logger.warning("Skipping deadline deletion because deadline_window is missing.")
+                continue
+            window_start, window_end = deadline_window
+            event_start_dt = _parse_calendar_event_start(event)
+            if event_start_dt and not (window_start <= event_start_dt < window_end):
+                logger.debug("Preserving Google deadline event outside sync window: %s", source_key)
+                continue
+
         event_id = str(event.get("id") or "").strip()
         if event_id:
             _safe_delete_calendar_event(service, calendar_id, event_id)
