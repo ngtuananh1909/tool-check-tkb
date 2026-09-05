@@ -121,10 +121,10 @@ Observed Network Activity:
 
 | Needed field | API field/path | Notes |
 |---|---|---|
-| event ID | `id` | Example: 392689. This is the stable Moodle event identity. |
-| course ID | `course.id` | E.g., 57275 |
+| event ID | `id` | Example: 100001. This is the stable Moodle event identity. |
+| course ID | `course.id` | E.g., 98765 |
 | course name | `course.fullname` | E.g., "HK1_2026_502051_..." |
-| activity name | `name` | E.g., "Nộp bài thực hành 3 is due" |
+| activity name | `name` | E.g., "Lab Assignment 3 is due" |
 | URL | `url` | E.g., "https://elearning.../mod/assign/view.php?id=..." |
 | timestamp | `timesort` | Unix timestamp, e.g. 1788973200 |
 | event type | `eventtype` | "due", "close", "open" |
@@ -153,8 +153,8 @@ The `core_calendar_get_action_events_by_timesort` API provides pagination:
 - **Parameters**: Use `timesortfrom`, `timesortto`, `limitnum`, and `aftereventid`.
 - **Indicators**: The response includes `firstid`, `lastid`, and `events`.
 - **Empirical Test Results (`limitnum=2`)**:
-  - Page 1 (`aftereventid=None`): Returned 2 events (`firstid=393604, lastid=392689`).
-  - Page 2 (`aftereventid=392689`): Returned 2 events (`firstid=387324, lastid=388571`).
+  - Page 1 (`aftereventid=None`): Returned 2 events (`firstid=100002, lastid=100001`).
+  - Page 2 (`aftereventid=100001`): Returned 2 events (`firstid=100000, lastid=99999`).
   - **Page Boundary Overlap**: 0 items. Passing `aftereventid = lastid` fetches strictly after `lastid`, preventing duplicate boundary events.
   - **Cursor Progression**: Clean, strictly advancing based on `lastid`.
 - **Date Range Filtering Test**:
@@ -188,16 +188,16 @@ The `core_calendar_get_action_events_by_timesort` API provides pagination:
 
 ```python
 {
-    "course_id": "57275",
-    "course_name": "HK1_2026_502051_Hệ cơ sở dữ liệu_N01_T01",
-    "activity_name": "Nộp bài thực hành 3",
+    "course_id": "98765",
+    "course_name": "HK1_2026_502051_Database Systems",
+    "activity_name": "Lab Assignment 3",
     "due_date": "2026-09-10T00:00:00+07:00",
-    "activity_url": "https://elearning.tdtu.edu.vn/mod/assign/view.php?id=1040795",
+    "activity_url": "https://elearning.tdtu.edu.vn/mod/assign/view.php?id=1234567",
     "completion_status": "incomplete",
     
-    "moodle_event_id": "392689",
+    "moodle_event_id": "100001",
     "event_kind": "due",
-    "source_signature": "moodle_event:392689"
+    "source_signature": "moodle_event:100001"
 }
 ```
 

@@ -25,7 +25,7 @@ Empirical testing on the live TDTU eLearning installation confirmed:
    - `limitnum` controls page size.
    - Response contains `firstid`, `lastid`, and `events`.
    - Passing `aftereventid = lastid` fetches the next page strictly after `lastid`.
-   - **Empirical Test (`limitnum=2`)**: Page 1 (`lastid=392689`), Page 2 (`aftereventid=392689`) yielded **0 page boundary overlap items**. The cursor advances cleanly.
+   - **Empirical Test (`limitnum=2`)**: Page 1 (`lastid=100001`), Page 2 (`aftereventid=100001`) yielded **0 page boundary overlap items**. The cursor advances cleanly.
 4. **Time Window Filtering**: Server-side filtering via `timesortfrom` and `timesortto` is deterministic and authoritative.
 5. **Stable Identity**: Moodle event ID (`event["id"]`) is unique and stable. `source_signature = f"moodle_event:{event_id}"` maps cleanly into Google Calendar sync keys (`deadline:moodle_event:<event_id>`).
 
