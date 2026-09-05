@@ -1052,7 +1052,13 @@ def _replace_bot_events_for_range(
                 continue
             window_start, window_end = deadline_window
             event_start_dt = _parse_calendar_event_start(event)
-            if event_start_dt and not (window_start <= event_start_dt < window_end):
+            if event_start_dt is None:
+                logger.warning(
+                    "Preserving deadline event because its start time could not be parsed: %s",
+                    source_key,
+                )
+                continue
+            if not (window_start <= event_start_dt < window_end):
                 logger.debug("Preserving Google deadline event outside sync window: %s", source_key)
                 continue
 
