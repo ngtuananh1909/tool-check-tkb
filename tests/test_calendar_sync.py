@@ -115,6 +115,105 @@ class CalendarOnlySyncTests(unittest.TestCase):
     def test_crawler_owns_only_crawled_source_types(self) -> None:
         self.assertEqual(_managed_source_types_for_crawler_sync(), {SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM, SYNC_SOURCE_DEADLINE})
 
+    def test_deadlines_list_without_window_raises_error(self) -> None:
+        with self.assertRaises(ValueError):
+            calendar_sync.sync_crawled_data_to_google_calendar(None, None, deadlines=[], deadline_window=None)
+
+    def test_deadlines_none_with_window_raises_error(self) -> None:
+        tz = dt.timezone.utc
+        start = dt.datetime.now(tz)
+        end = start + dt.timedelta(days=30)
+        with self.assertRaises(ValueError):
+            calendar_sync.sync_crawled_data_to_google_calendar(None, None, deadlines=None, deadline_window=(start, end))
+
+    def test_deadline_window_boundary_preserves_out_of_window_events(self) -> None:
+        tz = dt.timezone.utc
+        now = dt.datetime.now(tz)
+        window_start = now
+        window_end = now + dt.timedelta(days=30)
+        deadline_window = (window_start, window_end)
+
+        # Existing events:
+        # 1. Inside window (now + 10d) -> deleted if absent
+        # 2. Before window (now - 5d) -> preserved
+        # 3. At window_end (now + 30d) -> preserved (half-open [start, end))
+        # 4. At window_start (now) -> deleted if absent
+        events = [
+            {
+                "id": "inside-id",
+                "start": {"dateTime": (now + dt.timedelta(days=10)).isoformat()},
+                "extendedProperties": {"private": {"source": calendar_sync.BOT_SOURCE_TAG, "source_type": "deadline", "source_key": "deadline:moodle_event:1"}},
+            },
+            {
+                "id": "before-id",
+                "start": {"dateTime": (now - dt.timedelta(days=5)).isoformat()},
+                "extendedProperties": {"private": {"source": calendar_sync.BOT_SOURCE_TAG, "source_type": "deadline", "source_key": "deadline:moodle_event:2"}},
+            },
+            {
+                "id": "at-end-id",
+                "start": {"dateTime": window_end.isoformat()},
+                "extendedProperties": {"private": {"source": calendar_sync.BOT_SOURCE_TAG, "source_type": "deadline", "source_key": "deadline:moodle_event:3"}},
+            },
+            {
+                "id": "at-start-id",
+                "start": {"dateTime": window_start.isoformat()},
+                "extendedProperties": {"private": {"source": calendar_sync.BOT_SOURCE_TAG, "source_type": "deadline", "source_key": "deadline:moodle_event:4"}},
+            },
+        ]
+        service = _Service(events)
+
+        # Reconcile empty deadlines list [] inside [window_start, window_end)
+        _replace_bot_events_for_range(service, "cal-id", [], None, {SYNC_SOURCE_DEADLINE}, deadline_window=deadline_window)
+
+        # Only inside-id and at-start-id should be deleted. before-id and at-end-id are preserved.
+        self.assertEqual(sorted(service._events.deleted), ["at-start-id", "inside-id"])
+
+    def test_deadline_missing_start_is_preserved(self) -> None:
+        tz = dt.timezone.utc
+        now = dt.datetime.now(tz)
+        deadline_window = (now, now + dt.timedelta(days=30))
+        events = [
+            {
+                "id": "missing-start-id",
+                "start": {},
+                "extendedProperties": {"private": {"source": calendar_sync.BOT_SOURCE_TAG, "source_type": "deadline", "source_key": "deadline:moodle_event:missing"}},
+            }
+        ]
+        service = _Service(events)
+        _replace_bot_events_for_range(service, "cal-id", [], None, {SYNC_SOURCE_DEADLINE}, deadline_window=deadline_window)
+        self.assertEqual(service._events.deleted, [])
+
+    def test_deadline_invalid_datetime_is_preserved(self) -> None:
+        tz = dt.timezone.utc
+        now = dt.datetime.now(tz)
+        deadline_window = (now, now + dt.timedelta(days=30))
+        events = [
+            {
+                "id": "bad-datetime-id",
+                "start": {"dateTime": "invalid-iso-string"},
+                "extendedProperties": {"private": {"source": calendar_sync.BOT_SOURCE_TAG, "source_type": "deadline", "source_key": "deadline:moodle_event:bad"}},
+            }
+        ]
+        service = _Service(events)
+        _replace_bot_events_for_range(service, "cal-id", [], None, {SYNC_SOURCE_DEADLINE}, deadline_window=deadline_window)
+        self.assertEqual(service._events.deleted, [])
+
+    def test_deadline_invalid_date_is_preserved(self) -> None:
+        tz = dt.timezone.utc
+        now = dt.datetime.now(tz)
+        deadline_window = (now, now + dt.timedelta(days=30))
+        events = [
+            {
+                "id": "bad-date-id",
+                "start": {"date": "invalid-date-string"},
+                "extendedProperties": {"private": {"source": calendar_sync.BOT_SOURCE_TAG, "source_type": "deadline", "source_key": "deadline:moodle_event:baddate"}},
+            }
+        ]
+        service = _Service(events)
+        _replace_bot_events_for_range(service, "cal-id", [], None, {SYNC_SOURCE_DEADLINE}, deadline_window=deadline_window)
+        self.assertEqual(service._events.deleted, [])
+
 
 if __name__ == "__main__":
     unittest.main()
+
