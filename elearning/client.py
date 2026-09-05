@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 import os
 import re
+import time
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -20,7 +21,35 @@ from elearning.exceptions import (
 )
 from elearning.mapper import map_moodle_event
 
+from requests.exceptions import (
+    ConnectionError as ReqConnectionError,
+    ConnectTimeout,
+    ReadTimeout,
+    RequestException,
+    SSLError,
+)
+
 logger = logging.getLogger(__name__)
+
+DEFAULT_HTTP_TIMEOUT = (10, 30)
+MAX_GET_ATTEMPTS = 3
+
+
+def _describe_request_error(action_desc: str, exc: Exception) -> str:
+    """Format a secret-safe description of HTTP/network failures without exposing URLs or payloads."""
+    if isinstance(exc, ConnectTimeout):
+        return f"{action_desc}: connect timeout"
+    if isinstance(exc, ReadTimeout):
+        return f"{action_desc}: read timeout"
+    if isinstance(exc, SSLError):
+        return f"{action_desc}: TLS error"
+    if isinstance(exc, ReqConnectionError):
+        return f"{action_desc}: connection error"
+    if isinstance(exc, RequestException):
+        resp = getattr(exc, "response", None)
+        status = resp.status_code if resp is not None else None
+        return f"{action_desc}" + (f" with HTTP status {status}" if status is not None else "")
+    return f"{action_desc}: transport error"
 
 
 @dataclass(frozen=True)
@@ -70,25 +99,58 @@ class ElearningClient:
         if not self._external_session and self.session:
             self.session.close()
 
+    def _execute_with_retry(
+        self,
+        session_method,
+        url: str,
+        action_label: str,
+        error_factory,
+        max_attempts: int = MAX_GET_ATTEMPTS,
+        timeout: tuple[int, int] = DEFAULT_HTTP_TIMEOUT,
+        **kwargs,
+    ) -> requests.Response:
+        """Execute an HTTP request with bounded retry for transient transport errors."""
+        last_error_desc = "transport error"
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = session_method(url, timeout=timeout, **kwargs)
+                resp.raise_for_status()
+                if attempt > 1:
+                    logger.info("eLearning %s succeeded on attempt %d/%d.", action_label, attempt, max_attempts)
+                return resp
+            except Exception as exc:
+                last_error_desc = _describe_request_error(f"Failed to {action_label}", exc)
+                if attempt < max_attempts:
+                    logger.warning(
+                        "eLearning %s attempt %d/%d failed (%s); retrying in %.1fs...",
+                        action_label,
+                        attempt,
+                        max_attempts,
+                        last_error_desc,
+                        0.5 * attempt,
+                    )
+                    time.sleep(0.5 * attempt)
+                else:
+                    logger.error("eLearning %s failed after %d attempt(s): %s", action_label, max_attempts, last_error_desc)
+        raise error_factory(last_error_desc) from None
+
     def login(self) -> None:
         """Authenticate with eLearning using pure HTTP requests and extract sesskey."""
         logger.info("Logging in to TDTU eLearning via pure HTTP...")
 
-        # 1. GET login page to obtain hidden logintoken
-        try:
-            resp = self.session.get(self.LOGIN_URL, timeout=15)
-            resp.raise_for_status()
-        except Exception as exc:
-            status = exc.response.status_code if getattr(exc, "response", None) is not None else None
-            raise ElearningAuthError(
-                "Failed to load login page" + (f" with HTTP status {status}" if status else "")
-            ) from None
+        # 1. GET login page to obtain hidden logintoken (with bounded retry)
+        resp = self._execute_with_retry(
+            self.session.get,
+            self.LOGIN_URL,
+            action_label="load login page",
+            error_factory=ElearningAuthError,
+        )
 
         logintoken = self._extract_logintoken(resp.text)
         if not logintoken:
             raise ElearningAuthError("Login page missing required 'logintoken'")
 
-        # 2. POST login credentials
+        # 2. POST login credentials (single attempt to avoid redundant login POSTs)
         post_data = {
             "username": self.student_id,
             "password": self.password,
@@ -96,29 +158,25 @@ class ElearningClient:
         }
         try:
             post_resp = self.session.post(
-                self.LOGIN_URL, data=post_data, timeout=15, allow_redirects=True
+                self.LOGIN_URL, data=post_data, timeout=DEFAULT_HTTP_TIMEOUT, allow_redirects=True
             )
             post_resp.raise_for_status()
         except Exception as exc:
-            status = exc.response.status_code if getattr(exc, "response", None) is not None else None
-            raise ElearningAuthError(
-                "Login POST request failed" + (f" with HTTP status {status}" if status else "")
-            ) from None
+            desc = _describe_request_error("Login POST request failed", exc)
+            raise ElearningAuthError(desc) from None
 
         if "login" in post_resp.url.lower() or "MoodleSession" not in self.session.cookies:
             raise ElearningAuthError("eLearning HTTP login failed: invalid credentials or session rejected")
 
         logger.info("eLearning HTTP login successful.")
 
-        # 3. GET calendar page to extract sesskey
-        try:
-            cal_resp = self.session.get(self.CALENDAR_URL, timeout=15)
-            cal_resp.raise_for_status()
-        except Exception as exc:
-            status = exc.response.status_code if getattr(exc, "response", None) is not None else None
-            raise ElearningAuthError(
-                "Failed to load calendar page" + (f" with HTTP status {status}" if status else "")
-            ) from None
+        # 3. GET calendar page to extract sesskey (with bounded retry)
+        cal_resp = self._execute_with_retry(
+            self.session.get,
+            self.CALENDAR_URL,
+            action_label="load calendar page",
+            error_factory=ElearningAuthError,
+        )
 
         sesskey = self._extract_sesskey(cal_resp.text)
         if not sesskey:
@@ -138,11 +196,14 @@ class ElearningClient:
             raise ValueError("window_start and window_end must be timezone-aware datetimes")
         if window_end <= window_start:
             raise ValueError("window_end must be strictly greater than window_start")
-        if page_size <= 0:
-            raise ValueError("page_size must be a positive integer")
+        if not (1 <= page_size <= 50):
+            raise ValueError("page_size must be between 1 and 50")
 
         if not self.sesskey:
             raise ElearningAuthError("Client is not authenticated. Call login() first.")
+
+        window_start = window_start.replace(microsecond=0)
+        window_end = window_end.replace(microsecond=0)
 
         url = f"{self.SERVICE_URL}?sesskey={self.sesskey}"
         cursor: Any = None
@@ -168,14 +229,13 @@ class ElearningClient:
                 }
             ]
 
-            try:
-                resp = self.session.post(url, json=payload, timeout=20)
-                resp.raise_for_status()
-            except Exception as exc:
-                status = exc.response.status_code if getattr(exc, "response", None) is not None else None
-                raise ElearningApiError(
-                    "Moodle AJAX request failed" + (f" with HTTP status {status}" if status else "")
-                ) from None
+            resp = self._execute_with_retry(
+                self.session.post,
+                url,
+                action_label="Moodle AJAX request",
+                error_factory=ElearningApiError,
+                json=payload,
+            )
 
             try:
                 res_json = resp.json()
@@ -190,8 +250,16 @@ class ElearningClient:
                 raise ElearningResponseError("Invalid API payload: array element is not a dict")
 
             if page_res.get("error"):
-                exception_msg = str(page_res.get("exception") or "Unknown error").strip()
-                raise ElearningApiError(f"Moodle API returned error: {exception_msg}")
+                exc_data = page_res.get("exception")
+                error_code = None
+                if isinstance(exc_data, dict):
+                    raw_code = exc_data.get("errorcode")
+                    if raw_code:
+                        error_code = str(raw_code).strip()
+                message = "Moodle API returned an error"
+                if error_code:
+                    message += f" (errorcode={error_code})"
+                raise ElearningApiError(message) from None
 
             data = page_res.get("data")
             data_dict = data if isinstance(data, dict) else {}
@@ -250,7 +318,7 @@ class ElearningClient:
         except Exception:
             app_tz = ZoneInfo("Asia/Ho_Chi_Minh")
 
-        window_start = datetime.now(app_tz)
+        window_start = datetime.now(app_tz).replace(microsecond=0)
         window_end = window_start + timedelta(days=max(1, days_ahead))
 
         raw_events = self.fetch_action_events(window_start, window_end, page_size=page_size)

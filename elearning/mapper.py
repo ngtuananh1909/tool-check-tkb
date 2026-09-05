@@ -9,12 +9,13 @@ from elearning.exceptions import ElearningResponseError
 def map_moodle_event(raw_event: dict, app_tz: ZoneInfo) -> dict | None:
     """Map a raw Moodle API event JSON dict into a normalized deadline dict.
 
-    STRICT ACTIONABLE RULE: Only events where ``action.actionable is True`` are
-    mapped. Missing or non-True ``actionable`` values are strictly ignored
-    (return ``None``) and never defaulted to ``True``.
+    STRICT ACTIONABLE RULE:
+    - ``action.actionable is True`` -> mapped into normalized deadline dict.
+    - ``action.actionable is False`` -> skipped (returns ``None``).
+    - missing or malformed ``action`` schema -> raises ``ElearningResponseError``.
 
     Returns ``None`` if the event is non-actionable.
-    Raises ``ElearningResponseError`` if required fields ('id', 'timesort') are missing.
+    Raises ``ElearningResponseError`` if required fields ('id', 'action', 'actionable', 'timesort') are missing or malformed.
     """
     event_id = str(raw_event.get("id") or "").strip()
     if not event_id:

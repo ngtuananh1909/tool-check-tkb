@@ -250,6 +250,99 @@ class TestElearningClient(unittest.TestCase):
 
         self.assertEqual([e["moodle_event_id"] for e in res.items], ["1", "2"])
 
+    def test_transient_get_failure_then_success(self):
+        html_login = '<html><input name="logintoken" value="token123"/></html>'
+        html_cal = '<html><script>var M = {"sesskey":"sess123"};</script></html>'
+
+        # GET login page fails attempt 1 with ReadTimeout, succeeds attempt 2
+        self.session.get.side_effect = [
+            requests.ReadTimeout("Read timed out"),
+            ResponseMock(text=html_login, status_code=200),
+            ResponseMock(text=html_cal, status_code=200),
+        ]
+        self.session.post.return_value = ResponseMock(
+            text="dashboard", url="https://elearning.tdtu.edu.vn/course/index.php", status_code=200
+        )
+        self.session.cookies = {"MoodleSession": "cookie_val"}
+
+        with patch("time.sleep"):
+            self.client.login()
+
+        self.assertEqual(self.client.sesskey, "sess123")
+        self.assertEqual(self.session.get.call_count, 3)
+
+    def test_retries_exhausted_raises_auth_error_with_safe_category(self):
+        self.session.get.side_effect = requests.ConnectTimeout("Connect timed out")
+
+        with patch("time.sleep"):
+            with self.assertRaises(ElearningAuthError) as cm:
+                self.client.login()
+
+        self.assertIn("connect timeout", str(cm.exception))
+        self.assertIsNone(cm.exception.__cause__)
+        self.assertEqual(self.session.get.call_count, 3)
+
+    def test_moodle_api_error_payload_does_not_expose_sensitive_data(self):
+        secret_sesskey = "VERY_SECRET_SESSKEY_123456"
+        self.client.sesskey = secret_sesskey
+        payload = [
+            {
+                "error": True,
+                "exception": {
+                    "errorcode": "generalexceptionmessage",
+                    "message": f"Request failed at /service.php?sesskey={secret_sesskey}",
+                    "debuginfo": f"cookie={secret_sesskey}",
+                },
+            }
+        ]
+        self.session.post.return_value = ResponseMock(status_code=200, json_data=payload)
+
+        start = datetime.now(APP_TZ)
+        end = start + timedelta(days=30)
+
+        with patch("time.sleep"):
+            with self.assertRaises(ElearningApiError) as cm:
+                self.client.fetch_action_events(start, end)
+
+        err_msg = str(cm.exception)
+        self.assertNotIn(secret_sesskey, err_msg)
+        self.assertIn("errorcode=generalexceptionmessage", err_msg)
+        self.assertIsNone(cm.exception.__cause__)
+
+    def test_whole_second_authority_window_and_timestamps(self):
+        self.client.sesskey = "sess123"
+        now_with_ms = datetime(2026, 9, 5, 10, 0, 0, 987654, tzinfo=APP_TZ)
+        expected_start = datetime(2026, 9, 5, 10, 0, 0, 0, tzinfo=APP_TZ)
+        expected_end = expected_start + timedelta(days=30)
+
+        payload = [{"error": False, "data": {"events": [], "firstid": None, "lastid": None}}]
+        self.session.post.return_value = ResponseMock(status_code=200, json_data=payload)
+
+        with patch("elearning.client.datetime") as mock_dt:
+            mock_dt.now.return_value = now_with_ms
+            mock_dt.fromisoformat = datetime.fromisoformat
+            res = self.client.fetch_deadline_result(days_ahead=30)
+
+        self.assertEqual(res.window_start, expected_start)
+        self.assertEqual(res.window_start.microsecond, 0)
+        self.assertEqual(res.window_end.microsecond, 0)
+
+        posted_json = self.session.post.call_args.kwargs["json"]
+        args = posted_json[0]["args"]
+        self.assertEqual(args["timesortfrom"], int(expected_start.timestamp()))
+        self.assertEqual(args["timesortto"], int(expected_end.timestamp()))
+
+    def test_page_size_validation_upper_bound(self):
+        self.client.sesskey = "sess123"
+        start = datetime.now(APP_TZ)
+        end = start + timedelta(days=30)
+
+        with self.assertRaises(ValueError):
+            self.client.fetch_action_events(start, end, page_size=0)
+
+        with self.assertRaises(ValueError):
+            self.client.fetch_action_events(start, end, page_size=51)
+
     def test_invalid_window_inputs_raise_value_error(self):
         self.client.sesskey = "sess123"
         naive_dt = datetime(2026, 9, 5, 10, 0, 0)
