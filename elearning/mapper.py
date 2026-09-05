@@ -20,11 +20,15 @@ def map_moodle_event(raw_event: dict, app_tz: ZoneInfo) -> dict | None:
     if not event_id:
         raise ElearningResponseError("Moodle event missing required 'id' field")
 
-    # Strict Actionable Check: ONLY action.actionable is True is valid.
+    # Strict Actionable Check:
     action = raw_event.get("action")
-    action_dict = action if isinstance(action, dict) else {}
-    actionable = action_dict.get("actionable")
-    if actionable is not True:
+    if not isinstance(action, dict):
+        raise ElearningResponseError(f"Moodle event {event_id} has invalid 'action' payload")
+
+    if "actionable" not in action:
+        raise ElearningResponseError(f"Moodle event {event_id} missing required 'action.actionable'")
+
+    if action["actionable"] is not True:
         return None
 
     timesort = raw_event.get("timesort")

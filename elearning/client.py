@@ -79,7 +79,10 @@ class ElearningClient:
             resp = self.session.get(self.LOGIN_URL, timeout=15)
             resp.raise_for_status()
         except Exception as exc:
-            raise ElearningAuthError(f"Failed to load login page: {exc}") from exc
+            status = exc.response.status_code if getattr(exc, "response", None) is not None else None
+            raise ElearningAuthError(
+                "Failed to load login page" + (f" with HTTP status {status}" if status else "")
+            ) from None
 
         logintoken = self._extract_logintoken(resp.text)
         if not logintoken:
@@ -97,7 +100,10 @@ class ElearningClient:
             )
             post_resp.raise_for_status()
         except Exception as exc:
-            raise ElearningAuthError(f"Login POST request failed: {exc}") from exc
+            status = exc.response.status_code if getattr(exc, "response", None) is not None else None
+            raise ElearningAuthError(
+                "Login POST request failed" + (f" with HTTP status {status}" if status else "")
+            ) from None
 
         if "login" in post_resp.url.lower() or "MoodleSession" not in self.session.cookies:
             raise ElearningAuthError("eLearning HTTP login failed: invalid credentials or session rejected")
@@ -109,7 +115,10 @@ class ElearningClient:
             cal_resp = self.session.get(self.CALENDAR_URL, timeout=15)
             cal_resp.raise_for_status()
         except Exception as exc:
-            raise ElearningAuthError(f"Failed to load calendar page: {exc}") from exc
+            status = exc.response.status_code if getattr(exc, "response", None) is not None else None
+            raise ElearningAuthError(
+                "Failed to load calendar page" + (f" with HTTP status {status}" if status else "")
+            ) from None
 
         sesskey = self._extract_sesskey(cal_resp.text)
         if not sesskey:
@@ -125,6 +134,13 @@ class ElearningClient:
         page_size: int = 50,
     ) -> list[dict]:
         """Fetch raw action events from Moodle API with pagination safeguards."""
+        if window_start.tzinfo is None or window_end.tzinfo is None:
+            raise ValueError("window_start and window_end must be timezone-aware datetimes")
+        if window_end <= window_start:
+            raise ValueError("window_end must be strictly greater than window_start")
+        if page_size <= 0:
+            raise ValueError("page_size must be a positive integer")
+
         if not self.sesskey:
             raise ElearningAuthError("Client is not authenticated. Call login() first.")
 
@@ -155,9 +171,16 @@ class ElearningClient:
             try:
                 resp = self.session.post(url, json=payload, timeout=20)
                 resp.raise_for_status()
-                res_json = resp.json()
             except Exception as exc:
-                raise ElearningApiError(f"Moodle AJAX request failed: {exc}") from exc
+                status = exc.response.status_code if getattr(exc, "response", None) is not None else None
+                raise ElearningApiError(
+                    "Moodle AJAX request failed" + (f" with HTTP status {status}" if status else "")
+                ) from None
+
+            try:
+                res_json = resp.json()
+            except ValueError:
+                raise ElearningResponseError("Moodle AJAX response was not valid JSON") from None
 
             if not isinstance(res_json, list) or not res_json:
                 raise ElearningResponseError("Invalid API envelope: expected non-empty array")
@@ -236,7 +259,9 @@ class ElearningClient:
         for raw in raw_events:
             mapped = map_moodle_event(raw, app_tz)
             if mapped is not None:
-                items.append(mapped)
+                due_dt = datetime.fromisoformat(mapped["due_date"])
+                if window_start <= due_dt < window_end:
+                    items.append(mapped)
 
         logger.info(
             "eLearning API crawl completed: %d deadline(s) fetched (window: %s to %s).",

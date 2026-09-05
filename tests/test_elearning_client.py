@@ -112,6 +112,58 @@ class TestElearningClient(unittest.TestCase):
             self.client.login()
 
     # -------------------------------------------------------------------
+    # Security & Secret Leak Protection Tests
+    # -------------------------------------------------------------------
+    def test_ajax_http_error_does_not_expose_sesskey(self):
+        secret_sesskey = "VERY_SECRET_SESSKEY_123456"
+        self.client.sesskey = secret_sesskey
+
+        fake_response = ResponseMock(
+            status_code=500,
+            url=f"https://elearning.tdtu.edu.vn/lib/ajax/service.php?sesskey={secret_sesskey}",
+        )
+        http_err = requests.HTTPError(
+            f"500 Server Error for url: https://elearning.tdtu.edu.vn/lib/ajax/service.php?sesskey={secret_sesskey}"
+        )
+        http_err.response = fake_response
+        self.session.post.side_effect = http_err
+
+        start = datetime.now(APP_TZ)
+        end = start + timedelta(days=30)
+
+        with self.assertRaises(ElearningApiError) as cm:
+            self.client.fetch_action_events(start, end)
+
+        err_msg = str(cm.exception)
+        self.assertNotIn(secret_sesskey, err_msg)
+        self.assertIsNone(cm.exception.__cause__)
+
+    def test_ajax_json_decode_error_does_not_expose_sesskey(self):
+        secret_sesskey = "VERY_SECRET_SESSKEY_123456"
+        self.client.sesskey = secret_sesskey
+        self.session.post.return_value = ResponseMock(text="<html>HTML Error page</html>", status_code=200)
+
+        start = datetime.now(APP_TZ)
+        end = start + timedelta(days=30)
+
+        with self.assertRaises(ElearningResponseError) as cm:
+            self.client.fetch_action_events(start, end)
+
+        err_msg = str(cm.exception)
+        self.assertNotIn(secret_sesskey, err_msg)
+        self.assertIsNone(cm.exception.__cause__)
+
+    def test_login_http_error_does_not_expose_credentials(self):
+        html_login = '<html><input name="logintoken" value="token123"/></html>'
+        self.session.get.return_value = ResponseMock(text=html_login, status_code=200)
+        self.session.post.side_effect = requests.HTTPError("Login failed")
+
+        with self.assertRaises(ElearningAuthError) as cm:
+            self.client.login()
+
+        self.assertIsNone(cm.exception.__cause__)
+
+    # -------------------------------------------------------------------
     # Mapper & Actionable Filtering Tests
     # -------------------------------------------------------------------
     def test_actionable_true_mapped(self):
@@ -142,23 +194,82 @@ class TestElearningClient(unittest.TestCase):
         res = map_moodle_event(raw, APP_TZ)
         self.assertIsNone(res)
 
-    def test_actionable_missing_ignored(self):
+    def test_action_missing_raises_response_error(self):
+        raw = {
+            "id": "104",
+            "name": "Announcement 2",
+            "timesort": 1788739200,
+        }
+        with self.assertRaises(ElearningResponseError):
+            map_moodle_event(raw, APP_TZ)
+
+    def test_action_not_dict_raises_response_error(self):
+        raw = {
+            "id": "105",
+            "name": "Malformed Action",
+            "timesort": 1788739200,
+            "action": "not a dict",
+        }
+        with self.assertRaises(ElearningResponseError):
+            map_moodle_event(raw, APP_TZ)
+
+    def test_actionable_missing_raises_response_error(self):
         raw = {
             "id": "103",
             "name": "Announcement",
             "timesort": 1788739200,
             "action": {},  # missing 'actionable'
         }
-        res = map_moodle_event(raw, APP_TZ)
-        self.assertIsNone(res)
+        with self.assertRaises(ElearningResponseError):
+            map_moodle_event(raw, APP_TZ)
 
-        raw_no_action = {
-            "id": "104",
-            "name": "Announcement 2",
-            "timesort": 1788739200,
-        }
-        res2 = map_moodle_event(raw_no_action, APP_TZ)
-        self.assertIsNone(res2)
+    def test_window_start_end_client_boundary_enforcement(self):
+        self.client.sesskey = "sess123"
+        start = datetime(2026, 9, 5, 10, 0, 0, tzinfo=APP_TZ)
+        end = datetime(2026, 9, 10, 10, 0, 0, tzinfo=APP_TZ)
+
+        # Event at start -> included
+        # Event in middle -> included
+        # Event at end -> excluded
+        ts_start = int(start.timestamp())
+        ts_mid = int((start + timedelta(days=2)).timestamp())
+        ts_end = int(end.timestamp())
+
+        events = [
+            {"id": "1", "timesort": ts_start, "action": {"actionable": True}},
+            {"id": "2", "timesort": ts_mid, "action": {"actionable": True}},
+            {"id": "3", "timesort": ts_end, "action": {"actionable": True}},
+        ]
+        payload = [{"error": False, "data": {"events": events, "firstid": 1, "lastid": 3}}]
+        self.session.post.return_value = ResponseMock(status_code=200, json_data=payload)
+
+        with patch("elearning.client.datetime") as mock_dt:
+            mock_dt.now.return_value = start
+            mock_dt.fromisoformat = datetime.fromisoformat
+            res = self.client.fetch_deadline_result(days_ahead=5)
+
+        self.assertEqual([e["moodle_event_id"] for e in res.items], ["1", "2"])
+
+    def test_invalid_window_inputs_raise_value_error(self):
+        self.client.sesskey = "sess123"
+        naive_dt = datetime(2026, 9, 5, 10, 0, 0)
+        aware_dt = datetime(2026, 9, 5, 10, 0, 0, tzinfo=APP_TZ)
+
+        # Naive start
+        with self.assertRaises(ValueError):
+            self.client.fetch_action_events(naive_dt, aware_dt)
+
+        # Naive end
+        with self.assertRaises(ValueError):
+            self.client.fetch_action_events(aware_dt, naive_dt)
+
+        # window_end <= window_start
+        with self.assertRaises(ValueError):
+            self.client.fetch_action_events(aware_dt, aware_dt)
+
+        # page_size <= 0
+        with self.assertRaises(ValueError):
+            self.client.fetch_action_events(aware_dt, aware_dt + timedelta(days=1), page_size=0)
 
     def test_successful_empty_events(self):
         self.client.sesskey = "sess123"
