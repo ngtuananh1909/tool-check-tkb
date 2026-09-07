@@ -82,7 +82,6 @@ def run_hourly_sync() -> None:
     step_started = time.perf_counter()
     logger.info("Step 1: Crawling schedule & exam data from TDTU portal")
     try:
-        from crawler import fetch_elearning_deadlines
         from tdtu import fetch_portal_snapshot
 
         weeks_ahead = _resolve_crawler_weeks_ahead()
@@ -138,14 +137,20 @@ def run_hourly_sync() -> None:
                 logger.info("Exam Playwright fallback returned %d row(s).", len(exams))
             except Exception:
                 logger.exception("Exam Playwright fallback failed; preserving existing exam data.")
-                exams = None
-
         elearning_deadlines = None
+        deadline_window = None
         try:
-            elearning_deadlines = fetch_elearning_deadlines()
+            from elearning import PlaywrightElearningCrawler
+
+            elearning_crawler = PlaywrightElearningCrawler()
+            crawl_res = elearning_crawler.crawl_deadlines(student_id, password)
+            elearning_deadlines = crawl_res.items
+            deadline_window = (crawl_res.window_start, crawl_res.window_end)
             logger.info("eLearning deadline crawler returned %d row(s).", len(elearning_deadlines))
         except Exception:
             logger.exception("eLearning deadline crawl failed; continuing without a deadline update.")
+            elearning_deadlines = None
+            deadline_window = None
     except Exception as exc:
         logger.exception("Step 1 failed after %.2fs", time.perf_counter() - step_started)
         _handle_error("Crawler failed", exc)
@@ -164,6 +169,7 @@ def run_hourly_sync() -> None:
             exams,
             student_id=student_id,
             deadlines=elearning_deadlines,
+            deadline_window=deadline_window,
         )
         if did_sync:
             logger.info("Google Calendar sync complete.")
