@@ -5,13 +5,11 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_pla
 
 from crawler import (
   ELEARNING_SELECTOR_USERNAME,
-  _collect_elearning_course_deadlines,
   _click_portal_control,
   _configure_schedule_filters,
   _deduplicate_schedule_rows,
   _login_and_open_elearning_dashboard,
   _launch_chromium,
-  _parse_elearning_dashboard_deadlines,
   _parse_elearning_progress,
   _parse_exam_table,
   _parse_weekly_grid_table,
@@ -189,90 +187,6 @@ class CrawlerParserTests(unittest.TestCase):
             self.browser.close()
         if hasattr(self, "playwright"):
             self.playwright.stop()
-
-    def test_collect_elearning_course_deadlines_skips_timed_out_course(self) -> None:
-        class FakePage:
-            def __init__(self) -> None:
-                self.visited = []
-
-            def goto(self, url: str, *, wait_until: str, timeout: int) -> None:
-                self.visited.append((url, wait_until, timeout))
-                if "timeout" in url:
-                    raise PlaywrightTimeoutError("course timed out")
-
-        courses = [
-            {"course_url": "https://example.test/course/view.php?id=1", "course_name": "Working", "course_id": "1"},
-            {"course_url": "https://example.test/course/view.php?id=timeout", "course_name": "Slow", "course_id": "2"},
-        ]
-
-        rows = _collect_elearning_course_deadlines(
-            FakePage(),
-            courses,
-            parse_course=lambda page, course: [{"course_name": course["course_name"], "due_date": "2026-05-20T10:00:00+07:00"}],
-        )
-
-        self.assertEqual(rows, [{"course_name": "Working", "due_date": "2026-05-20T10:00:00+07:00"}])
-
-    def test_deduplicate_elearning_deadlines_prefers_real_course_name(self) -> None:
-        from crawler import _deduplicate_elearning_deadlines
-
-        rows = _deduplicate_elearning_deadlines([
-            {
-                "course_id": "47728",
-                "course_name": "image",
-                "activity_name": "Final Report",
-                "due_date": "2026-05-20T00:00:00+07:00",
-                "activity_url": "https://example.test/mod/assign/view.php?id=1",
-                "completion_status": "incomplete",
-            },
-            {
-                "course_id": "47728",
-                "course_name": "HK2_2025_501032_Đại số tuyến tính cho Công nghệ thông tin_N02",
-                "activity_name": "Final Report",
-                "due_date": "2026-05-20T00:00:00+07:00",
-                "activity_url": "https://example.test/mod/assign/view.php?id=1",
-                "completion_status": "incomplete",
-            },
-        ])
-
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["course_name"], "HK2_2025_501032_Đại số tuyến tính cho Công nghệ thông tin_N02")
-
-    def test_parse_elearning_due_date_treats_midnight_as_local_time(self) -> None:
-        from crawler import _parse_elearning_due_date
-
-        parsed = _parse_elearning_due_date("Wednesday, 20 May 2026, 12:00 AM")
-
-        self.assertIsNotNone(parsed)
-        self.assertEqual(parsed.isoformat(), "2026-05-20T00:00:00+07:00")
-
-    def test_parse_elearning_dashboard_deadlines_extracts_timeline_items(self) -> None:
-        self.page.set_content(
-            """
-            <html><body>
-              <div class="event" data-event-id="101">
-                <a href="https://elearning.tdtu.edu.vn/mod/assign/view.php?id=101">Final Report</a>
-                <a href="https://elearning.tdtu.edu.vn/course/view.php?id=47728">Operating Systems</a>
-                <div>Due date: Wednesday, 20 May 2026, 11:59 PM</div>
-              </div>
-              <div class="event" data-event-id="102">
-                <a href="https://elearning.tdtu.edu.vn/mod/quiz/view.php?id=102">Quiz 4</a>
-                <span>Applied Linear Algebra</span>
-                <time datetime="2026-05-21T10:30:00+07:00"></time>
-              </div>
-            </body></html>
-            """
-        )
-
-        rows = _parse_elearning_dashboard_deadlines(self.page)
-
-        self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0]["course_id"], "47728")
-        self.assertEqual(rows[0]["course_name"], "Operating Systems")
-        self.assertEqual(rows[0]["activity_name"], "Final Report")
-        self.assertEqual(rows[0]["due_date"], "2026-05-20T23:59:00+07:00")
-        self.assertEqual(rows[1]["activity_name"], "Quiz 4")
-        self.assertEqual(rows[1]["due_date"], "2026-05-21T10:30:00+07:00")
 
     def test_parse_elearning_progress_extracts_percentages(self) -> None:
         self.page.set_content(

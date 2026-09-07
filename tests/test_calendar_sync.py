@@ -115,6 +115,160 @@ class CalendarOnlySyncTests(unittest.TestCase):
     def test_crawler_owns_only_crawled_source_types(self) -> None:
         self.assertEqual(_managed_source_types_for_crawler_sync(), {SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM, SYNC_SOURCE_DEADLINE})
 
+    def test_deadlines_list_without_window_raises_error(self) -> None:
+        with self.assertRaises(ValueError):
+            calendar_sync.sync_crawled_data_to_google_calendar(None, None, deadlines=[], deadline_window=None)
+
+    def test_deadlines_none_with_window_raises_error(self) -> None:
+        tz = dt.timezone.utc
+        start = dt.datetime.now(tz)
+        end = start + dt.timedelta(days=30)
+        with self.assertRaises(ValueError):
+            calendar_sync.sync_crawled_data_to_google_calendar(None, None, deadlines=None, deadline_window=(start, end))
+
+    def test_window_validation_rejects_non_tuple(self) -> None:
+        tz = dt.timezone.utc
+        start = dt.datetime.now(tz)
+        end = start + dt.timedelta(days=30)
+        with self.assertRaises(ValueError):
+            calendar_sync.sync_crawled_data_to_google_calendar(None, None, deadlines=[], deadline_window=[start, end])  # type: ignore
+
+    def test_window_validation_rejects_invalid_tuple_length(self) -> None:
+        tz = dt.timezone.utc
+        start = dt.datetime.now(tz)
+        with self.assertRaises(ValueError):
+            calendar_sync.sync_crawled_data_to_google_calendar(None, None, deadlines=[], deadline_window=(start,))  # type: ignore
+
+    def test_window_validation_rejects_non_datetime_elements(self) -> None:
+        with self.assertRaises(ValueError):
+            calendar_sync.sync_crawled_data_to_google_calendar(None, None, deadlines=[], deadline_window=("2026-09-01", "2026-10-01"))  # type: ignore
+
+    def test_window_validation_rejects_naive_datetime(self) -> None:
+        start = dt.datetime(2026, 9, 1, 0, 0, 0)  # naive
+        end = dt.datetime(2026, 10, 1, 0, 0, 0)    # naive
+        with self.assertRaises(ValueError):
+            calendar_sync.sync_crawled_data_to_google_calendar(None, None, deadlines=[], deadline_window=(start, end))
+
+    def test_window_validation_rejects_inverted_range(self) -> None:
+        tz = dt.timezone.utc
+        start = dt.datetime.now(tz)
+        end = start - dt.timedelta(days=1)
+        with self.assertRaises(ValueError):
+            calendar_sync.sync_crawled_data_to_google_calendar(None, None, deadlines=[], deadline_window=(start, end))
+
+        # Equal start and end also rejected
+        with self.assertRaises(ValueError):
+            calendar_sync.sync_crawled_data_to_google_calendar(None, None, deadlines=[], deadline_window=(start, start))
+
+    def test_deadline_window_boundary_preserves_out_of_window_events(self) -> None:
+        tz = dt.timezone.utc
+        now = dt.datetime.now(tz)
+        window_start = now
+        window_end = now + dt.timedelta(days=30)
+        deadline_window = (window_start, window_end)
+
+        # Existing events:
+        # 1. Inside window (now + 10d) -> deleted if absent from crawl
+        # 2. Before window (now - 5d) -> preserved
+        # 3. At window_end (now + 30d) -> preserved (half-open [start, end))
+        # 4. At window_start (now) -> deleted if absent from crawl
+        events = [
+            {
+                "id": "inside-id",
+                "start": {"dateTime": (now + dt.timedelta(days=10)).isoformat()},
+                "extendedProperties": {"private": {"source": calendar_sync.BOT_SOURCE_TAG, "source_type": "deadline", "source_key": "deadline:moodle_event:1"}},
+            },
+            {
+                "id": "before-id",
+                "start": {"dateTime": (now - dt.timedelta(days=5)).isoformat()},
+                "extendedProperties": {"private": {"source": calendar_sync.BOT_SOURCE_TAG, "source_type": "deadline", "source_key": "deadline:moodle_event:2"}},
+            },
+            {
+                "id": "at-end-id",
+                "start": {"dateTime": window_end.isoformat()},
+                "extendedProperties": {"private": {"source": calendar_sync.BOT_SOURCE_TAG, "source_type": "deadline", "source_key": "deadline:moodle_event:3"}},
+            },
+            {
+                "id": "at-start-id",
+                "start": {"dateTime": window_start.isoformat()},
+                "extendedProperties": {"private": {"source": calendar_sync.BOT_SOURCE_TAG, "source_type": "deadline", "source_key": "deadline:moodle_event:4"}},
+            },
+        ]
+        service = _Service(events)
+
+        # Reconcile empty deadlines list [] inside [window_start, window_end)
+        _replace_bot_events_for_range(service, "cal-id", [], None, {SYNC_SOURCE_DEADLINE}, deadline_window=deadline_window)
+
+        # Only inside-id and at-start-id should be deleted. before-id and at-end-id are preserved.
+        self.assertEqual(sorted(service._events.deleted), ["at-start-id", "inside-id"])
+
+    def test_deadline_missing_start_is_preserved(self) -> None:
+        tz = dt.timezone.utc
+        now = dt.datetime.now(tz)
+        deadline_window = (now, now + dt.timedelta(days=30))
+        events = [
+            {
+                "id": "missing-start-id",
+                "start": {},
+                "extendedProperties": {"private": {"source": calendar_sync.BOT_SOURCE_TAG, "source_type": "deadline", "source_key": "deadline:moodle_event:missing"}},
+            }
+        ]
+        service = _Service(events)
+        _replace_bot_events_for_range(service, "cal-id", [], None, {SYNC_SOURCE_DEADLINE}, deadline_window=deadline_window)
+        self.assertEqual(service._events.deleted, [])
+
+    def test_deadline_invalid_datetime_is_preserved(self) -> None:
+        tz = dt.timezone.utc
+        now = dt.datetime.now(tz)
+        deadline_window = (now, now + dt.timedelta(days=30))
+        events = [
+            {
+                "id": "bad-datetime-id",
+                "start": {"dateTime": "invalid-iso-string"},
+                "extendedProperties": {"private": {"source": calendar_sync.BOT_SOURCE_TAG, "source_type": "deadline", "source_key": "deadline:moodle_event:bad"}},
+            }
+        ]
+        service = _Service(events)
+        _replace_bot_events_for_range(service, "cal-id", [], None, {SYNC_SOURCE_DEADLINE}, deadline_window=deadline_window)
+        self.assertEqual(service._events.deleted, [])
+
+    def test_deadline_invalid_date_is_preserved(self) -> None:
+        tz = dt.timezone.utc
+        now = dt.datetime.now(tz)
+        deadline_window = (now, now + dt.timedelta(days=30))
+        events = [
+            {
+                "id": "bad-date-id",
+                "start": {"date": "invalid-date-string"},
+                "extendedProperties": {"private": {"source": calendar_sync.BOT_SOURCE_TAG, "source_type": "deadline", "source_key": "deadline:moodle_event:baddate"}},
+            }
+        ]
+        service = _Service(events)
+        _replace_bot_events_for_range(service, "cal-id", [], None, {SYNC_SOURCE_DEADLINE}, deadline_window=deadline_window)
+        self.assertEqual(service._events.deleted, [])
+
+    def test_failed_crawl_preserves_all_deadlines(self) -> None:
+        target = dt.date.today()
+        start = f"{target.isoformat()}T08:00:00+07:00"
+        events = [
+            {
+                "id": "deadline-id",
+                "start": {"dateTime": start},
+                "extendedProperties": {"private": {"source": calendar_sync.BOT_SOURCE_TAG, "source_type": "deadline", "source_key": "deadline:moodle_event:keep"}},
+            }
+        ]
+        service = _Service(events)
+        with (
+            patch.dict(os.environ, {"GOOGLE_CALENDAR_ID": "cal-id", "GOOGLE_SERVICE_ACCOUNT_JSON": "{}"}, clear=False),
+            patch.object(calendar_sync, "_build_calendar_service", return_value=(service, "svc@example.com")),
+            patch.object(calendar_sync, "_validate_calendar_target", return_value=None),
+        ):
+            # deadlines=None means crawl failed -> managed types will only be class_sessions / exams if provided
+            calendar_sync.sync_crawled_data_to_google_calendar(
+                class_sessions=[], exams=[], student_id="test", deadlines=None, deadline_window=None
+            )
+        self.assertEqual(service._events.deleted, [])
+
 
 if __name__ == "__main__":
     unittest.main()
