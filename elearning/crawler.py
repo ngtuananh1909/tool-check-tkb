@@ -162,7 +162,9 @@ class PlaywrightElearningCrawler:
             raise ElearningAuthError("Login form username input not found")
 
         # Find password input
-        pwd_loc = page.locator('form#login input[name="password"]:not([type="hidden"]), input#password, input[name="password"]')
+        pwd_loc = page.locator('form#login input[name="password"]:not([type="hidden"])')
+        if pwd_loc.count() == 0:
+            pwd_loc = page.locator('input#password:not([type="hidden"]), input[name="password"]:not([type="hidden"])')
         if pwd_loc.count() == 0:
             raise ElearningAuthError("Login form password input not found")
 
