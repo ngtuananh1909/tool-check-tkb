@@ -121,10 +121,17 @@ class PlaywrightElearningCrawler:
                         if eid not in unique_candidates:
                             unique_candidates[eid] = item
 
-                    # Inspect actionable status for each candidate assignment
+                    # Inspect actionable status for each candidate
                     surviving_items: list[dict] = []
                     for candidate in unique_candidates.values():
-                        is_actionable = self._check_assignment_actionable(page, candidate)
+                        kind = candidate.get("event_kind")
+                        if kind == "due":
+                            is_actionable = self._check_assignment_actionable(page, candidate)
+                        elif kind == "quiz_close":
+                            is_actionable = self._check_quiz_actionable(page, candidate)
+                        else:
+                            is_actionable = False
+
                         if is_actionable:
                             normalized = normalize_deadline_item(candidate, self.tz)
                             if window_start <= normalized["due_date_dt"] < window_end:
@@ -242,13 +249,13 @@ class PlaywrightElearningCrawler:
             href = card.get("href", "")
             kind = classify_event_kind(title, href)
 
-            if kind == "open":
-                # Known non-deadline opening event; exclude safely
+            if kind in ("open", "non_deadline"):
+                # Known non-deadline event; exclude safely
                 continue
 
             in_window = (window_start <= due_dt < window_end)
 
-            if kind == "due":
+            if kind in ("due", "quiz_close"):
                 if in_window:
                     candidates.append({
                         "moodle_event_id": event_id,
@@ -256,11 +263,11 @@ class PlaywrightElearningCrawler:
                         "activity_name": clean_activity_name(title),
                         "activity_url": href,
                         "due_timestamp": due_ts,
-                        "event_kind": "due",
+                        "event_kind": kind,
                     })
-            elif kind in ("quiz_close", "completion"):
+            elif kind == "completion":
                 if in_window:
-                    # Unsupported deadline kind inside authority window -> FAIL CLOSED
+                    # Unsupported generic completion kind inside authority window -> FAIL CLOSED
                     raise ElearningCrawlError(
                         f"Encountered unsupported deadline event kind '{kind}' for event #{event_id} in authority window"
                     )
@@ -295,7 +302,10 @@ class PlaywrightElearningCrawler:
             }
             const hasSubmitted = !!document.querySelector('td.submissionstatussubmitted');
             const courseLink = document.querySelector('a[href*="/course/view.php?id="]');
-            const heading = document.querySelector('h2, h1');
+            const heading = document.querySelector('#region-main h2, div[role="main"] h2') ||
+                            document.querySelector('#region-main h1, div[role="main"] h1') ||
+                            document.querySelector('h2') ||
+                            document.querySelector('h1');
             return {
                 hasTable: true,
                 hasSubmitted: hasSubmitted,
@@ -309,6 +319,63 @@ class PlaywrightElearningCrawler:
             raise ElearningCrawlError(f"Submission status table not found on assignment page {activity_url}")
 
         if info.get("hasSubmitted"):
+            return False
+
+        # Enrich candidate metadata if present
+        if info.get("courseName"):
+            candidate["course_name"] = info["courseName"]
+        if info.get("courseHref") and not candidate.get("course_id"):
+            m = re.search(r"id=(\d+)", info["courseHref"])
+            if m:
+                candidate["course_id"] = m.group(1)
+        if info.get("activityTitle"):
+            candidate["activity_name"] = info["activityTitle"]
+
+        return True
+
+    def _check_quiz_actionable(self, page: Page, candidate: dict) -> bool:
+        """Inspect Quiz activity page to determine attempt state.
+
+        Returns True if unattempted or attempt in progress (actionable).
+        Returns False if attempt finished/submitted.
+        Fails closed if the quiz page is malformed or times out.
+        """
+        activity_url = candidate["activity_url"]
+        try:
+            page.goto(activity_url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+        except Exception as exc:
+            raise ElearningCrawlError(f"Failed to open quiz page {activity_url}: {exc}") from exc
+
+        if "login/index.php" in page.url.lower():
+            raise ElearningAuthError("Session expired; redirected to login while inspecting quiz")
+
+        info = page.evaluate("""() => {
+            const sum = document.querySelector('table.quizattemptsummary');
+            const sumText = sum ? sum.innerText.trim() : '';
+            const hasFinished = sumText.includes('Finished') ||
+                                sumText.includes('Submitted') ||
+                                sumText.includes('Đã nộp') ||
+                                sumText.includes('Hoàn thành');
+            const main = document.querySelector('#region-main, [role="main"]');
+            const courseLink = document.querySelector('a[href*="/course/view.php?id="]');
+            const heading = document.querySelector('#region-main h2, div[role="main"] h2') ||
+                            document.querySelector('#region-main h1, div[role="main"] h1') ||
+                            document.querySelector('h2') ||
+                            document.querySelector('h1');
+            return {
+                hasMain: !!main,
+                hasSummary: !!sum,
+                hasFinished: hasFinished,
+                courseHref: courseLink ? courseLink.href : '',
+                courseName: courseLink ? courseLink.innerText.trim() : '',
+                activityTitle: heading ? heading.innerText.trim() : ''
+            };
+        }""")
+
+        if not info.get("hasMain"):
+            raise ElearningCrawlError(f"Main content container not found on quiz page {activity_url}")
+
+        if info.get("hasFinished"):
             return False
 
         # Enrich candidate metadata if present

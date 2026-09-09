@@ -14,9 +14,10 @@ def classify_event_kind(title: str, url: str) -> str:
 
     Returns one of:
     - 'open': opening lifecycle event (not a deadline, excluded)
-    - 'due': assignment due deadline (supported in v1)
-    - 'quiz_close': quiz close deadline (unsupported in v1)
-    - 'completion': generic activity completion requirement (unsupported in v1)
+    - 'due': assignment due deadline (supported)
+    - 'quiz_close': quiz close deadline (supported)
+    - 'non_deadline': non-submission activity (forum, resource, etc.; excluded)
+    - 'completion': generic activity completion requirement (unsupported)
     - 'unknown': unrecognized event pattern
     """
     raw_title = str(title or "").strip()
@@ -27,11 +28,22 @@ def classify_event_kind(title: str, url: str) -> str:
         return "open"
 
     if "/mod/assign/" in raw_url:
-        if any(token in lower_title for token in ["is due", "đến hạn", "hết hạn", "due"]):
-            return "due"
+        return "due"
 
     if "/mod/quiz/" in raw_url or any(token in lower_title for token in ["closes", "đóng", "kết thúc"]):
         return "quiz_close"
+
+    if any(m in raw_url for m in [
+        "/mod/forum/",
+        "/mod/resource/",
+        "/mod/url/",
+        "/mod/folder/",
+        "/mod/page/",
+        "/mod/feedback/",
+        "/mod/chat/",
+        "/mod/choice/",
+    ]):
+        return "non_deadline"
 
     if any(token in lower_title for token in ["should be completed", "cần hoàn thành"]):
         return "completion"
@@ -43,7 +55,7 @@ def clean_activity_name(title: str) -> str:
     """Clean calendar event title to extract activity name."""
     raw = str(title or "").strip()
     cleaned = re.sub(
-        r"(?i)\s+(is due|đến hạn|hết hạn|should be completed|cần hoàn thành|bắt đầu|opens)$",
+        r"(?i)\s+(is due|đến hạn|hết hạn|should be completed|cần hoàn thành|bắt đầu|opens|closes|đóng|kết thúc)$",
         "",
         raw,
     ).strip()

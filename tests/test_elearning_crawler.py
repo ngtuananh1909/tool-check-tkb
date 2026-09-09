@@ -60,15 +60,21 @@ class TestElearningWindowAndMapper(unittest.TestCase):
         self.assertEqual(classify_event_kind("Lab 1 opens", "https://elearning.tdtu.edu.vn/mod/assign/view.php?id=1"), "open")
         self.assertEqual(classify_event_kind("Assignment 1 is due", "https://elearning.tdtu.edu.vn/mod/assign/view.php?id=1"), "due")
         self.assertEqual(classify_event_kind("Bài tập lớn đến hạn", "https://elearning.tdtu.edu.vn/mod/assign/view.php?id=2"), "due")
+        self.assertEqual(classify_event_kind("TUẦN NỘP BÀI TẬP NHÓM =20% should be completed", "https://elearning.tdtu.edu.vn/mod/assign/view.php?id=1031667"), "due")
         self.assertEqual(classify_event_kind("Quiz 1 closes", "https://elearning.tdtu.edu.vn/mod/quiz/view.php?id=3"), "quiz_close")
         self.assertEqual(classify_event_kind("Trắc nghiệm kết thúc", "https://elearning.tdtu.edu.vn/mod/quiz/view.php?id=4"), "quiz_close")
-        self.assertEqual(classify_event_kind("Task should be completed", "https://elearning.tdtu.edu.vn/mod/page/view.php?id=5"), "completion")
-        self.assertEqual(classify_event_kind("Unknown activity", "https://elearning.tdtu.edu.vn/mod/forum/view.php?id=6"), "unknown")
+        self.assertEqual(classify_event_kind("BÀI TẬP TRẮC NGHIỆM _TUẦN 3 should be completed", "https://elearning.tdtu.edu.vn/mod/quiz/view.php?id=1054250"), "quiz_close")
+        self.assertEqual(classify_event_kind("DIỄN ĐÀN TUẦN 3_CHƯƠNG 2 should be completed", "https://elearning.tdtu.edu.vn/mod/forum/view.php?id=1017570"), "non_deadline")
+        self.assertEqual(classify_event_kind("DIỄN ĐÀN TUẦN 3_CHƯƠNG 2 is due", "https://elearning.tdtu.edu.vn/mod/forum/view.php?id=1017570"), "non_deadline")
+        self.assertEqual(classify_event_kind("Task should be completed", "https://elearning.tdtu.edu.vn/mod/custom/view.php?id=5"), "completion")
+        self.assertEqual(classify_event_kind("Unknown activity", "https://elearning.tdtu.edu.vn/mod/unknownmod/view.php?id=6"), "unknown")
 
     def test_clean_activity_name(self) -> None:
         self.assertEqual(clean_activity_name("Python 1 is due"), "Python 1")
         self.assertEqual(clean_activity_name("Báo cáo giữa kỳ đến hạn"), "Báo cáo giữa kỳ")
         self.assertEqual(clean_activity_name("Project should be completed"), "Project")
+        self.assertEqual(clean_activity_name("Quiz 1 closes"), "Quiz 1")
+        self.assertEqual(clean_activity_name("Trắc nghiệm kết thúc"), "Trắc nghiệm")
 
     def test_normalize_deadline_item(self) -> None:
         ts = int(dt.datetime(2026, 9, 15, 23, 59, 0, tzinfo=self.tz).timestamp())
@@ -150,7 +156,7 @@ class TestPlaywrightCrawlerDOMFixtures(unittest.TestCase):
         <table class="calendarmonth">
             <tr>
                 <td class="day" data-day-timestamp="1788973200">
-                    <a data-event-id="100001" href="https://elearning.tdtu.edu.vn/mod/forum/view.php?id=90001">Random Event</a>
+                    <a data-event-id="100001" href="https://elearning.tdtu.edu.vn/mod/unknownmod/view.php?id=90001">Random Event</a>
                 </td>
             </tr>
         </table>
@@ -165,13 +171,13 @@ class TestPlaywrightCrawlerDOMFixtures(unittest.TestCase):
         self.assertIn("unrecognized event pattern", str(ctx.exception).lower())
 
     def test_unsupported_deadline_module_in_window_fails_closed(self) -> None:
-        # Quiz close event inside authority window
+        # Generic completion event on unsupported module inside authority window
         html = """
         <div class="calendar-controls"><h2 class="current">September 2026</h2></div>
         <table class="calendarmonth">
             <tr>
                 <td class="day" data-day-timestamp="1788973200">
-                    <a data-event-id="100002" href="https://elearning.tdtu.edu.vn/mod/quiz/view.php?id=90002">Quiz 1 closes</a>
+                    <a data-event-id="100002" href="https://elearning.tdtu.edu.vn/mod/customtool/view.php?id=90002">Custom Task should be completed</a>
                 </td>
             </tr>
         </table>
@@ -183,7 +189,27 @@ class TestPlaywrightCrawlerDOMFixtures(unittest.TestCase):
         with patch.object(self.page, "goto"):
             with self.assertRaises(ElearningCrawlError) as ctx:
                 self.crawler._crawl_month_page(self.page, 1788195600, w_start, w_end)
-        self.assertIn("unsupported deadline event kind", str(ctx.exception))
+        self.assertIn("unsupported deadline event kind 'completion'", str(ctx.exception))
+
+    def test_non_deadline_activity_is_safely_excluded(self) -> None:
+        # Forum activity in calendar is non-deadline and safely excluded
+        html = """
+        <div class="calendar-controls"><h2 class="current">September 2026</h2></div>
+        <table class="calendarmonth">
+            <tr>
+                <td class="day" data-day-timestamp="1788973200">
+                    <a data-event-id="100007" href="https://elearning.tdtu.edu.vn/mod/forum/view.php?id=90007">Diễn đàn tuần 1 should be completed</a>
+                </td>
+            </tr>
+        </table>
+        """
+        self.page.set_content(html)
+        w_start = dt.datetime(2026, 9, 1, 0, 0, 0, tzinfo=self.tz)
+        w_end = dt.datetime(2026, 11, 1, 0, 0, 0, tzinfo=self.tz)
+
+        with patch.object(self.page, "goto"):
+            candidates = self.crawler._crawl_month_page(self.page, 1788195600, w_start, w_end)
+        self.assertEqual(candidates, [])
 
     def test_open_event_is_safely_excluded(self) -> None:
         # Quiz opening event is excluded and does not raise an error
@@ -278,6 +304,50 @@ class TestPlaywrightCrawlerDOMFixtures(unittest.TestCase):
         with patch.object(self.page, "goto"):
             with self.assertRaises(ElearningCrawlError):
                 self.crawler._check_assignment_actionable(self.page, candidate)
+
+    def test_quiz_finished_attempt_is_excluded(self) -> None:
+        html = """
+        <div id="region-main">
+            <h2>Quiz 1</h2>
+            <table class="generaltable quizattemptsummary">
+                <tr><td class="cell c0">1</td><td class="cell c1">Finished Submitted Tuesday</td></tr>
+            </table>
+        </div>
+        """
+        self.page.set_content(html)
+        candidate = {"activity_url": "https://elearning.tdtu.edu.vn/mod/quiz/view.php?id=90002"}
+
+        with patch.object(self.page, "goto"):
+            is_actionable = self.crawler._check_quiz_actionable(self.page, candidate)
+        self.assertFalse(is_actionable)
+
+    def test_quiz_unattempted_is_included(self) -> None:
+        html = """
+        <a href="https://elearning.tdtu.edu.vn/course/view.php?id=50001">Computer Science 101</a>
+        <div id="region-main">
+            <h2>Quiz 1</h2>
+            <p>Time limit: 15 mins</p>
+        </div>
+        """
+        self.page.set_content(html)
+        candidate = {"activity_url": "https://elearning.tdtu.edu.vn/mod/quiz/view.php?id=90002"}
+
+        with patch.object(self.page, "goto"):
+            is_actionable = self.crawler._check_quiz_actionable(self.page, candidate)
+        self.assertTrue(is_actionable)
+        self.assertEqual(candidate.get("course_name"), "Computer Science 101")
+        self.assertEqual(candidate.get("course_id"), "50001")
+        self.assertEqual(candidate.get("activity_name"), "Quiz 1")
+
+    def test_quiz_missing_main_container_fails_closed(self) -> None:
+        html = """<div>No main region</div>"""
+        self.page.set_content(html)
+        candidate = {"activity_url": "https://elearning.tdtu.edu.vn/mod/quiz/view.php?id=90002"}
+
+        with patch.object(self.page, "goto"):
+            with self.assertRaises(ElearningCrawlError) as ctx:
+                self.crawler._check_quiz_actionable(self.page, candidate)
+        self.assertIn("Main content container not found on quiz page", str(ctx.exception))
 
     def test_window_filtering_excludes_past_events(self) -> None:
         # Event in the past (before window_start)
