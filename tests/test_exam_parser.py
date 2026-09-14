@@ -2,8 +2,8 @@
 Unit tests for BeautifulSoup HTML exam schedule parser.
 """
 
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from tdtu.exams.parser import parse_exam_html
 

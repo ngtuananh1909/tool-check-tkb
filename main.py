@@ -12,7 +12,6 @@ On any failure, a Telegram error alert is sent so that issues are surfaced immed
 """
 
 import logging
-import os
 import sys
 
 # ---------------------------------------------------------------------------

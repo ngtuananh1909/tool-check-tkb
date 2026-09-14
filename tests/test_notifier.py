@@ -1,6 +1,10 @@
 import unittest
 
-from notifier import _build_combined_message, _compact_course_name, _redact_telegram_error
+from notifier import (
+    _build_combined_message,
+    _compact_course_name,
+    _redact_telegram_error,
+)
 
 
 class NotifierFormattingTests(unittest.TestCase):
@@ -39,6 +43,64 @@ class NotifierFormattingTests(unittest.TestCase):
         self.assertNotIn("Tiến độ eLearning theo môn", text)
         self.assertNotIn("75%", text)
 
+    def test_class_session_with_periods_and_times_formats_properly(self) -> None:
+        cls = {
+            "subject_name": "Web Programming",
+            "room": "C204",
+            "start_period": 1,
+            "end_period": 3,
+            "start_time": "06:50",
+            "end_time": "09:20",
+            "status": "scheduled",
+        }
+        text = _build_combined_message(
+            classes=[cls],
+            appointments=[],
+            upcoming_exams=[],
+            elearning_progress=[],
+        )
+        self.assertIn("Tiết 1→3 · 06:50–09:20", text)
+        self.assertNotIn("0→0", text)
+        self.assertIn("Web Programming", text)
+        self.assertIn("C204", text)
+        self.assertIn("Học bình thường", text)
+
+    def test_class_session_without_periods_falls_back_to_time_range(self) -> None:
+        cls = {
+            "subject_name": "Web Programming",
+            "room": "C204",
+            "start_time": "06:50",
+            "end_time": "09:20",
+            "status": "makeup",
+        }
+        text = _build_combined_message(
+            classes=[cls],
+            appointments=[],
+            upcoming_exams=[],
+            elearning_progress=[],
+        )
+        self.assertIn("06:50–09:20", text)
+        self.assertNotIn("Tiết", text)
+        self.assertNotIn("0→0", text)
+        self.assertIn("Học bù", text)
+
+    def test_class_session_missing_both_period_and_time(self) -> None:
+        cls = {
+            "subject_name": "Web Programming",
+            "room": "C204",
+            "status": "absent",
+        }
+        text = _build_combined_message(
+            classes=[cls],
+            appointments=[],
+            upcoming_exams=[],
+            elearning_progress=[],
+        )
+        self.assertIn("Chưa rõ thời gian", text)
+        self.assertNotIn("0→0", text)
+        self.assertIn("Báo vắng", text)
+
 
 if __name__ == "__main__":
     unittest.main()
+

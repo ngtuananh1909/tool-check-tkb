@@ -1,20 +1,21 @@
 import unittest
 from unittest.mock import patch
 
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
 
 from crawler import (
-  ELEARNING_SELECTOR_USERNAME,
-  _click_portal_control,
-  _configure_schedule_filters,
-  _deduplicate_schedule_rows,
-  _login_and_open_elearning_dashboard,
-  _launch_chromium,
-  _parse_elearning_progress,
-  _parse_exam_table,
-  _parse_weekly_grid_table,
-  _sanitize_url_for_log,
-  _switch_to_week_view_if_available,
+    ELEARNING_SELECTOR_USERNAME,
+    _click_portal_control,
+    _configure_schedule_filters,
+    _deduplicate_schedule_rows,
+    _launch_chromium,
+    _login_and_open_elearning_dashboard,
+    _parse_elearning_progress,
+    _parse_exam_table,
+    _parse_weekly_grid_table,
+    _sanitize_url_for_log,
+    _switch_to_week_view_if_available,
 )
 
 
