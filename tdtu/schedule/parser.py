@@ -7,9 +7,10 @@ import logging
 import re
 import unicodedata
 from typing import Any
+
 from bs4 import BeautifulSoup
 
-from tdtu.exceptions import TDTUParsingError, TDTUProtocolError
+from tdtu.exceptions import TDTUProtocolError
 
 logger = logging.getLogger(__name__)
 

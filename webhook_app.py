@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
 import requests
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException
 
 from calendar_sync import (
     SYNC_SOURCE_DEADLINE,
@@ -31,11 +31,13 @@ from calendar_sync import (
     find_tagged_calendar_event,
     insert_calendar_event,
 )
-from time_utils import local_today
+from gemini_parser import parse_events_with_gemini
 from telegram_mvp_bot import (
     ADD_FORM_CANCEL_CALLBACK,
     ADD_FORM_DONE_CALLBACK,
     ADD_FORM_SKIP_WHERE_CALLBACK,
+    SMART_PASTE_ADD_ALL_CALLBACK,
+    SMART_PASTE_CANCEL_CALLBACK,
     _advance_add_form_state,
     _build_add_appointment_from_form,
     _build_add_form_keyboard,
@@ -45,17 +47,21 @@ from telegram_mvp_bot import (
     _build_deadline_keyboard,
     _build_deadline_list_text,
     _build_exam_list_text,
-    _is_add_form_complete,
     _build_schedule_text,
+    _build_smart_paste_keyboard,
+    _build_smart_paste_preview_text,
     _build_today_appointments_text,
-    _normalize_chat_id,
+    _is_add_form_complete,
     _new_add_form_state,
+    _normalize_chat_id,
+    _normalize_smart_paste_event,
     _parse_schedule_day_arg,
     _send_add_form_step,
     _send_text,
     _send_text_with_keyboard,
     _skip_add_form_optional_step,
 )
+from time_utils import local_today
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -68,6 +74,8 @@ HEALTH_PATH = "/health"
 WEBHOOK_INFO_PATH = "/telegram/webhook/info"
 GEMINI_HEALTH_PATH = "/gemini/health"
 _ADD_FORM_STATES: dict[str, dict[str, object]] = {}
+_SMART_PASTE_STATES: dict[str, dict[str, object]] = {}
+
 ADD_ONLY_GUIDANCE_TEXT = "Để thêm lịch, bạn dùng /add. Bot sẽ hỏi lần lượt từng mục để bạn nhập nhanh hơn nhé."
 START_HELP_TEXT = (
     "Bot hiện hỗ trợ các lệnh sau:\n"
@@ -242,8 +250,8 @@ def gemini_health() -> dict[str, object]:
 
 
 @app.post(WEBHOOK_PATH)
-async def telegram_webhook(
-    request: Request,
+def telegram_webhook(
+    payload: dict,
     x_telegram_bot_api_secret_token: str | None = Header(default=None),
 ) -> dict[str, bool]:
     token, allowed_chat_id, _, webhook_secret = _load_env()
@@ -251,7 +259,6 @@ async def telegram_webhook(
     if webhook_secret and x_telegram_bot_api_secret_token != webhook_secret:
         raise HTTPException(status_code=401, detail="Invalid webhook secret token")
 
-    payload = await request.json()
     callback_query = payload.get("callback_query") or {}
     if callback_query:
         message = callback_query.get("message") or {}
@@ -318,6 +325,48 @@ async def telegram_webhook(
                 _send_text(token, chat_id, str(exc))
                 return {"ok": True}
             _send_text_with_keyboard(token, chat_id, reply, _build_add_form_keyboard())
+        elif data == SMART_PASTE_CANCEL_CALLBACK:
+            _SMART_PASTE_STATES.pop(chat_id, None)
+            requests.post(
+                _telegram_api(token, "answerCallbackQuery"),
+                json={"callback_query_id": callback_query.get("id")},
+                timeout=10,
+            )
+            _send_text(token, chat_id, "Đã hủy các lịch trên.")
+        elif data == SMART_PASTE_ADD_ALL_CALLBACK:
+            state = _SMART_PASTE_STATES.pop(chat_id, None)
+            requests.post(
+                _telegram_api(token, "answerCallbackQuery"),
+                json={"callback_query_id": callback_query.get("id")},
+                timeout=10,
+            )
+            if not state or not state.get("events"):
+                _send_text(token, chat_id, "Không tìm thấy lịch chờ xác nhận hoặc đã hết hạn.")
+                return {"ok": True}
+            events = state.get("events") or []
+            added_titles: list[str] = []
+            for ev in events:
+                title = ev.get("title") or "Lịch hẹn"
+                appt_date = ev.get("appointment_date")
+                start_time = ev.get("start_time")
+                end_time = ev.get("end_time")
+                location = ev.get("location")
+                note = ev.get("note")
+                insert_calendar_event(
+                    title=title,
+                    appointment_date=appt_date,
+                    start_time=start_time,
+                    end_time=end_time,
+                    location=location,
+                    note=note,
+                )
+                added_titles.append(title)
+            titles_summary = "\n".join(f"- {t}" for t in added_titles)
+            _send_text(
+                token,
+                chat_id,
+                f"✅ Đã thêm {len(added_titles)} lịch vào Google Calendar:\n{titles_summary}",
+            )
         return {"ok": True}
 
     message = payload.get("message") or {}
@@ -335,10 +384,15 @@ async def telegram_webhook(
     form_state = _ADD_FORM_STATES.get(chat_id)
     logger.info("Telegram message received chat_id=%s command=%s", chat_id, text.split(maxsplit=1)[0] if text.startswith("/") else "<text>")
     try:
-        if lowered == "/cancel" and form_state:
-            _ADD_FORM_STATES.pop(chat_id, None)
-            _send_text(token, chat_id, "Đã hủy form thêm lịch.")
-            return {"ok": True}
+        if lowered == "/cancel":
+            if form_state:
+                _ADD_FORM_STATES.pop(chat_id, None)
+                _send_text(token, chat_id, "Đã hủy form thêm lịch.")
+                return {"ok": True}
+            if chat_id in _SMART_PASTE_STATES:
+                _SMART_PASTE_STATES.pop(chat_id, None)
+                _send_text(token, chat_id, "Đã hủy các lịch trên.")
+                return {"ok": True}
 
         if lowered == "/done" and form_state:
             if not _is_add_form_complete(form_state):
@@ -392,7 +446,7 @@ async def telegram_webhook(
             _send_text(token, chat_id, _build_exam_list_text(rows))
             return {"ok": True}
 
-        if lowered.startswith("/schedule") or lowered.startswith("/scheduel"):
+        if lowered.startswith(("/schedule", "/scheduel")):
             parts = text.split(maxsplit=1)
             try:
                 target_date = _parse_schedule_day_arg(parts[1] if len(parts) > 1 else None)
@@ -408,10 +462,75 @@ async def telegram_webhook(
             _ADD_FORM_STATES[chat_id] = state
             _send_add_form_step(token, chat_id, state, prefix="Bắt đầu form thêm lịch.")
             return {"ok": True}
-        _send_text(token, chat_id, ADD_ONLY_GUIDANCE_TEXT)
+
+        # Smart Paste via Gemini
+        gemini_res = parse_events_with_gemini(text, reference_date=local_today())
+        if gemini_res is None:
+            _send_text(
+                token,
+                chat_id,
+                "Mình chưa đọc tự động được đoạn này lúc này. Bạn có thể dùng /add để thêm lịch thủ công.",
+            )
+            return {"ok": True}
+
+        raw_events = gemini_res.get("events")
+        if not isinstance(raw_events, list) or not raw_events:
+            _send_text(
+                token,
+                chat_id,
+                "Mình không tìm thấy lịch hẹn nào trong đoạn tin nhắn này. Bạn có thể dùng /add để thêm lịch thủ công.",
+            )
+            return {"ok": True}
+
+        has_ambiguity = False
+        clarification_msg = ""
+        valid_events = []
+        for raw_ev in raw_events:
+            if not isinstance(raw_ev, dict):
+                has_ambiguity = True
+                break
+            if raw_ev.get("needs_clarification"):
+                has_ambiguity = True
+                clarification_msg = str(raw_ev.get("clarification_question") or "").strip()
+                break
+            conf = raw_ev.get("confidence")
+            if conf is not None:
+                try:
+                    if float(conf) < 0.6:
+                        has_ambiguity = True
+                        break
+                except (ValueError, TypeError):
+                    pass
+            try:
+                norm_ev = _normalize_smart_paste_event(raw_ev)
+                valid_events.append(norm_ev)
+            except Exception as val_err:
+                logger.info("Event validation failed: %s", val_err)
+                has_ambiguity = True
+                break
+
+        if has_ambiguity or not valid_events:
+            if clarification_msg:
+                reply = f"Mình chưa đủ chắc để tạo lịch từ đoạn này: {clarification_msg}\nBạn bổ sung ngày/giờ rõ hơn nhé."
+            else:
+                reply = "Mình chưa đủ chắc để tạo lịch từ đoạn này. Bạn bổ sung ngày/giờ rõ hơn nhé."
+            _send_text(token, chat_id, reply)
+            return {"ok": True}
+
+        _SMART_PASTE_STATES[chat_id] = {
+            "events": valid_events,
+            "original_text": text,
+        }
+        preview_text = _build_smart_paste_preview_text(valid_events)
+        _send_text_with_keyboard(
+            token,
+            chat_id,
+            preview_text,
+            _build_smart_paste_keyboard(),
+        )
         return {"ok": True}
     except Exception as exc:
-        logger.exception("Webhook processing failed: %s", exc)
+        logger.exception("Webhook processing failed")
         _send_text(token, chat_id, f"Khong tao duoc lich hen: {exc}")
         return {"ok": True}
 

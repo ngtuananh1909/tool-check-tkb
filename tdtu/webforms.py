@@ -5,6 +5,7 @@ Generic ASP.NET WebForms state management and postback helper.
 import logging
 from typing import Any
 from urllib.parse import urlparse
+
 import requests
 from bs4 import BeautifulSoup
 
@@ -67,7 +68,6 @@ class WebFormsPage:
         Updates self.html and self.url with the new response content.
         Validates postback response semantically and structurally.
         """
-        from urllib.parse import parse_qs, urlparse
         from tdtu.client import ALLOWED_HOSTS, safe_request
 
         payload = self.hidden_fields()

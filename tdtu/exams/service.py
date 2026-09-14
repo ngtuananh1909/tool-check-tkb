@@ -8,8 +8,12 @@ import re
 from typing import Any
 
 from tdtu.client import TDTUClient, sanitize_url
+from tdtu.exams.parser import (
+    deduplicate_exam_rows,
+    parse_exam_html,
+    validate_exam_tab_structure,
+)
 from tdtu.exceptions import TDTUProtocolError
-from tdtu.exams.parser import deduplicate_exam_rows, parse_exam_html, validate_exam_tab_structure
 
 logger = logging.getLogger(__name__)
 

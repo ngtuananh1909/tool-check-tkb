@@ -18,9 +18,9 @@ import logging
 import os
 import re
 import time
-from requests import RequestException
 
 import requests
+from requests import RequestException
 
 from calendar_sync import (
     SYNC_SOURCE_DEADLINE,
@@ -57,6 +57,8 @@ CREATE_ERROR_PREFIX = "Minh chua tao duoc lich hen luc nay"
 ADD_FORM_DONE_CALLBACK = "addform:done"
 ADD_FORM_CANCEL_CALLBACK = "addform:cancel"
 ADD_FORM_SKIP_WHERE_CALLBACK = "addform:skip_where"
+SMART_PASTE_ADD_ALL_CALLBACK = "smartpaste:add_all"
+SMART_PASTE_CANCEL_CALLBACK = "smartpaste:cancel"
 
 
 def _load_dotenv() -> None:
@@ -281,11 +283,80 @@ def _normalize_time_value(value: object) -> str | None:
     text = _normalize_optional_text(value)
     if not text:
         return None
-    if re.fullmatch(r"\d{2}:\d{2}:\d{2}", text):
-        return text
-    if re.fullmatch(r"\d{2}:\d{2}", text):
-        return f"{text}:00"
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", text)
+    if m:
+        h, mi, s = m.groups()
+        hour, minute, sec = int(h), int(mi), int(s or 0)
+        if 0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= sec <= 59:
+            return f"{hour:02d}:{minute:02d}:{sec:02d}"
     return None
+
+
+def _normalize_smart_paste_event(payload: dict) -> dict:
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        raise ValueError("Thiếu tiêu đề lịch.")
+
+    date_raw = str(payload.get("appointment_date") or "").strip()
+    if not date_raw:
+        raise ValueError("Thiếu ngày lịch.")
+    appt_date = dt.date.fromisoformat(date_raw)
+
+    start_time = _normalize_time_value(payload.get("start_time"))
+    end_time = _normalize_time_value(payload.get("end_time"))
+    location = _normalize_optional_text(payload.get("location"))
+    note = _normalize_optional_text(payload.get("note"))
+
+    return {
+        "title": title,
+        "appointment_date": appt_date,
+        "start_time": start_time,
+        "end_time": end_time,
+        "location": location,
+        "note": note,
+    }
+
+
+def _build_smart_paste_preview_text(events: list[dict]) -> str:
+    num_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    blocks = [f"📥 Mình tìm thấy {len(events)} lịch:"]
+    for idx, ev in enumerate(events):
+        emoji = num_emojis[idx] if idx < len(num_emojis) else f"{idx + 1}."
+        title = ev.get("title") or "Lịch hẹn"
+        appt_date = ev.get("appointment_date")
+        date_str = appt_date.strftime("%d/%m/%Y") if isinstance(appt_date, dt.date) else str(appt_date)
+        start_time = ev.get("start_time")
+        end_time = ev.get("end_time")
+        location = ev.get("location")
+        note = ev.get("note")
+
+        item_lines = [f"{emoji} {title}", f"📅 {date_str}"]
+        if start_time and end_time:
+            s = start_time[:5] if len(start_time) >= 5 and start_time[2] == ":" else start_time
+            e = end_time[:5] if len(end_time) >= 5 and end_time[2] == ":" else end_time
+            item_lines.append(f"⏰ {s} - {e}")
+        elif start_time:
+            s = start_time[:5] if len(start_time) >= 5 and start_time[2] == ":" else start_time
+            item_lines.append(f"⏰ {s}")
+        if location:
+            item_lines.append(f"📍 {location}")
+        if note:
+            item_lines.append(f"📝 {note}")
+        blocks.append("\n".join(item_lines))
+    blocks.append("Kiểm tra lại trước khi lưu nhé.")
+    return "\n\n".join(blocks)
+
+
+def _build_smart_paste_keyboard() -> dict[str, list[list[dict[str, str]]]]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Thêm tất cả", "callback_data": SMART_PASTE_ADD_ALL_CALLBACK},
+                {"text": "❌ Hủy", "callback_data": SMART_PASTE_CANCEL_CALLBACK},
+            ]
+        ]
+    }
+
 
 
 def _parse_time_field(raw: str) -> tuple[dt.date, str]:
@@ -896,7 +967,7 @@ def run() -> None:
                     _send_text(token, chat_id, _build_exam_list_text(rows))
                     continue
 
-                if lowered.startswith("/schedule") or lowered.startswith("/scheduel"):
+                if lowered.startswith(("/schedule", "/scheduel")):
                     parts = text.split(maxsplit=1)
                     try:
                         target_date = _parse_schedule_day_arg(parts[1] if len(parts) > 1 else None)

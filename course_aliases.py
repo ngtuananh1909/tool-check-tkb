@@ -1,6 +1,5 @@
 import re
 
-
 MANUAL_ALIASES: dict[str, str] = {
 }
 

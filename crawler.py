@@ -14,24 +14,23 @@ Optional environment variables:
     CRAWLER_WEEKS_AHEAD – Number of future weeks to crawl beyond current week
 """
 
+import datetime
 import logging
 import os
 import re
-import datetime
-import hashlib
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
 
-from time_utils import local_today
 from tdtu import (
     TDTUClient,
-    fetch_schedule_http,
     fetch_exam_schedule_http,
+    fetch_schedule_http,
     get_current_semester_http,
-    TDTUError,
 )
+from time_utils import local_today
 
 logger = logging.getLogger(__name__)
 

@@ -7,8 +7,8 @@ malformed exam tab, valid empty exam tab, and semester verification by label and
 import unittest
 from unittest.mock import MagicMock, patch
 
-from tdtu.exceptions import TDTUProtocolError
 from tdtu.exams.service import fetch_exam_schedule_http
+from tdtu.exceptions import TDTUProtocolError
 from tdtu.schedule.service import fetch_schedule_http
 
 

@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from crawler import fetch_exam_schedule, fetch_schedule
-from tdtu.snapshot import FetchResult, PortalSnapshot, fetch_portal_snapshot
+from tdtu.snapshot import fetch_portal_snapshot
 
 
 class TestCrawlerCompatibility(unittest.TestCase):
@@ -124,7 +124,6 @@ class TestCrawlerCompatibility(unittest.TestCase):
         mock_portal.assert_not_called()
 
     def test_privacy_logging_no_timetable_content_in_info_logs(self):
-        import logging
         from crawler import _parse_schedule_table
 
         mock_page = MagicMock()

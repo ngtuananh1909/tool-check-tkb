@@ -3,13 +3,13 @@ Portal Snapshot Service for shared single-login portal sync cycles.
 Ensures one authentication session per hourly sync with per-operation FetchResult models.
 """
 
-from dataclasses import dataclass, field
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
 from tdtu.client import TDTUClient, sanitize_url
-from tdtu.exceptions import TDTUError
 from tdtu.exams.service import fetch_exam_schedule_http
+from tdtu.exceptions import TDTUError
 from tdtu.schedule.service import fetch_schedule_http, get_current_semester_http
 
 logger = logging.getLogger(__name__)

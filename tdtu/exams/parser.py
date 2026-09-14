@@ -7,10 +7,11 @@ import datetime
 import logging
 import re
 from typing import Any
+
 from bs4 import BeautifulSoup
 
-from time_utils import local_today
 from tdtu.exceptions import TDTUParsingError
+from time_utils import local_today
 
 logger = logging.getLogger(__name__)
 

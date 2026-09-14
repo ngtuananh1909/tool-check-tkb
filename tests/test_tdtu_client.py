@@ -6,8 +6,6 @@ Uses fake test credentials only.
 import unittest
 from unittest.mock import MagicMock, patch
 
-import requests
-
 from tdtu.client import TDTUClient, sanitize_url
 from tdtu.exceptions import TDTUAuthenticationError
 

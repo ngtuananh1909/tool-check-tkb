@@ -5,8 +5,6 @@ Unit tests for WebForms hidden field extraction and state tracking across postba
 import unittest
 from unittest.mock import MagicMock
 
-import requests
-
 from tdtu.webforms import WebFormsPage, extract_hidden_fields
 
 

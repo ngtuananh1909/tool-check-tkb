@@ -147,6 +147,47 @@ def send_error_alert(error: str) -> None:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _format_class_time(cls: dict) -> str:
+    start_period = cls.get("start_period")
+    end_period = cls.get("end_period")
+    start_time = _display_time(cls.get("start_time"))
+    end_time = _display_time(cls.get("end_time"))
+
+    valid_start_p = None
+    valid_end_p = None
+    if start_period is not None:
+        try:
+            val = int(start_period)
+            if val > 0:
+                valid_start_p = val
+        except (ValueError, TypeError):
+            pass
+    if end_period is not None:
+        try:
+            val = int(end_period)
+            if val > 0:
+                valid_end_p = val
+        except (ValueError, TypeError):
+            pass
+
+    has_period = (valid_start_p is not None and valid_end_p is not None)
+    time_str = ""
+    if start_time and end_time:
+        time_str = f"{start_time}–{end_time}"
+    elif start_time:
+        time_str = start_time
+    elif end_time:
+        time_str = end_time
+
+    if has_period and time_str:
+        return f"Tiết {valid_start_p}→{valid_end_p} · {time_str}"
+    elif has_period:
+        return f"Tiết {valid_start_p}→{valid_end_p}"
+    elif time_str:
+        return time_str
+    return "Chưa rõ thời gian"
+
+
 def _build_message(classes: list[dict]) -> str:
     """Return a MarkdownV2-formatted string for *classes*."""
     today = local_today()
@@ -164,16 +205,13 @@ def _build_message(classes: list[dict]) -> str:
         for idx, cls in enumerate(classes, start=1):
             subject = _escape(cls.get("subject_name", "N/A"))
             room = _escape(cls.get("room", "N/A"))
-            start = cls.get("start_period", 0)
-            end = cls.get("end_period", 0)
-            start_time = _escape(PERIOD_TIME.get(start, str(start)))
-            end_time = _escape(PERIOD_TIME.get(end, str(end)))
+            time_line = _escape(_format_class_time(cls))
             status_label = _escape(_format_class_status(cls.get("status")))
 
             lines += [
                 f"*{_escape(str(idx))}\\.* 📚 {subject}",
                 f"   📍 Phòng: `{room}`",
-                f"   ⏰ Tiết {_escape(str(start))} → {_escape(str(end))}  \\({start_time} \\- {end_time}\\)",
+                f"   ⏰ {time_line}",
                 f"   🔖 Trạng thái: {status_label}",
                 "",
             ]
@@ -205,16 +243,13 @@ def _build_combined_message(
         for idx, cls in enumerate(classes, start=1):
             subject = _escape(cls.get("subject_name", "N/A"))
             room = _escape(cls.get("room", "N/A"))
-            start = cls.get("start_period", 0)
-            end = cls.get("end_period", 0)
-            start_time = _escape(PERIOD_TIME.get(start, str(start)))
-            end_time = _escape(PERIOD_TIME.get(end, str(end)))
+            time_line = _escape(_format_class_time(cls))
             status_label = _escape(_format_class_status(cls.get("status")))
 
             lines += [
                 f"{_escape(str(idx))}\\. {subject}",
                 f"   📍 `{room}`",
-                f"   ⏰ Tiết {_escape(str(start))}→{_escape(str(end))} \\({start_time}\\-{end_time}\\)",
+                f"   ⏰ {time_line}",
                 f"   🔖 Trạng thái: {status_label}",
             ]
         lines.append("")

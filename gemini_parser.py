@@ -11,7 +11,8 @@ import datetime as dt
 import json
 import logging
 import os
-import re# Trong gemini_parser.py dòng ~33-67
+import re
+
 SYSTEM_PROMPT = """
 Bạn là trợ lý lịch hẹn của người dùng, có giọng nói dịu dàng, thân thiết, 
 không gắt gao, và thực tế. Luôn vui vẻ khi tiếp xúc.
@@ -95,6 +96,93 @@ JSON schema:
         return payload
     except Exception as exc:
         logger.warning("Gemini appointment parse failed: %s", exc)
+        return None
+
+
+def parse_events_with_gemini(text: str, *, reference_date: dt.date | None = None) -> dict[str, Any] | None:
+    """Parse a natural-language message containing one or more events into structured JSON.
+
+    Returns a dict like {"events": [...]} or None when Gemini is unavailable or parsing fails.
+    """
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        logger.info("Gemini multi-event parse skipped: GEMINI_API_KEY is not set.")
+        return None
+
+    try:
+        import google.generativeai as genai
+    except Exception as exc:
+        logger.warning("Gemini multi-event parse skipped: SDK unavailable: %s", exc)
+        return None
+
+    ref_date = reference_date or local_today()
+    genai.configure(api_key=api_key)
+
+    prompt = f"""
+You are a strict JSON extractor for personal schedule events, meetings, appointments, and deadlines.
+The user's message may contain one or multiple distinct events. Extract ALL of them.
+Return ONLY a valid JSON object matching the JSON schema below and nothing else.
+
+Input message:
+{text}
+
+Reference date (today):
+{ref_date.isoformat()} ({ref_date.strftime("%A")})
+
+Rules:
+- Identify all distinct events/appointments mentioned in the message.
+- If the message does not describe any event or appointment, return {{"events": []}}.
+- For each event:
+  - Infer the appointment date in YYYY-MM-DD based on the reference date.
+  - If start time is specified, format as HH:MM or HH:MM:SS. If missing, set start_time to null.
+  - If end time is specified, format as HH:MM or HH:MM:SS. If missing, set end_time to null.
+  - If location exists, put it in location; otherwise null.
+  - If extra notes exist, put them in note; otherwise null.
+  - Set title to a short, concise, human-readable summary of the event in Vietnamese.
+  - Set confidence between 0.0 and 1.0.
+  - Set needs_clarification to true if date, time, or event purpose is ambiguous or contradictory.
+  - If needs_clarification is true, provide a brief clarification_question in Vietnamese.
+
+JSON schema:
+{{
+  "events": [
+    {{
+      "title": "string",
+      "appointment_date": "YYYY-MM-DD",
+      "start_time": "HH:MM:SS or null",
+      "end_time": "HH:MM:SS or null",
+      "location": "string or null",
+      "note": "string or null",
+      "confidence": 0.0,
+      "needs_clarification": false,
+      "clarification_question": "string or null"
+    }}
+  ]
+}}
+""".strip()
+
+    try:
+        model = genai.GenerativeModel(DEFAULT_MODEL)
+        response = model.generate_content(
+            prompt,
+            generation_config={
+                "temperature": 0,
+                "response_mime_type": "application/json",
+            },
+        )
+        raw_text = _extract_text(response)
+        payload = _load_json(raw_text)
+        if not isinstance(payload, dict):
+            return None
+        events = payload.get("events")
+        if not isinstance(events, list):
+            if "title" in payload and "appointment_date" in payload:
+                payload = {"events": [payload]}
+            else:
+                return None
+        return payload
+    except Exception as exc:
+        logger.warning("Gemini multi-event parse failed: %s", exc)
         return None
 
 

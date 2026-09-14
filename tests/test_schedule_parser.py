@@ -3,15 +3,14 @@ Unit tests for BeautifulSoup HTML schedule parser.
 Checks status detection, Headerrow filtering, and deduplication logic.
 """
 
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from tdtu.schedule.parser import (
     _deduplicate_schedule,
     detect_status,
     parse_active_semester,
     parse_general_schedule_table,
-    parse_schedule_html,
     parse_semester_options,
 )
 

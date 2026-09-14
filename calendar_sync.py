@@ -7,7 +7,6 @@ import hashlib
 import json
 import logging
 import os
-import socket
 import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -333,6 +332,28 @@ def fetch_events_from_calendar(target_date: dt.date, days_ahead: int = 0) -> tup
         location = event.get("location", "")
         notes = event.get("description", "")
         source_type = _event_source_type(event)
+
+        private = event.get("extendedProperties", {}).get("private", {}) if isinstance(event.get("extendedProperties"), dict) else {}
+        start_period_raw = private.get("start_period")
+        end_period_raw = private.get("end_period")
+        status_raw = private.get("class_status") or private.get("status")
+
+        start_period = None
+        if start_period_raw is not None:
+            try:
+                start_period = int(start_period_raw)
+            except (ValueError, TypeError):
+                start_period = None
+
+        end_period = None
+        if end_period_raw is not None:
+            try:
+                end_period = int(end_period_raw)
+            except (ValueError, TypeError):
+                end_period = None
+
+        status = str(status_raw).strip() if status_raw else "scheduled"
+
         row = {
             "title": title,
             "subject_name": title,
@@ -345,8 +366,11 @@ def fetch_events_from_calendar(target_date: dt.date, days_ahead: int = 0) -> tup
             "notes": notes,
             "appointment_date": event_date.isoformat(),
             "exam_date": event_date.isoformat(),
+            "start_period": start_period,
+            "end_period": end_period,
+            "status": status,
         }
-        if source_type == SYNC_SOURCE_CLASS_SESSION and row["appointment_date"] == target_date.isoformat():
+        if source_type in {SYNC_SOURCE_CLASS_SESSION, "schedule"} and row["appointment_date"] == target_date.isoformat():
             classes.append(row)
         elif source_type == SYNC_SOURCE_EXAM:
             exams.append(row)
@@ -487,197 +511,6 @@ def _calendar_sync_weeks() -> int:
     return max(1, weeks)
 
 
-def _build_sync_items(
-    schedule_rows: list[dict],
-    appointments: list[dict],
-    exams: list[dict],
-    target_date: dt.date,
-) -> list[dict]:
-    timezone = os.environ.get("APP_TIMEZONE", "Asia/Ho_Chi_Minh")
-    items: list[dict] = []
-
-    sync_weeks = _calendar_sync_weeks()
-
-    # Load contacts for attendee auto-add on schedule events.
-    all_contacts = _load_contacts()
-    all_attendees = _contacts_to_attendees(all_contacts)
-
-    for cls in schedule_rows:
-        subject = str(cls.get("subject_name") or "").strip() or "Lop hoc"
-        room = str(cls.get("room") or "").strip() or None
-        day_of_week = str(cls.get("day_of_week") or "").strip()
-        first_date = _next_weekday_date(target_date, day_of_week)
-        start_dt, end_dt = _class_datetimes(cls, first_date, timezone)
-        recurrence = _class_recurrence(day_of_week, sync_weeks)
-        source_key = _class_source_key(cls)
-
-        payload = {
-            "summary": subject,
-            "location": room,
-            "description": _class_session_status_description(cls),
-            "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone},
-            "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
-        }
-        _apply_default_reminder(payload)
-        if all_attendees:
-            payload["attendees"] = all_attendees
-        if recurrence:
-            payload["recurrence"] = recurrence
-        source_hash = _sync_hash({
-            "source_type": SYNC_SOURCE_SCHEDULE,
-            "subject_name": subject,
-            "room": room,
-            "day_of_week": day_of_week,
-            "start_period": _to_int(cls.get("start_period")),
-            "end_period": _to_int(cls.get("end_period")),
-            "recurrence": recurrence,
-            "payload": payload,
-        })
-        payload["extendedProperties"] = {
-            "private": {
-                "source": BOT_SOURCE_TAG,
-                "source_type": SYNC_SOURCE_SCHEDULE,
-                "source_key": source_key,
-                "source_hash": source_hash,
-            }
-        }
-        items.append(
-            {
-                "source_type": SYNC_SOURCE_SCHEDULE,
-                "source_key": source_key,
-                "source_hash": source_hash,
-                "payload": payload,
-            }
-        )
-
-    for appointment in appointments:
-        appointment_id = appointment.get("id")
-        title = str(appointment.get("title") or "").strip() or "Lich hen"
-        location = str(appointment.get("location") or "").strip() or None
-        note = str(appointment.get("note") or "").strip() or None
-        appt_date = _parse_date(appointment.get("appointment_date"), target_date)
-        source_key = _appointment_source_key(appointment)
-
-        start_time = _display_time(appointment.get("start_time"))
-        end_time = _display_time(appointment.get("end_time"))
-
-        if start_time:
-            start_dt = _to_datetime(appt_date, start_time, timezone)
-            if end_time:
-                end_dt = _to_datetime(appt_date, end_time, timezone)
-            else:
-                end_dt = start_dt + dt.timedelta(hours=1)
-            payload = {
-                "summary": title,
-                "location": location,
-                "description": note,
-                "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone},
-                "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
-            }
-            _apply_default_reminder(payload)
-        else:
-            payload = {
-                "summary": title,
-                "location": location,
-                "description": note,
-                "start": {"date": appt_date.isoformat()},
-                "end": {"date": (appt_date + dt.timedelta(days=1)).isoformat()},
-            }
-
-        source_hash = _sync_hash({
-            "source_type": SYNC_SOURCE_APPOINTMENT,
-            "appointment_id": appointment_id,
-            "title": title,
-            "appointment_date": appt_date.isoformat(),
-            "start_time": start_time,
-            "end_time": end_time,
-            "location": location,
-            "note": note,
-            "payload": payload,
-        })
-        payload["extendedProperties"] = {
-            "private": {
-                "source": BOT_SOURCE_TAG,
-                "source_type": SYNC_SOURCE_APPOINTMENT,
-                "source_key": source_key,
-                "source_hash": source_hash,
-            }
-        }
-        items.append(
-            {
-                "source_type": SYNC_SOURCE_APPOINTMENT,
-                "source_key": source_key,
-                "source_hash": source_hash,
-                "payload": payload,
-            }
-        )
-
-    for exam in exams:
-        exam_date = _parse_date(exam.get("exam_date"), target_date)
-        title = _exam_calendar_title(exam)
-        location = str(exam.get("exam_room") or "").strip() or None
-        note = _exam_calendar_description(exam)
-        start_time = _display_time(exam.get("start_time"))
-        end_time = _display_time(exam.get("end_time"))
-        exam_type = str(exam.get("exam_type") or "").strip() or None
-        source_key = _exam_source_key(exam)
-
-        if start_time:
-            start_dt = _to_datetime(exam_date, start_time, timezone)
-            if end_time:
-                end_dt = _to_datetime(exam_date, end_time, timezone)
-            else:
-                end_dt = start_dt + dt.timedelta(hours=2)
-            payload = {
-                "summary": title,
-                "location": location,
-                "description": note,
-                "colorId": EXAM_EVENT_COLOR_ID,
-                "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone},
-                "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
-            }
-            _apply_default_reminder(payload, minutes=EXAM_EVENT_REMINDER_MINUTES)
-        else:
-            payload = {
-                "summary": title,
-                "location": location,
-                "description": note,
-                "colorId": EXAM_EVENT_COLOR_ID,
-                "start": {"date": exam_date.isoformat()},
-                "end": {"date": (exam_date + dt.timedelta(days=1)).isoformat()},
-            }
-
-        source_hash = _sync_hash(
-            {
-                "source_type": SYNC_SOURCE_EXAM,
-                "exam_id": exam.get("id"),
-                "subject_name": title,
-                "exam_date": exam_date.isoformat(),
-                "start_time": start_time,
-                "end_time": end_time,
-                "exam_room": location,
-                "exam_type": exam_type,
-                "payload": payload,
-            }
-        )
-        payload["extendedProperties"] = {
-            "private": {
-                "source": BOT_SOURCE_TAG,
-                "source_type": SYNC_SOURCE_EXAM,
-                "source_key": source_key,
-                "source_hash": source_hash,
-            }
-        }
-        items.append(
-            {
-                "source_type": SYNC_SOURCE_EXAM,
-                "source_key": source_key,
-                "source_hash": source_hash,
-                "payload": payload,
-            }
-        )
-
-    return items
 
 
 def _class_session_status_description(session: dict) -> str:
@@ -759,13 +592,20 @@ def _build_sync_items_from_sessions(
                 "payload": payload,
             }
         )
+        private_props = {
+            "source": BOT_SOURCE_TAG,
+            "source_type": SYNC_SOURCE_CLASS_SESSION,
+            "source_key": source_key,
+            "source_hash": source_hash,
+        }
+        if session.get("start_period") is not None:
+            private_props["start_period"] = str(session.get("start_period"))
+        if session.get("end_period") is not None:
+            private_props["end_period"] = str(session.get("end_period"))
+        if status:
+            private_props["class_status"] = str(status)
         payload["extendedProperties"] = {
-            "private": {
-                "source": BOT_SOURCE_TAG,
-                "source_type": SYNC_SOURCE_CLASS_SESSION,
-                "source_key": source_key,
-                "source_hash": source_hash,
-            }
+            "private": private_props,
         }
         items.append(
             {
@@ -969,14 +809,6 @@ def _build_deadline_sync_items(deadlines: list[dict], timezone: str) -> list[dic
     return items
 
 
-def _build_calendar_events(
-    schedule_rows: list[dict],
-    appointments: list[dict],
-    target_date: dt.date,
-) -> list[dict]:
-    return [item["payload"] for item in _build_sync_items(schedule_rows, appointments, [], target_date)]
-
-
 def _parse_calendar_event_start(event: dict) -> dt.datetime | None:
     start = event.get("start") or {}
     if not isinstance(start, dict):
@@ -1136,14 +968,14 @@ def _list_bot_events(service: Resource, calendar_id: str) -> tuple[dict[str, dic
     while True:
         response = _execute_calendar_request(
             "calendar list bot events",
-            lambda: (
+            lambda pt=page_token: (
                 service.events()
                 .list(
                     calendarId=calendar_id,
                     singleEvents=False,
                     privateExtendedProperty=f"source={BOT_SOURCE_TAG}",
                     maxResults=2500,
-                    pageToken=page_token,
+                    pageToken=pt,
                 )
                 .execute()
             ),
@@ -1208,7 +1040,7 @@ def _execute_calendar_request(operation_name: str, action):
             if status not in CALENDAR_API_RETRY_STATUSES or attempt == CALENDAR_API_MAX_ATTEMPTS:
                 raise
             last_exc = exc
-        except (TimeoutError, socket.timeout, OSError) as exc:
+        except (TimeoutError, OSError) as exc:
             if attempt == CALENDAR_API_MAX_ATTEMPTS:
                 raise
             last_exc = exc

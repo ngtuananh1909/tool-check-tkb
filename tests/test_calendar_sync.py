@@ -269,6 +269,68 @@ class CalendarOnlySyncTests(unittest.TestCase):
             )
         self.assertEqual(service._events.deleted, [])
 
+    def test_fetch_events_from_calendar_reads_period_and_status_metadata(self) -> None:
+        target = dt.date.today()
+        start_str = f"{target.isoformat()}T06:50:00+07:00"
+        end_str = f"{target.isoformat()}T09:20:00+07:00"
+        service = _Service([
+            {
+                "summary": "Web Programming",
+                "location": "C204",
+                "start": {"dateTime": start_str},
+                "end": {"dateTime": end_str},
+                "extendedProperties": {
+                    "private": {
+                        "source": calendar_sync.BOT_SOURCE_TAG,
+                        "source_type": SYNC_SOURCE_CLASS_SESSION,
+                        "start_period": "1",
+                        "end_period": "3",
+                        "class_status": "makeup",
+                    }
+                },
+            }
+        ])
+        with (
+            patch.dict(os.environ, {"GOOGLE_CALENDAR_ID": "cal-id", "GOOGLE_SERVICE_ACCOUNT_JSON": "{}"}, clear=False),
+            patch.object(calendar_sync, "_build_calendar_service", return_value=(service, "svc@example.com")),
+        ):
+            classes, _, _ = calendar_sync.fetch_events_from_calendar(target)
+
+        self.assertEqual(len(classes), 1)
+        row = classes[0]
+        self.assertEqual(row["subject_name"], "Web Programming")
+        self.assertEqual(row["start_period"], 1)
+        self.assertEqual(row["end_period"], 3)
+        self.assertEqual(row["status"], "makeup")
+        self.assertEqual(row["start_time"], "06:50")
+        self.assertEqual(row["end_time"], "09:20")
+
+    def test_build_sync_items_from_sessions_includes_period_and_status(self) -> None:
+        target = dt.date.today()
+        items = _build_sync_items_from_sessions(
+            [
+                {
+                    "id": "class-1",
+                    "subject_name": "Web Programming",
+                    "room": "C204",
+                    "session_date": target.isoformat(),
+                    "start_time": "06:50",
+                    "end_time": "09:20",
+                    "start_period": 1,
+                    "end_period": 3,
+                    "status": "scheduled",
+                }
+            ],
+            [],
+            target,
+        )
+        self.assertEqual(len(items), 1)
+        props = items[0]["payload"]["extendedProperties"]["private"]
+        self.assertEqual(props["start_period"], "1")
+        self.assertEqual(props["end_period"], "3")
+        self.assertEqual(props["class_status"], "scheduled")
+
 
 if __name__ == "__main__":
     unittest.main()
+

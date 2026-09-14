@@ -4,20 +4,18 @@ from __future__ import annotations
 
 import datetime as dt
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from playwright.sync_api import sync_playwright
 
 from elearning.crawler import (
-    DeadlineCrawlResult,
     PlaywrightElearningCrawler,
     compute_crawl_window,
 )
 from elearning.exceptions import (
     ElearningAuthError,
     ElearningCrawlError,
-    ElearningError,
 )
 from elearning.mapper import (
     classify_event_kind,
@@ -421,7 +419,6 @@ class TestPlaywrightCrawlerDOMFixtures(unittest.TestCase):
             # Simulate navigation redirecting to login
             self.page.set_content("<div>Login required</div>")
             # Override url property
-            return None
 
         with (
             patch.object(self.page, "goto", side_effect=mock_goto),

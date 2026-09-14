@@ -8,8 +8,8 @@ import re
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
-from playwright.sync_api import Page, sync_playwright
 from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import Page, sync_playwright
 
 from elearning.exceptions import (
     ElearningAuthError,
