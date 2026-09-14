@@ -931,12 +931,12 @@ def _parse_exam_table(page) -> list[dict]:
                     const head = Array.from(table.querySelectorAll("tr:first-child th, tr:first-child td"))
                         .map((c) => (c.innerText || "").trim().toLowerCase());
                     const allHead = head.join(" ");
-                    const hasSubject = /(môn|mon|subject)/.test(allHead);
+                    const hasSubject = /(^|\s)(môn|mon|subject)($|\s|\|)/i.test(allHead) && !/monday/i.test(allHead);
                     const hasDate = /(ngày|ngay|date)/.test(allHead);
                     const hasTime = /(giờ|gio|time)/.test(allHead);
                     if (!hasSubject || (!hasDate && !hasTime)) continue;
 
-                    const idxSubject = head.findIndex((h) => /(môn|mon|subject)/.test(h));
+                    const idxSubject = head.findIndex((h) => /(^|\s)(môn|mon|subject)($|\s|\|)/i.test(h) && !/monday/i.test(h));
                     const idxDate = head.findIndex((h) => /(ngày|ngay|date)/.test(h));
                     const idxTime = head.findIndex((h) => /(giờ|gio|time)/.test(h));
                     const idxRoom = head.findIndex((h) => /(phòng|phong|room)/.test(h));
@@ -1016,39 +1016,70 @@ def _parse_exam_grid_cells(page) -> list[dict]:
                     if (!text) continue;
 
                     const lowered = text.toLowerCase();
-                    if (!/(ngày\s*thi|ngay\s*thi|date\s*:)/i.test(lowered)) continue;
-                    if (!/(giờ\s*thi|gio\s*thi|time\s*:)/i.test(lowered)) continue;
+                    if (!/(ngày\s*thi|ngay\s*thi|date)/i.test(lowered)) continue;
+                    if (!/(giờ\s*thi|gio\s*thi|time)/i.test(lowered)) continue;
 
-                    const lines = text
-                        .split("\n")
-                        .map((line) => (line || "").trim())
-                        .filter((line) => line.length > 0);
-                    if (!lines.length) continue;
-
-                    const subject = (lines[0] || "").split("|")[0].trim();
+                    let subject = "";
+                    const pOrB = cell.querySelector("p, b");
+                    if (pOrB) {
+                        const clone = pOrB.cloneNode(true);
+                        clone.querySelectorAll(".lbl-lang").forEach((el) => el.remove());
+                        subject = (clone.innerText || "").trim();
+                    }
+                    if (!subject) {
+                        const lines = text
+                            .split("\n")
+                            .map((line) => (line || "").trim())
+                            .filter((line) => line.length > 0);
+                        if (lines.length > 0) {
+                            subject = (lines[0] || "").split("|")[0].trim();
+                        }
+                    }
+                    subject = subject.split("|")[0].trim();
                     if (!subject) continue;
 
-                    const dateLine = lines.find((line) => /(ngày\s*thi|ngay\s*thi|date\s*:)/i.test(line)) || text;
-                    const timeLine = lines.find((line) => /(giờ\s*thi|gio\s*thi|time\s*:)/i.test(line)) || text;
-                    const roomLine = lines.find((line) => /(phòng\s*thi|phong\s*thi|room\s*:)/i.test(line)) || "";
-
-                    const examDate = parseDateIso(dateLine);
+                    const dateMatch = text.match(/(?:ngày\s*thi|ngay\s*thi|date)[^\d]*(\d{1,2}[\/\.-]\d{1,2}(?:[\/\.-]\d{2,4})?)/i);
+                    const examDate = dateMatch ? parseDateIso(dateMatch[1]) : parseDateIso(text);
                     if (!examDate) continue;
 
-                    const start = parseTime(timeLine);
+                    const timeMatch = text.match(/(?:giờ\s*thi|gio\s*thi|time)[^\d]*(\d{1,2}[:h]\d{2})/i);
+                    const start = timeMatch ? parseTime(timeMatch[1]) : parseTime(text);
+
                     let end = "";
-                    const range = (timeLine || "").match(
+                    const range = (text || "").match(
                         /(\d{1,2}[:h]\d{2})\s*(?:-|–|—|to|đến|den|->|~)\s*(\d{1,2}[:h]\d{2})/i
                     );
                     if (range) {
                         end = parseTime(range[2]);
+                    } else if (start) {
+                        const durMatch = text.match(/(?:thời\s*lượng|duration)[^\d]*(\d+)\s*(?:phút|minute|m|min)?/i);
+                        if (durMatch) {
+                            const durMins = parseInt(durMatch[1], 10);
+                            const parts = start.split(":");
+                            const totalMins = parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10) + durMins;
+                            const eh = Math.floor(totalMins / 60) % 24;
+                            const em = totalMins % 60;
+                            end = `${String(eh).padStart(2, "0")}:${String(em).padStart(2, "0")}`;
+                        }
                     }
 
                     let room = "";
-                    const roomMatch = (roomLine || "").match(/(?:phòng\s*thi|phong\s*thi|room)\s*[:\-]?\s*(.+)$/i);
+                    const roomMatch = text.match(/(?:phòng\s*thi|phong\s*thi|phòng|room)\s*(?:\|[^\n:]*)?[:\-]?\s*([A-Za-z0-9_\.-]+)/i);
                     if (roomMatch) {
                         room = roomMatch[1].trim();
                     }
+
+                    const codeMatch = text.match(/\((\d{5,7})\)/);
+                    const code = codeMatch ? codeMatch[1] : "";
+                    const grpMatch = text.match(/(?:nhóm|group)\s*(?:\|[^\n:]*)?[:\-]?\s*(\w+)/i);
+                    const grp = grpMatch ? grpMatch[1] : "";
+                    const subgrpMatch = text.match(/(?:tổ|sub-group)\s*(?:\|[^\n:]*)?[:\-]?\s*(\w+)/i);
+                    const subgrp = subgrpMatch ? subgrpMatch[1] : "";
+
+                    const notesParts = ["Crawled from exam grid"];
+                    if (code) notesParts.push(`Mã MH: ${code}`);
+                    if (grp) notesParts.push(`Nhóm: ${grp}`);
+                    if (subgrp) notesParts.push(`Tổ: ${subgrp}`);
 
                     rows.push({
                         subject_name: subject,
@@ -1057,7 +1088,7 @@ def _parse_exam_grid_cells(page) -> list[dict]:
                         end_time: end,
                         exam_room: room,
                         exam_type: "",
-                        notes: "Crawled from exam grid",
+                        notes: notesParts.join(" - "),
                     });
                 }
             }
