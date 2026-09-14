@@ -344,6 +344,7 @@ def fetch_events_from_calendar(target_date: dt.date, days_ahead: int = 0) -> tup
             "note": notes,
             "notes": notes,
             "appointment_date": event_date.isoformat(),
+            "exam_date": event_date.isoformat(),
         }
         if source_type == SYNC_SOURCE_CLASS_SESSION and row["appointment_date"] == target_date.isoformat():
             classes.append(row)
@@ -475,7 +476,15 @@ def _validate_calendar_target(service: Resource, calendar_id: str, service_accou
                 f"Service account {service_account_email} cannot access calendar '{calendar_id}'. "
                 "Share this calendar with that service account and grant 'Make changes to events'."
             ) from exc
-        raise
+DEFAULT_SYNC_WEEKS = 16
+
+
+def _calendar_sync_weeks() -> int:
+    try:
+        weeks = int(os.environ.get("GOOGLE_CALENDAR_SYNC_WEEKS", str(DEFAULT_SYNC_WEEKS)))
+    except ValueError:
+        weeks = DEFAULT_SYNC_WEEKS
+    return max(1, weeks)
 
 
 def _build_sync_items(
