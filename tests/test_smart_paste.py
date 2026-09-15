@@ -4,8 +4,6 @@ import os
 import unittest
 from unittest.mock import MagicMock, patch
 
-from fastapi.testclient import TestClient
-
 from gemini_parser import parse_events_with_gemini
 from telegram_mvp_bot import (
     SMART_PASTE_ADD_ALL_CALLBACK,
@@ -15,7 +13,41 @@ from telegram_mvp_bot import (
     _normalize_smart_paste_event,
     _normalize_time_value,
 )
-from webhook_app import _ADD_FORM_STATES, _SMART_PASTE_STATES, app
+from webhook_app import (
+    _ADD_FORM_STATES,
+    _SMART_PASTE_STATES,
+    HTTPException,
+    telegram_webhook,
+)
+
+
+def _telegram_response(message_id: str = "m1") -> MagicMock:
+    response = MagicMock(ok=True, status_code=200)
+    response.json.return_value = {"ok": True, "result": {"message_id": message_id}}
+    return response
+
+
+class _DirectResponse:
+    def __init__(self, status_code: int, payload: dict) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _DirectWebhookClient:
+    """Small handler adapter used when the local Starlette TestClient is incompatible."""
+
+    def post(self, _path: str, *, headers: dict[str, str], json: dict) -> _DirectResponse:
+        try:
+            payload = telegram_webhook(
+                json,
+                headers.get("X-Telegram-Bot-Api-Secret-Token"),
+            )
+            return _DirectResponse(200, payload)
+        except HTTPException as exc:
+            return _DirectResponse(exc.status_code, {"detail": exc.detail})
 
 
 class GeminiParserTests(unittest.TestCase):
@@ -43,13 +75,12 @@ class GeminiParserTests(unittest.TestCase):
         mock_response = MagicMock()
         mock_response.text = json.dumps(payload)
 
-        mock_model = MagicMock()
-        mock_model.generate_content.return_value = mock_response
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = mock_response
 
         with (
             patch.dict(os.environ, {"GEMINI_API_KEY": "fake-key"}),
-            patch("google.generativeai.GenerativeModel", return_value=mock_model),
-            patch("google.generativeai.configure"),
+            patch("google.genai.Client", return_value=mock_client),
         ):
             res = parse_events_with_gemini("Tuần sau thứ 3 họp nhóm CNPM lúc 14h tại B402")
 
@@ -88,13 +119,12 @@ class GeminiParserTests(unittest.TestCase):
         mock_response = MagicMock()
         mock_response.text = json.dumps(payload)
 
-        mock_model = MagicMock()
-        mock_model.generate_content.return_value = mock_response
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = mock_response
 
         with (
             patch.dict(os.environ, {"GEMINI_API_KEY": "fake-key"}),
-            patch("google.generativeai.GenerativeModel", return_value=mock_model),
-            patch("google.generativeai.configure"),
+            patch("google.genai.Client", return_value=mock_client),
         ):
             res = parse_events_with_gemini("Text with 2 events")
 
@@ -122,13 +152,12 @@ class GeminiParserTests(unittest.TestCase):
         mock_response = MagicMock()
         mock_response.text = json.dumps(payload)
 
-        mock_model = MagicMock()
-        mock_model.generate_content.return_value = mock_response
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = mock_response
 
         with (
             patch.dict(os.environ, {"GEMINI_API_KEY": "fake-key"}),
-            patch("google.generativeai.GenerativeModel", return_value=mock_model),
-            patch("google.generativeai.configure"),
+            patch("google.genai.Client", return_value=mock_client),
         ):
             res = parse_events_with_gemini("20h làm bài tập")
 
@@ -139,13 +168,12 @@ class GeminiParserTests(unittest.TestCase):
         mock_response = MagicMock()
         mock_response.text = "This is not json at all."
 
-        mock_model = MagicMock()
-        mock_model.generate_content.return_value = mock_response
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = mock_response
 
         with (
             patch.dict(os.environ, {"GEMINI_API_KEY": "fake-key"}),
-            patch("google.generativeai.GenerativeModel", return_value=mock_model),
-            patch("google.generativeai.configure"),
+            patch("google.genai.Client", return_value=mock_client),
         ):
             res = parse_events_with_gemini("some text")
 
@@ -170,13 +198,12 @@ class GeminiParserTests(unittest.TestCase):
         mock_response = MagicMock()
         mock_response.text = json.dumps(payload)
 
-        mock_model = MagicMock()
-        mock_model.generate_content.return_value = mock_response
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = mock_response
 
         with (
             patch.dict(os.environ, {"GEMINI_API_KEY": "fake-key"}),
-            patch("google.generativeai.GenerativeModel", return_value=mock_model),
-            patch("google.generativeai.configure"),
+            patch("google.genai.Client", return_value=mock_client),
         ):
             res = parse_events_with_gemini("hôm nào đi chơi nhé")
 
@@ -189,7 +216,8 @@ class SmartPasteHelperTests(unittest.TestCase):
         self.assertEqual(_normalize_time_value("14:00"), "14:00:00")
         self.assertEqual(_normalize_time_value("14:00:00"), "14:00:00")
         self.assertEqual(_normalize_time_value("9:30"), "09:30:00")
-        self.assertIsNone(_normalize_time_value("25:00"))
+        with self.assertRaises(ValueError):
+            _normalize_time_value("25:00")
         self.assertIsNone(_normalize_time_value(None))
         self.assertIsNone(_normalize_time_value("null"))
 
@@ -249,7 +277,8 @@ class WebhookSmartPasteTests(unittest.TestCase):
     def setUp(self) -> None:
         _SMART_PASTE_STATES.clear()
         _ADD_FORM_STATES.clear()
-        self.client = TestClient(app)
+        self.client = _DirectWebhookClient()
+        self.headers = {"X-Telegram-Bot-Api-Secret-Token": "test-secret"}
 
     def test_plain_text_triggers_smart_paste_preview(self) -> None:
         parsed = {
@@ -268,13 +297,14 @@ class WebhookSmartPasteTests(unittest.TestCase):
             ]
         }
         with (
-            patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123"}),
+            patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123", "TELEGRAM_WEBHOOK_SECRET": "test-secret"}),
             patch("webhook_app.parse_events_with_gemini", return_value=parsed),
-            patch("requests.post") as mock_post,
+            patch("requests.post", return_value=_telegram_response()) as mock_post,
         ):
             resp = self.client.post(
                 "/telegram/webhook",
-                json={"message": {"chat": {"id": 123}, "text": "Mai 14h họp nhóm ở B402"}},
+                headers=self.headers,
+                json={"update_id": 1, "message": {"message_id": 1, "chat": {"id": 123, "type": "private"}, "from": {"id": 123}, "text": "Mai 14h họp nhóm ở B402"}},
             )
             self.assertEqual(resp.status_code, 200)
 
@@ -311,16 +341,18 @@ class WebhookSmartPasteTests(unittest.TestCase):
             "original_text": "...",
         }
         with (
-            patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123"}),
+            patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123", "TELEGRAM_WEBHOOK_SECRET": "test-secret"}),
             patch("webhook_app.insert_calendar_event") as mock_insert,
-            patch("requests.post") as mock_post,
+            patch("requests.post", return_value=_telegram_response()) as mock_post,
         ):
             resp = self.client.post(
                 "/telegram/webhook",
+                headers=self.headers,
                 json={
                     "callback_query": {
                         "id": "cb1",
-                        "message": {"chat": {"id": 123}},
+                        "message": {"message_id": "legacy", "chat": {"id": 123, "type": "private"}},
+                        "from": {"id": 123},
                         "data": SMART_PASTE_ADD_ALL_CALLBACK,
                     }
                 },
@@ -348,16 +380,18 @@ class WebhookSmartPasteTests(unittest.TestCase):
             "original_text": "...",
         }
         with (
-            patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123"}),
+            patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123", "TELEGRAM_WEBHOOK_SECRET": "test-secret"}),
             patch("webhook_app.insert_calendar_event") as mock_insert,
-            patch("requests.post"),
+            patch("requests.post", return_value=_telegram_response()),
         ):
             resp = self.client.post(
                 "/telegram/webhook",
+                headers=self.headers,
                 json={
                     "callback_query": {
                         "id": "cb1",
-                        "message": {"chat": {"id": 123}},
+                        "message": {"message_id": "legacy", "chat": {"id": 123, "type": "private"}},
+                        "from": {"id": 123},
                         "data": SMART_PASTE_CANCEL_CALLBACK,
                     }
                 },
@@ -383,13 +417,14 @@ class WebhookSmartPasteTests(unittest.TestCase):
             ]
         }
         with (
-            patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123"}),
+            patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123", "TELEGRAM_WEBHOOK_SECRET": "test-secret"}),
             patch("webhook_app.parse_events_with_gemini", return_value=parsed),
-            patch("requests.post") as mock_post,
+            patch("requests.post", return_value=_telegram_response()) as mock_post,
         ):
             resp = self.client.post(
                 "/telegram/webhook",
-                json={"message": {"chat": {"id": 123}, "text": "Họp nhé"}},
+                headers=self.headers,
+                json={"update_id": 2, "message": {"message_id": 2, "chat": {"id": 123, "type": "private"}, "from": {"id": 123}, "text": "Họp nhé"}},
             )
             self.assertEqual(resp.status_code, 200)
             self.assertNotIn("123", _SMART_PASTE_STATES)
@@ -398,13 +433,14 @@ class WebhookSmartPasteTests(unittest.TestCase):
 
     def test_gemini_unavailable_falls_back_gracefully(self) -> None:
         with (
-            patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123"}),
+            patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123", "TELEGRAM_WEBHOOK_SECRET": "test-secret"}),
             patch("webhook_app.parse_events_with_gemini", return_value=None),
-            patch("requests.post") as mock_post,
+            patch("requests.post", return_value=_telegram_response()) as mock_post,
         ):
             resp = self.client.post(
                 "/telegram/webhook",
-                json={"message": {"chat": {"id": 123}, "text": "Mai 14h họp"}},
+                headers=self.headers,
+                json={"update_id": 3, "message": {"message_id": 3, "chat": {"id": 123, "type": "private"}, "from": {"id": 123}, "text": "Mai 14h họp"}},
             )
             self.assertEqual(resp.status_code, 200)
             self.assertNotIn("123", _SMART_PASTE_STATES)
@@ -421,13 +457,14 @@ class WebhookSmartPasteTests(unittest.TestCase):
             "where": None,
         }
         with (
-            patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123"}),
+            patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123", "TELEGRAM_WEBHOOK_SECRET": "test-secret"}),
             patch("webhook_app.parse_events_with_gemini") as mock_gemini,
-            patch("requests.post"),
+            patch("requests.post", return_value=_telegram_response()),
         ):
             resp = self.client.post(
                 "/telegram/webhook",
-                json={"message": {"chat": {"id": 123}, "text": "15/09/2026"}},
+                headers=self.headers,
+                json={"update_id": 4, "message": {"message_id": 4, "chat": {"id": 123, "type": "private"}, "from": {"id": 123}, "text": "15/09/2026"}},
             )
             self.assertEqual(resp.status_code, 200)
             # Gemini parser should not be called because add form is active
