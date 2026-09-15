@@ -101,6 +101,17 @@ class SmartPasteBatch:
     preview_message_id: str | None = None
     last_result_message_id: str | None = None
 
+    @property
+    def action_message_id(self) -> str | None:
+        """Telegram message whose inline keyboard is currently actionable.
+
+        The first preview owns the Add/Cancel buttons.  Once a failed result is
+        sent, ``last_result_message_id`` owns the Retry/Cancel buttons instead.
+        Keeping this derived value in one place prevents callbacks from an old
+        message from being accepted after a newer result has replaced it.
+        """
+        return self.last_result_message_id or self.preview_message_id
+
     def snapshot(self) -> SmartPasteBatch:
         return SmartPasteBatch(
             batch_id=self.batch_id,
@@ -575,7 +586,42 @@ class SmartPasteStateStore:
             batch = self._batches.get(batch_id)
             if not batch or batch.chat_id != chat_id or batch.status != SmartPasteBatchStatus.PENDING:
                 return False
-            batch.preview_message_id = message_id
+            batch.preview_message_id = str(message_id).strip() if message_id is not None else None
+            # A pending batch has no result message yet.  This also makes a
+            # duplicate-update preview refresh replace the actionable message.
+            batch.last_result_message_id = None
+            batch.updated_at = self._clock()
+            return True
+
+    def current_action_message_id(self, chat_id: str, batch_id: str) -> str | None:
+        with self._lock:
+            self._cleanup_locked(self._clock())
+            batch = self._batches.get(batch_id)
+            if not batch or batch.chat_id != chat_id:
+                return None
+            return batch.action_message_id
+
+    def set_action_message(self, chat_id: str, batch_id: str, message_id: str | None) -> bool:
+        """Record the result message carrying Retry/Cancel buttons.
+
+        The caller must send the Telegram message first.  If Telegram did not
+        return a message ID, leave the previous actionable message untouched so
+        its buttons remain a recoverable fallback.
+        """
+        normalized_message_id = str(message_id).strip() if message_id is not None else ""
+        if not normalized_message_id:
+            return False
+        with self._lock:
+            batch = self._batches.get(batch_id)
+            if not batch or batch.chat_id != chat_id:
+                return False
+            if batch.status not in {
+                SmartPasteBatchStatus.PARTIAL_FAILED,
+                SmartPasteBatchStatus.FAILED,
+            }:
+                return False
+            batch.last_result_message_id = normalized_message_id
+            batch.updated_at = self._clock()
             return True
 
     def start_processing(self, chat_id: str, batch_id: str, message_id: str | None) -> tuple[str, SmartPasteBatch | None]:
@@ -585,12 +631,12 @@ class SmartPasteStateStore:
             batch = self._batches.get(batch_id)
             if not batch or batch.chat_id != chat_id:
                 return "missing", None
+            if batch.status == SmartPasteBatchStatus.PENDING and now >= batch.expires_at:
+                batch.status = SmartPasteBatchStatus.EXPIRED
+                return "expired", batch.snapshot()
+            if batch.action_message_id and batch.action_message_id != message_id:
+                return "wrong_message", batch.snapshot()
             if batch.status in {SmartPasteBatchStatus.PENDING, SmartPasteBatchStatus.PARTIAL_FAILED, SmartPasteBatchStatus.FAILED}:
-                if batch.status == SmartPasteBatchStatus.PENDING and now >= batch.expires_at:
-                    batch.status = SmartPasteBatchStatus.EXPIRED
-                    return "expired", batch.snapshot()
-                if batch.preview_message_id and batch.preview_message_id != message_id:
-                    return "wrong_message", batch.snapshot()
                 batch.status = SmartPasteBatchStatus.PROCESSING
                 batch.updated_at = now
                 batch.expires_at = now + SMART_PASTE_PROCESSING_LEASE_SECONDS
@@ -651,10 +697,17 @@ class SmartPasteStateStore:
                 self._active_by_chat.pop(chat_id, None)
             return batch.snapshot()
 
-    def cancel(self, chat_id: str, batch_id: str) -> SmartPasteBatch | None:
+    def cancel(
+        self,
+        chat_id: str,
+        batch_id: str,
+        message_id: str | None = None,
+    ) -> SmartPasteBatch | None:
         with self._lock:
             batch = self._batches.get(batch_id)
             if not batch or batch.chat_id != chat_id:
+                return None
+            if message_id is not None and batch.action_message_id and batch.action_message_id != message_id:
                 return None
             if batch.status in {SmartPasteBatchStatus.PENDING, SmartPasteBatchStatus.PARTIAL_FAILED, SmartPasteBatchStatus.FAILED}:
                 batch.status = SmartPasteBatchStatus.CANCELLED

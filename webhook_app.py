@@ -504,22 +504,31 @@ def telegram_webhook(
                 _send_text(token, chat_id, "Nút Smart Paste này đã hết hạn. Bạn hãy dán lại nội dung nhé.")
                 return {"ok": True}
             if action == "cancel":
-                batch = _SMART_PASTE_STATES.cancel(chat_id, batch_id)
-                if not batch:
+                callback_message_id = _callback_message_id(callback_query)
+                current = _SMART_PASTE_STATES.get_batch(chat_id, batch_id)
+                if not current:
                     _send_text(token, chat_id, "Không tìm thấy lịch chờ xác nhận hoặc đã hết hạn.")
-                elif batch.status == SmartPasteBatchStatus.PROCESSING:
+                elif current.action_message_id and current.action_message_id != callback_message_id:
+                    _send_text(token, chat_id, "Nút này không thuộc preview hiện tại.")
+                elif current.status == SmartPasteBatchStatus.PROCESSING:
                     _send_text(token, chat_id, "Batch đang được xử lý, bạn thử lại sau nhé.")
-                elif batch.status == SmartPasteBatchStatus.COMPLETED:
+                elif current.status == SmartPasteBatchStatus.COMPLETED:
                     _send_text(token, chat_id, "Các lịch trong batch này đã được thêm rồi.")
-                elif batch.status in {
+                elif current.status in {
                     SmartPasteBatchStatus.CANCELLED,
                     SmartPasteBatchStatus.EXPIRED,
                     SmartPasteBatchStatus.SUPERSEDED,
                 }:
                     _send_text(token, chat_id, "Batch này đã hết hạn hoặc đã được xử lý trước đó.")
                 else:
-                    _clear_inline_keyboard(token, chat_id, batch.preview_message_id)
-                    _send_text(token, chat_id, "Đã hủy các lịch chưa lưu.")
+                    batch = _SMART_PASTE_STATES.cancel(
+                        chat_id, batch_id, message_id=callback_message_id
+                    )
+                    if not batch:
+                        _send_text(token, chat_id, "Nút này không thuộc preview hiện tại.")
+                    else:
+                        _clear_inline_keyboard(token, chat_id, current.action_message_id)
+                        _send_text(token, chat_id, "Đã hủy các lịch chưa lưu.")
                 return {"ok": True}
 
             status, batch = _SMART_PASTE_STATES.start_processing(
@@ -590,16 +599,30 @@ def telegram_webhook(
             if not finished:
                 _send_text(token, chat_id, "Không tìm thấy kết quả xử lý Smart Paste.")
                 return {"ok": True}
+            previous_action_message_id = finished.action_message_id
             markup = (
                 _build_smart_paste_retry_keyboard(finished.batch_id)
                 if finished.status in {SmartPasteBatchStatus.PARTIAL_FAILED, SmartPasteBatchStatus.FAILED}
                 else None
             )
             if markup:
-                _send_text_with_keyboard(token, chat_id, _build_smart_paste_result_text(finished), markup)
+                result = _send_text_with_keyboard(
+                    token, chat_id, _build_smart_paste_result_text(finished), markup
+                )
+                result_message_id = _message_id_from_telegram_result(result)
+                if _SMART_PASTE_STATES.set_action_message(
+                    chat_id, finished.batch_id, result_message_id
+                ):
+                    if previous_action_message_id != result_message_id:
+                        _clear_inline_keyboard(token, chat_id, previous_action_message_id)
+                else:
+                    logger.warning(
+                        "Smart Paste result message had no usable message ID batch=%s",
+                        finished.batch_id,
+                    )
             else:
-                _clear_inline_keyboard(token, chat_id, finished.preview_message_id)
                 _send_text(token, chat_id, _build_smart_paste_result_text(finished))
+                _clear_inline_keyboard(token, chat_id, previous_action_message_id)
             return {"ok": True}
 
         message = payload.get("message") or {}
@@ -644,8 +667,13 @@ def telegram_webhook(
                 return {"ok": True}
             active = _SMART_PASTE_STATES.active_batch_for_chat(chat_id)
             if active:
-                _SMART_PASTE_STATES.cancel(chat_id, active.batch_id)
-                _send_text(token, chat_id, "Đã hủy các lịch chưa lưu.")
+                action_message_id = active.action_message_id
+                cancelled = _SMART_PASTE_STATES.cancel(chat_id, active.batch_id)
+                if cancelled and cancelled.status == SmartPasteBatchStatus.CANCELLED:
+                    _clear_inline_keyboard(token, chat_id, action_message_id)
+                    _send_text(token, chat_id, "Đã hủy các lịch chưa lưu.")
+                else:
+                    _send_text(token, chat_id, "Batch này đang được xử lý hoặc đã hết hạn.")
             else:
                 _send_text(token, chat_id, "Hiện không có form hoặc preview nào đang chờ.")
             return {"ok": True}

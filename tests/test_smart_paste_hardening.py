@@ -23,6 +23,8 @@ from smart_paste import (
 )
 from telegram_mvp_bot import (
     SMART_PASTE_ADD_PREFIX,
+    SMART_PASTE_CANCEL_PREFIX,
+    SMART_PASTE_RETRY_PREFIX,
     TelegramDeliveryError,
     _send_message_payload,
 )
@@ -149,6 +151,23 @@ class SmartPasteStateStoreTests(unittest.TestCase):
         status, _ = self.store.start_processing("123", batch.batch_id, None)
         self.assertEqual(status, "started")
 
+    def test_result_message_replaces_preview_for_action_validation(self) -> None:
+        event = normalize_smart_paste_event(_event_payload())
+        batch, _ = self.store.create_batch("123", [event], "same")
+        self.assertTrue(self.store.set_preview_message("123", batch.batch_id, "m1"))
+        status, _ = self.store.start_processing("123", batch.batch_id, "m1")
+        self.assertEqual(status, "started")
+        self.store.record_failure("123", batch.batch_id, event.event_id, "temporary")
+        finished = self.store.finish_processing("123", batch.batch_id)
+        self.assertIsNotNone(finished)
+        self.assertTrue(self.store.set_action_message("123", batch.batch_id, "m2"))
+        self.assertEqual(self.store.current_action_message_id("123", batch.batch_id), "m2")
+
+        status, _ = self.store.start_processing("123", batch.batch_id, "m1")
+        self.assertEqual(status, "wrong_message")
+        status, _ = self.store.start_processing("123", batch.batch_id, "m2")
+        self.assertEqual(status, "started")
+
 
 class SmartPasteWebhookHardeningTests(unittest.TestCase):
     ENV: ClassVar[dict[str, str]] = {
@@ -175,6 +194,64 @@ class SmartPasteWebhookHardeningTests(unittest.TestCase):
             "from": {"id": 123},
             "text": text,
         }
+
+    @staticmethod
+    def _payloads_for_method(mock_post: MagicMock, method: str) -> list[dict]:
+        return [
+            call.kwargs.get("json", {})
+            for call in mock_post.call_args_list
+            if call.args and str(call.args[0]).endswith(f"/{method}")
+        ]
+
+    def _prepare_partial_batch(self):
+        parsed = {"events": [_event_payload(title="A"), _event_payload(title="B")]}
+        with patch.dict(os.environ, self.ENV, clear=False), patch(
+            "webhook_app.parse_events_with_gemini", return_value=parsed
+        ), patch("requests.post", return_value=self._telegram_response("m1")):
+            webhook_app.telegram_webhook(
+                {"update_id": 100, "message": self._message("A\nB", 100)}, "test-secret"
+            )
+
+        batch = webhook_app._SMART_PASTE_STATES.active_batch_for_chat("123")
+        self.assertIsNotNone(batch)
+        assert batch is not None
+        self.assertEqual(batch.preview_message_id, "m1")
+        self.assertIsNone(batch.last_result_message_id)
+        callback = {
+            "update_id": 101,
+            "callback_query": {
+                "id": "add-100",
+                "from": {"id": 123},
+                "message": {
+                    "message_id": "m1",
+                    "chat": {"id": 123, "type": "private"},
+                },
+                "data": f"{SMART_PASTE_ADD_PREFIX}{batch.batch_id}",
+            },
+        }
+        with patch.dict(os.environ, self.ENV, clear=False), patch(
+            "webhook_app.insert_calendar_event",
+            side_effect=["calendar-a", CalendarPersistenceError("temporary")],
+        ), patch(
+            "requests.post",
+            side_effect=[
+                self._telegram_response("callback-answer"),
+                self._telegram_response("m2"),
+                self._telegram_response("keyboard-cleared"),
+            ],
+        ) as post:
+            webhook_app.telegram_webhook(callback, "test-secret")
+
+        partial = webhook_app._SMART_PASTE_STATES.active_batch_for_chat("123")
+        self.assertIsNotNone(partial)
+        assert partial is not None
+        self.assertEqual(partial.status, SmartPasteBatchStatus.PARTIAL_FAILED)
+        self.assertEqual(partial.preview_message_id, "m1")
+        self.assertEqual(partial.last_result_message_id, "m2")
+        self.assertEqual(partial.action_message_id, "m2")
+        edit_payloads = self._payloads_for_method(post, "editMessageReplyMarkup")
+        self.assertEqual([payload.get("message_id") for payload in edit_payloads], ["m1"])
+        return partial
 
     def test_confirmation_uses_batch_id_and_keeps_partial_state(self) -> None:
         parsed = {"events": [_event_payload(), _event_payload(title="Review")]}
@@ -209,6 +286,106 @@ class SmartPasteWebhookHardeningTests(unittest.TestCase):
         self.assertIsNotNone(current)
         assert current is not None
         self.assertEqual(current.status, SmartPasteBatchStatus.PARTIAL_FAILED)
+
+    def test_partial_failure_retry_from_new_result_message(self) -> None:
+        partial = self._prepare_partial_batch()
+
+        old_callback = {
+            "update_id": 102,
+            "callback_query": {
+                "id": "old-add",
+                "from": {"id": 123},
+                "message": {
+                    "message_id": "m1",
+                    "chat": {"id": 123, "type": "private"},
+                },
+                "data": f"{SMART_PASTE_ADD_PREFIX}{partial.batch_id}",
+            },
+        }
+        with patch.dict(os.environ, self.ENV, clear=False), patch(
+            "webhook_app.insert_calendar_event"
+        ) as insert, patch("requests.post", return_value=self._telegram_response("old")):
+            webhook_app.telegram_webhook(old_callback, "test-secret")
+        insert.assert_not_called()
+        still_partial = webhook_app._SMART_PASTE_STATES.get_batch("123", partial.batch_id)
+        self.assertIsNotNone(still_partial)
+        assert still_partial is not None
+        self.assertEqual(still_partial.status, SmartPasteBatchStatus.PARTIAL_FAILED)
+        self.assertEqual(still_partial.action_message_id, "m2")
+
+        retry_callback = {
+            "update_id": 103,
+            "callback_query": {
+                "id": "retry-100",
+                "from": {"id": 123},
+                "message": {
+                    "message_id": "m2",
+                    "chat": {"id": 123, "type": "private"},
+                },
+                "data": f"{SMART_PASTE_RETRY_PREFIX}{partial.batch_id}",
+            },
+        }
+        with patch.dict(os.environ, self.ENV, clear=False), patch(
+            "webhook_app.insert_calendar_event", return_value="calendar-b"
+        ) as insert, patch(
+            "requests.post",
+            side_effect=[
+                self._telegram_response("callback-answer"),
+                self._telegram_response("final-result"),
+                self._telegram_response("keyboard-cleared"),
+            ],
+        ) as post:
+            webhook_app.telegram_webhook(retry_callback, "test-secret")
+
+        insert.assert_called_once()
+        self.assertEqual(insert.call_args.kwargs["title"], "B")
+        completed = webhook_app._SMART_PASTE_STATES.get_batch("123", partial.batch_id)
+        self.assertIsNotNone(completed)
+        assert completed is not None
+        self.assertEqual(completed.status, SmartPasteBatchStatus.COMPLETED)
+        self.assertEqual([item.status for item in completed.events], ["succeeded", "succeeded"])
+        self.assertIsNone(webhook_app._SMART_PASTE_STATES.active_batch_for_chat("123"))
+        send_payloads = self._payloads_for_method(post, "sendMessage")
+        self.assertTrue(any("Đã thêm 2 lịch" in payload.get("text", "") for payload in send_payloads))
+        edit_payloads = self._payloads_for_method(post, "editMessageReplyMarkup")
+        self.assertEqual([payload.get("message_id") for payload in edit_payloads], ["m2"])
+
+    def test_cancel_from_retry_result_message_clears_current_keyboard(self) -> None:
+        partial = self._prepare_partial_batch()
+        cancel_callback = {
+            "update_id": 104,
+            "callback_query": {
+                "id": "cancel-100",
+                "from": {"id": 123},
+                "message": {
+                    "message_id": "m2",
+                    "chat": {"id": 123, "type": "private"},
+                },
+                "data": f"{SMART_PASTE_CANCEL_PREFIX}{partial.batch_id}",
+            },
+        }
+        with patch.dict(os.environ, self.ENV, clear=False), patch(
+            "webhook_app.insert_calendar_event"
+        ) as insert, patch(
+            "requests.post",
+            side_effect=[
+                self._telegram_response("callback-answer"),
+                self._telegram_response("keyboard-cleared"),
+                self._telegram_response("cancel-result"),
+            ],
+        ) as post:
+            webhook_app.telegram_webhook(cancel_callback, "test-secret")
+
+        insert.assert_not_called()
+        cancelled = webhook_app._SMART_PASTE_STATES.get_batch("123", partial.batch_id)
+        self.assertIsNotNone(cancelled)
+        assert cancelled is not None
+        self.assertEqual(cancelled.status, SmartPasteBatchStatus.CANCELLED)
+        self.assertIsNone(webhook_app._SMART_PASTE_STATES.active_batch_for_chat("123"))
+        edit_payloads = self._payloads_for_method(post, "editMessageReplyMarkup")
+        self.assertEqual([payload.get("message_id") for payload in edit_payloads], ["m2"])
+        send_payloads = self._payloads_for_method(post, "sendMessage")
+        self.assertTrue(any("Đã hủy các lịch chưa lưu" in payload.get("text", "") for payload in send_payloads))
 
     def test_invalid_secret_is_rejected_before_processing(self) -> None:
         with patch.dict(os.environ, self.ENV, clear=False), self.assertRaises(Exception) as ctx:
