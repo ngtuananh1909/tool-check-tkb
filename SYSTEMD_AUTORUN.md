@@ -10,7 +10,7 @@ If you prefer running the webhook server on your own Linux machine for 24/7 oper
 
 - Linux machine (Ubuntu/Debian recommended)
 - Project installed in `/opt/tool-check-tkb` (or equivalent)
-- `.env` file with all credentials
+- `.env` file with all credentials, including `TELEGRAM_CHAT_ID` and `TELEGRAM_WEBHOOK_SECRET`
 - Virtual environment at `.venv/bin/python`
 
 ---
@@ -204,6 +204,7 @@ curl -I https://your-url/telegram/webhook
 ```bash
 # Ensure .env is not world-readable
 chmod 600 /opt/tool-check-tkb/.env
+chmod 600 /opt/tool-check-tkb/service-account.json
 
 # Don't commit .env to git
 echo ".env" >> /opt/tool-check-tkb/.gitignore
@@ -223,7 +224,8 @@ echo ".env" >> /opt/tool-check-tkb/.gitignore
 | **Monitoring** | Railway dashboard | Manual logs |
 | **Recommended** | ✅ Yes | For experienced Linux users |
 
-**Recommendation**: Use **Railway**. It's simpler and more reliable.
+**Recommendation**: The checked-in production deployment is **Render** (see `render.yaml`).
+Systemd is useful only when you intentionally operate your own always-on machine.
 
 ---
 

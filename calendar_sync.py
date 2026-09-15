@@ -8,8 +8,9 @@ import json
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import Resource, build
@@ -31,12 +32,19 @@ def _managed_source_types_for_crawler_sync() -> frozenset[str]:
     """Source types owned by ``sync_crawled_data_to_google_calendar``.
 
     Crawler sync only manages ``class_sessions``, ``exams``, and ``deadlines``. It must never
-    delete events created by Telegram ``/add`` (``source_type=appointment``) or
-    by Telegram ``/add`` (``source_type=appointment``).
+    delete events created by Telegram ``/add`` or Smart Paste (``source_type=appointment``).
     """
     return frozenset({SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM, SYNC_SOURCE_DEADLINE})
 CALENDAR_API_MAX_ATTEMPTS = 4
 CALENDAR_API_RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+
+class CalendarConfigurationError(RuntimeError):
+    """Raised when Calendar persistence is not configured safely."""
+
+
+class CalendarPersistenceError(RuntimeError):
+    """Raised when a Calendar write cannot be verified."""
 
 # Google Calendar colorId mapping for special class session statuses.
 # See https://developers.google.com/calendar/api/v3/reference/colors/get
@@ -110,7 +118,7 @@ def _load_contacts() -> list[dict]:
 
                 if email and "@" in email:
                     contacts.append({"name": name, "email": email})
-    except Exception as exc:
+    except (OSError, UnicodeError) as exc:
         logger.warning("Failed to load contact.txt: %s", exc)
         return []
 
@@ -220,18 +228,52 @@ def sync_crawled_data_to_google_calendar(
     return "", True
 
 
-def insert_calendar_event(title: str, appointment_date: dt.date, start_time: str | None, end_time: str | None, location: str | None, note: str | None) -> str:
-    """Insert a single event directly into Google Calendar (used by Telegram /add)."""
+def insert_calendar_event(
+    title: str,
+    appointment_date: dt.date,
+    start_time: str | None,
+    end_time: str | None,
+    location: str | None,
+    note: str | None,
+    *,
+    appointment_id: str | None = None,
+) -> str:
+    """Insert one appointment and return a verified Calendar event ID.
+
+    ``appointment_id`` is stable across retries.  Supplying a stable ID is the
+    only reliable way to distinguish a retried request from a new intentional
+    duplicate when the Calendar API response is lost after the server commits.
+    """
     calendar_id = os.environ.get("GOOGLE_CALENDAR_ID", "").strip()
     service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
     service_account_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
-    
-    if not calendar_id or (not service_account_json and not service_account_file):
-        logger.warning("Skipping calendar insert: Missing credentials.")
-        return ""
 
-    service, _ = _build_calendar_service(service_account_json, service_account_file)
+    if not calendar_id or (not service_account_json and not service_account_file):
+        raise CalendarConfigurationError(
+            "Google Calendar is not configured. Set GOOGLE_CALENDAR_ID and service-account credentials."
+        )
+
+    if calendar_id.lower() == "primary":
+        raise CalendarConfigurationError(
+            "GOOGLE_CALENDAR_ID=primary is not valid for service-account appointment writes."
+        )
+
+    service, service_account_email = _build_calendar_service(service_account_json, service_account_file)
+    if callable(getattr(service, "calendars", None)):
+        _validate_calendar_target(service, calendar_id, service_account_email)
     timezone = os.environ.get("APP_TIMEZONE", "Asia/Ho_Chi_Minh")
+    try:
+        ZoneInfo(timezone)
+    except ZoneInfoNotFoundError as exc:
+        raise CalendarConfigurationError(f"Invalid APP_TIMEZONE configuration: {timezone}") from exc
+
+    if start_time and end_time and end_time <= start_time:
+        raise CalendarPersistenceError("Calendar event end time must be after start time.")
+
+    stable_appointment_id = str(appointment_id or uuid.uuid4().hex).strip()
+    if not stable_appointment_id:
+        raise CalendarPersistenceError("Appointment ID is empty.")
+    calendar_event_id = f"appointment{stable_appointment_id.replace('-', '')}"
 
     if start_time:
         start_dt = _to_datetime(appointment_date, start_time, timezone)
@@ -240,6 +282,7 @@ def insert_calendar_event(title: str, appointment_date: dt.date, start_time: str
         else:
             end_dt = start_dt + dt.timedelta(hours=1)
         payload = {
+            "id": calendar_event_id,
             "summary": title,
             "location": location,
             "description": note,
@@ -249,6 +292,7 @@ def insert_calendar_event(title: str, appointment_date: dt.date, start_time: str
         _apply_default_reminder(payload)
     else:
         payload = {
+            "id": calendar_event_id,
             "summary": title,
             "location": location,
             "description": note,
@@ -256,7 +300,7 @@ def insert_calendar_event(title: str, appointment_date: dt.date, start_time: str
             "end": {"date": (appointment_date + dt.timedelta(days=1)).isoformat()},
         }
         
-    source_key = f"{SYNC_SOURCE_APPOINTMENT}:{appointment_date.isoformat()}:{start_time or ''}:{end_time or ''}:{title}"
+    source_key = f"{SYNC_SOURCE_APPOINTMENT}:{stable_appointment_id}"
     payload["extendedProperties"] = {
         "private": {
             "source": BOT_SOURCE_TAG,
@@ -266,11 +310,45 @@ def insert_calendar_event(title: str, appointment_date: dt.date, start_time: str
         }
     }
     
-    resp = _execute_calendar_request(
-        "calendar insert event",
-        lambda: service.events().insert(calendarId=calendar_id, body=payload).execute(),
-    )
-    return str(resp.get("id") or "")
+    try:
+        resp = _execute_calendar_request(
+            "calendar insert appointment",
+            lambda: service.events().insert(calendarId=calendar_id, body=payload).execute(),
+        )
+    except HttpError as exc:
+        status = getattr(exc.resp, "status", None)
+        if status != 409:
+            raise CalendarPersistenceError("Google Calendar rejected the appointment write.") from exc
+        # A stable ID already present with matching ownership means the prior
+        # attempt committed and its response was lost.  A mismatched event is
+        # a real collision and must never be treated as success.
+        try:
+            existing = _execute_calendar_request(
+                "calendar verify existing appointment",
+                lambda: service.events().get(
+                    calendarId=calendar_id, eventId=calendar_event_id
+                ).execute(),
+            )
+        except Exception as verify_exc:
+            raise CalendarPersistenceError("Could not verify an existing Calendar appointment.") from verify_exc
+        props = ((existing.get("extendedProperties") or {}).get("private") or {})
+        if (
+            str(existing.get("id") or "").strip() == calendar_event_id
+            and props.get("source") == BOT_SOURCE_TAG
+            and props.get("source_type") == SYNC_SOURCE_APPOINTMENT
+            and props.get("source_key") == source_key
+            and props.get("source_hash") == payload["extendedProperties"]["private"]["source_hash"]
+        ):
+            return calendar_event_id
+        raise CalendarPersistenceError("Calendar event ID collision could not be verified.") from exc
+    if not isinstance(resp, dict):
+        raise CalendarPersistenceError("Google Calendar returned an invalid insert response.")
+    returned_id = str(resp.get("id") or "").strip()
+    if not returned_id:
+        raise CalendarPersistenceError("Google Calendar returned no event ID.")
+    if returned_id != calendar_event_id:
+        raise CalendarPersistenceError("Google Calendar returned an unexpected event ID.")
+    return returned_id
 
 
 def fetch_events_from_calendar(target_date: dt.date, days_ahead: int = 0) -> tuple[list[dict], list[dict], list[dict]]:
@@ -478,7 +556,7 @@ def _build_calendar_service(service_account_json: str, service_account_file: str
 
 
 def _validate_calendar_target(service: Resource, calendar_id: str, service_account_email: str) -> None:
-    if calendar_id == "primary":
+    if calendar_id.lower() == "primary":
         raise RuntimeError(
             "GOOGLE_CALENDAR_ID=primary points to the service account calendar, not your Gmail calendar. "
             "Set GOOGLE_CALENDAR_ID to your real calendar ID (e.g. your Gmail address) and share that "
@@ -816,7 +894,7 @@ def _parse_calendar_event_start(event: dict) -> dt.datetime | None:
     timezone = os.environ.get("APP_TIMEZONE", "Asia/Ho_Chi_Minh")
     try:
         tz = ZoneInfo(timezone)
-    except Exception:
+    except ZoneInfoNotFoundError:
         tz = ZoneInfo("Asia/Ho_Chi_Minh")
 
     if start.get("dateTime"):
@@ -1189,7 +1267,7 @@ def _apply_default_reminder(payload: dict, minutes: int = DEFAULT_EVENT_REMINDER
 
 
 def _fallback_period_time(period: int) -> str:
-    baseline = dt.datetime.combine(dt.date.today(), dt.time(hour=7, minute=0))
+    baseline = dt.datetime.combine(local_today(), dt.time(hour=7, minute=0))
     computed = baseline + dt.timedelta(minutes=max(period - 1, 0) * 50)
     return computed.strftime("%H:%M")
 

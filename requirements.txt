@@ -2,14 +2,18 @@
 playwright==1.60.0
 requests==2.32.3
 beautifulsoup4==4.15.0
+# Preferred Gemini SDK. The legacy package remains temporarily for a safe
+# rolling fallback while Render instances receive the new dependency.
+google-genai==2.23.0
 google-generativeai==0.8.5
 fastapi==0.115.8
 uvicorn[standard]==0.34.0
 google-api-python-client==2.177.0
-google-auth==2.40.3
+google-auth==2.58.0
 
 # Optional: load .env when running locally (not needed in CI)
 python-dotenv==1.0.1
 
 # Test dependencies
 pytest==9.0.3
+httpx>=0.27,<0.29

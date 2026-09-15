@@ -1,7 +1,8 @@
 """
 telegram_mvp_bot.py - MVP Telegram listener for creating appointments.
 
-Appointments are created only through the /add form flow.
+Appointments are created through the /add form flow when using long polling.
+The production webhook additionally supports Smart Paste with confirmation.
 
 Time parsing rules (MVP):
     - YYYY-MM-DD HHhMM
@@ -9,8 +10,8 @@ Time parsing rules (MVP):
     - DD/MM HHhMM      (uses current year)
     - HHhMM            (uses today)
 
-The script uses Telegram getUpdates long polling and only accepts messages
-from TELEGRAM_CHAT_ID (if set).
+The script uses Telegram getUpdates long polling. The production webhook adds
+strict private-chat ownership and Smart Paste confirmation.
 """
 
 import datetime as dt
@@ -18,6 +19,7 @@ import logging
 import os
 import re
 import time
+import uuid
 
 import requests
 from requests import RequestException
@@ -31,6 +33,7 @@ from calendar_sync import (
     insert_calendar_event,
 )
 from gemini_parser import generate_conversational_reply_with_gemini
+from smart_paste import normalize_smart_paste_event
 from time_utils import local_now, local_today
 
 logger = logging.getLogger(__name__)
@@ -47,7 +50,8 @@ HELP_TEXT = (
     "/deadline - Xem deadline eLearning\n"
     "/exam - Xem lich thi 90 ngay toi\n"
     "/add - Mo form them lich\n\n"
-    "Muon tao lich moi thi dung /add, bot se hoi lan luot Ngay, Gio, Lam gi, O dau."
+    "Muon tao lich moi thi dung /add, bot se hoi lan luot Ngay, Gio, Lam gi, O dau. "
+    "Webhook con ho tro dan tin nhan tu nhien va xem truoc truoc khi luu."
 )
 
 ADD_ONLY_GUIDANCE_TEXT = "De them lich, ban dung /add. Bot se hoi lan luot tung muc de ban nhap nhanh hon nhe."
@@ -59,13 +63,28 @@ ADD_FORM_CANCEL_CALLBACK = "addform:cancel"
 ADD_FORM_SKIP_WHERE_CALLBACK = "addform:skip_where"
 SMART_PASTE_ADD_ALL_CALLBACK = "smartpaste:add_all"
 SMART_PASTE_CANCEL_CALLBACK = "smartpaste:cancel"
+SMART_PASTE_ADD_PREFIX = "smartpaste:add:"
+SMART_PASTE_CANCEL_PREFIX = "smartpaste:cancel:"
+SMART_PASTE_RETRY_PREFIX = "smartpaste:retry:"
+
+_TELEGRAM_URL_TOKEN_RE = re.compile(r"(https://api\.telegram\.org/bot)[^/\s]+", re.IGNORECASE)
+_TELEGRAM_PATH_TOKEN_RE = re.compile(r"(/bot)[^/\s]+", re.IGNORECASE)
+
+
+class TelegramDeliveryError(RuntimeError):
+    """Raised when Telegram did not accept a message payload."""
+
+
+def _redact_telegram_error(value: object) -> str:
+    text = _TELEGRAM_URL_TOKEN_RE.sub(r"\1[redacted]", str(value))
+    return _TELEGRAM_PATH_TOKEN_RE.sub(r"\1[redacted]", text)
 
 
 def _load_dotenv() -> None:
     try:
         from dotenv import load_dotenv  # type: ignore[import]
         load_dotenv()
-    except Exception:
+    except ImportError:
         pass
 
 
@@ -73,19 +92,19 @@ def _telegram_api(token: str, method: str) -> str:
     return f"https://api.telegram.org/bot{token}/{method}"
 
 
-def _send_text(token: str, chat_id: str, text: str) -> None:
-    _send_message_payload(token, {"chat_id": chat_id, "text": text})
+def _send_text(token: str, chat_id: str, text: str) -> dict:
+    return _send_message_payload(token, {"chat_id": chat_id, "text": text})
 
 
-def _send_text_with_keyboard(token: str, chat_id: str, text: str, keyboard: dict) -> None:
-    _send_message_payload(token, {"chat_id": chat_id, "text": text, "reply_markup": keyboard})
+def _send_text_with_keyboard(token: str, chat_id: str, text: str, keyboard: dict) -> dict:
+    return _send_message_payload(token, {"chat_id": chat_id, "text": text, "reply_markup": keyboard})
 
 
-def _send_text_with_markup(token: str, chat_id: str, text: str, markup: dict) -> None:
-    _send_message_payload(token, {"chat_id": chat_id, "text": text, "reply_markup": markup})
+def _send_text_with_markup(token: str, chat_id: str, text: str, markup: dict) -> dict:
+    return _send_message_payload(token, {"chat_id": chat_id, "text": text, "reply_markup": markup})
 
 
-def _send_message_payload(token: str, payload: dict) -> None:
+def _send_message_payload(token: str, payload: dict) -> dict:
     last_exc: Exception | None = None
     for attempt in range(1, 4):
         try:
@@ -95,8 +114,16 @@ def _send_message_payload(token: str, payload: dict) -> None:
                 timeout=30,
             )
             if not resp.ok:
-                logger.error("Failed to send Telegram message: %s", resp.text)
-            return
+                raise TelegramDeliveryError(
+                    f"Telegram sendMessage returned HTTP {resp.status_code}."
+                )
+            try:
+                result = resp.json()
+            except ValueError as exc:
+                raise TelegramDeliveryError("Telegram returned invalid JSON.") from exc
+            if not isinstance(result, dict) or not result.get("ok"):
+                raise TelegramDeliveryError("Telegram rejected sendMessage.")
+            return result
         except RequestException as exc:
             last_exc = exc
             if attempt == 3:
@@ -104,14 +131,17 @@ def _send_message_payload(token: str, payload: dict) -> None:
             delay = 2 ** (attempt - 1)
             logger.warning(
                 "Telegram send failed (%s). Retrying in %ss (%d/3).",
-                exc,
+                _redact_telegram_error(exc),
                 delay,
                 attempt,
             )
             time.sleep(delay)
 
     if last_exc is not None:
-        logger.error("Telegram send failed after retries: %s", last_exc)
+        raise TelegramDeliveryError(
+            f"Telegram send failed after retries: {_redact_telegram_error(last_exc)}"
+        ) from last_exc
+    raise TelegramDeliveryError("Telegram send failed after retries.")
 
 
 def _normalize_chat_id(chat_id: str | int | None) -> str:
@@ -289,31 +319,19 @@ def _normalize_time_value(value: object) -> str | None:
         hour, minute, sec = int(h), int(mi), int(s or 0)
         if 0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= sec <= 59:
             return f"{hour:02d}:{minute:02d}:{sec:02d}"
-    return None
+    raise ValueError("Thời gian không hợp lệ.")
 
 
 def _normalize_smart_paste_event(payload: dict) -> dict:
-    title = str(payload.get("title") or "").strip()
-    if not title:
-        raise ValueError("Thiếu tiêu đề lịch.")
-
-    date_raw = str(payload.get("appointment_date") or "").strip()
-    if not date_raw:
-        raise ValueError("Thiếu ngày lịch.")
-    appt_date = dt.date.fromisoformat(date_raw)
-
-    start_time = _normalize_time_value(payload.get("start_time"))
-    end_time = _normalize_time_value(payload.get("end_time"))
-    location = _normalize_optional_text(payload.get("location"))
-    note = _normalize_optional_text(payload.get("note"))
+    event = normalize_smart_paste_event(payload)
 
     return {
-        "title": title,
-        "appointment_date": appt_date,
-        "start_time": start_time,
-        "end_time": end_time,
-        "location": location,
-        "note": note,
+        "title": event.title,
+        "appointment_date": event.appointment_date,
+        "start_time": event.start_time,
+        "end_time": event.end_time,
+        "location": event.location,
+        "note": event.note,
     }
 
 
@@ -337,7 +355,17 @@ def _build_smart_paste_preview_text(events: list[dict]) -> str:
             item_lines.append(f"⏰ {s} - {e}")
         elif start_time:
             s = start_time[:5] if len(start_time) >= 5 and start_time[2] == ":" else start_time
-            item_lines.append(f"⏰ {s}")
+            try:
+                start_dt = dt.datetime.combine(
+                    appt_date if isinstance(appt_date, dt.date) else local_today(),
+                    dt.time.fromisoformat(start_time),
+                )
+                effective_end = (start_dt + dt.timedelta(hours=1)).strftime("%H:%M")
+                item_lines.append(f"⏰ {s} - {effective_end} (mặc định 1 giờ)")
+            except (TypeError, ValueError):
+                item_lines.append(f"⏰ {s}")
+        else:
+            item_lines.append("⏰ Cả ngày")
         if location:
             item_lines.append(f"📍 {location}")
         if note:
@@ -347,12 +375,29 @@ def _build_smart_paste_preview_text(events: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
-def _build_smart_paste_keyboard() -> dict[str, list[list[dict[str, str]]]]:
+def _build_smart_paste_keyboard(batch_id: str | None = None) -> dict[str, list[list[dict[str, str]]]]:
+    add_callback = (
+        f"{SMART_PASTE_ADD_PREFIX}{batch_id}" if batch_id else SMART_PASTE_ADD_ALL_CALLBACK
+    )
+    cancel_callback = (
+        f"{SMART_PASTE_CANCEL_PREFIX}{batch_id}" if batch_id else SMART_PASTE_CANCEL_CALLBACK
+    )
     return {
         "inline_keyboard": [
             [
-                {"text": "✅ Thêm tất cả", "callback_data": SMART_PASTE_ADD_ALL_CALLBACK},
-                {"text": "❌ Hủy", "callback_data": SMART_PASTE_CANCEL_CALLBACK},
+                {"text": "✅ Thêm tất cả", "callback_data": add_callback},
+                {"text": "❌ Hủy", "callback_data": cancel_callback},
+            ]
+        ]
+    }
+
+
+def _build_smart_paste_retry_keyboard(batch_id: str) -> dict[str, list[list[dict[str, str]]]]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🔁 Thử lại lịch lỗi", "callback_data": f"{SMART_PASTE_RETRY_PREFIX}{batch_id}"},
+                {"text": "❌ Hủy lịch còn lại", "callback_data": f"{SMART_PASTE_CANCEL_PREFIX}{batch_id}"},
             ]
         ]
     }
@@ -608,6 +653,7 @@ def _new_add_form_state() -> dict[str, object]:
         "time": None,
         "job": None,
         "where": None,
+        "appointment_id": uuid.uuid4().hex,
     }
 
 
@@ -884,6 +930,7 @@ def run() -> None:
                             _send_add_form_step(token, chat_id, form_state, prefix="Bạn chưa điền xong form.")
                             continue
                         title, appt_date, start_time, location = _build_add_appointment_from_form(form_state)
+                        appointment_id = str(form_state.setdefault("appointment_id", uuid.uuid4().hex))
                         insert_calendar_event(
                             title=title,
                             appointment_date=appt_date,
@@ -891,6 +938,7 @@ def run() -> None:
                             end_time=None,
                             location=location,
                             note=_build_add_form_raw_input(form_state),
+                            appointment_id=appointment_id,
                         )
                         add_form_states.pop(chat_id, None)
                         _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
@@ -920,6 +968,7 @@ def run() -> None:
                         _send_add_form_step(token, chat_id, form_state, prefix="Bạn chưa điền xong form.")
                         continue
                     title, appt_date, start_time, location = _build_add_appointment_from_form(form_state)
+                    appointment_id = str(form_state.setdefault("appointment_id", uuid.uuid4().hex))
                     insert_calendar_event(
                         title=title,
                         appointment_date=appt_date,
@@ -927,6 +976,7 @@ def run() -> None:
                         end_time=None,
                         location=location,
                         note=_build_add_form_raw_input(form_state),
+                        appointment_id=appointment_id,
                     )
                     add_form_states.pop(chat_id, None)
                     _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
@@ -986,7 +1036,7 @@ def run() -> None:
 
                 _send_text(token, chat_id, ADD_ONLY_GUIDANCE_TEXT)
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - keep the long-polling loop alive
             logger.error("Polling error: %s", exc)
             time.sleep(3)
 

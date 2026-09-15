@@ -1,6 +1,6 @@
 # TDTU Calendar & Telegram Bot
 
-Tự động lấy lịch học, lịch thi và deadline eLearning từ cổng TDTU, sau đó đồng bộ trực tiếp vào Google Calendar. Telegram chỉ là giao diện xem và thêm lịch; Google Calendar là nơi lưu trữ duy nhất.
+Tự động lấy lịch học, lịch thi và deadline eLearning từ cổng TDTU, sau đó đồng bộ trực tiếp vào Google Calendar. Telegram là giao diện xem, thêm lịch thủ công và Smart Paste; Google Calendar là nơi lưu trữ duy nhất.
 
 ## Luồng hoạt động
 
@@ -25,6 +25,8 @@ run_hour.py
 | `/deadline` | Deadline eLearning sắp tới |
 | `/exam` | Lịch thi trong 90 ngày tới |
 | `/add` | Thêm lịch hẹn trực tiếp vào Google Calendar |
+
+Bạn cũng có thể dán một tin nhắn tự nhiên, ví dụ `Mai 14h họp nhóm CNPM ở B402` hoặc một đoạn có nhiều lịch. Bot sẽ gửi bản xem trước; chỉ nút **Thêm tất cả** mới ghi vào Google Calendar. Nếu có lịch không rõ, bot sẽ hỏi lại và không lưu một phần của đoạn đó.
 
 ## Cài đặt local
 
@@ -51,6 +53,7 @@ run_hour.py
    GOOGLE_SERVICE_ACCOUNT_FILE=service-account.json
    TELEGRAM_BOT_TOKEN=...
    TELEGRAM_CHAT_ID=...
+   TELEGRAM_WEBHOOK_SECRET=...
    ```
 
 4. Chia sẻ Google Calendar đích cho `client_email` trong `service-account.json` với quyền **Make changes to events**. Không dùng `GOOGLE_CALENDAR_ID=primary`.
@@ -82,12 +85,15 @@ Workflow `Daily Morning Notification` gửi tổng hợp lịch mỗi ngày và 
 ## Kiểm tra
 
 ```bash
-pytest -q
+python -m pytest -q
 python -m py_compile *.py
 ```
 
 ## Ghi chú vận hành
 
 - `service-account.json`, `.env`, và mọi khóa Telegram/Google không được commit.
+- Webhook chỉ chấp nhận chat riêng của chủ sở hữu khi `TELEGRAM_CHAT_ID` và `TELEGRAM_WEBHOOK_SECRET` được cấu hình.
+- Preview Smart Paste hết hạn sau 15 phút hoặc khi Render khởi động lại; khi đó hãy dán lại nội dung.
+- Nếu một lần thêm nhiều lịch bị lỗi một phần, bot giữ lại các lịch lỗi để bạn thử lại; các lịch đã thành công không bị thêm lần nữa.
 - Nếu một crawler nguồn bị lỗi, `run_hour.py` không xóa dữ liệu Calendar hiện có của nguồn đó.
 - Logs của `run_hour.py` và webhook nêu rõ từng bước crawl, đồng bộ và xử lý lệnh Telegram.
