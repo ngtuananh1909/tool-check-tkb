@@ -321,17 +321,6 @@ def _format_class_status(status: object) -> str:
     return mapping.get(value, "Học bình thường")
 
 
-def _compact_course_name(name: object) -> str:
-    """Shorten noisy eLearning course labels for compact Telegram output."""
-    from course_aliases import shorten_course_name
-
-    text = str(name or "").strip()
-    if not text:
-        return "N/A"
-    text = re.sub(r"^course\s*name\s*", "", text, flags=re.IGNORECASE)
-    return shorten_course_name(text)
-
-
 def _send_message(token: str, chat_id: str, text: str) -> None:
     """
     POST a message to the Telegram Bot API.

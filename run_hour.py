@@ -6,7 +6,7 @@ This script runs the data-collection pipeline:
     2. Push raw crawler results directly to Google Calendar.
     3. Finish after Calendar reconciliation.
 
-Can be scheduled to run hourly via cron, Railway Scheduled Jobs, or similar.
+Scheduled hourly by the GitHub Actions workflow.
 This does NOT send Telegram notifications; that's handled separately by main.py.
 """
 

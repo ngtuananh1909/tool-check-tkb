@@ -16,7 +16,6 @@ from telegram_mvp_bot import (
     _format_deadline_due,
     _is_add_form_complete,
     _new_add_form_state,
-    _parse_add_fields,
     _parse_schedule_day_arg,
     _skip_add_form_optional_step,
 )
@@ -126,12 +125,6 @@ class BotHelperTests(unittest.TestCase):
         self.assertEqual(_parse_schedule_day_arg("thứ 2", today=today), dt.date(2026, 5, 18))
         self.assertEqual(_parse_schedule_day_arg("20/05", today=today), dt.date(2026, 5, 20))
 
-    def test_parse_add_fields_accepts_missing_values_but_rejects_all_blank(self) -> None:
-        parsed = _parse_add_fields("Ngày: 16/5\nGiờ: 9h00\nLàm gì: Họp nhóm\nỞ đâu: B402")
-
-        self.assertEqual(parsed, {"date": "16/5", "time": "9h00", "job": "Họp nhóm", "where": "B402"})
-        with self.assertRaises(ValueError):
-            _parse_add_fields("Ngày: \nGiờ: 9h00\nLàm gì: Họp nhóm\nỞ đâu: ")
 
     def test_add_form_state_collects_values_step_by_step_and_builds_payload(self) -> None:
         state = _new_add_form_state()
