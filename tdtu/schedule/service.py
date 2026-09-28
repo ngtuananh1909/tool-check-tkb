@@ -2,6 +2,7 @@
 Schedule service for orchestrating HTTP timetable retrieval and semester selection.
 """
 
+import datetime as dt
 import logging
 from typing import Any
 
@@ -11,6 +12,7 @@ from tdtu.schedule.parser import (
     _deduplicate_schedule,
     parse_active_semester,
     parse_semester_options,
+    parse_week_start,
     parse_weekly_grid_table,
 )
 
@@ -31,6 +33,7 @@ def fetch_schedule_http(
     client: TDTUClient,
     selected_semester: str | None = None,
     max_weeks: int | None = None,
+    expected_week_start: dt.date | None = None,
 ) -> list[dict[str, Any]]:
     """
     Fetch schedule entries via authenticated HTTP.
@@ -97,6 +100,11 @@ def fetch_schedule_http(
     week_entries = parse_weekly_grid_table(page.html, student_id=sid)
     if week_entries is None:
         raise TDTUProtocolError("Weekly schedule grid table missing or malformed on initial weekly view page")
+    first_week_start = parse_week_start(page.html)
+    if expected_week_start is not None and first_week_start != expected_week_start:
+        raise TDTUProtocolError(
+            f"Schedule starts at {first_week_start}, expected {expected_week_start}"
+        )
 
     entries: list[dict[str, Any]] = list(week_entries)
 
@@ -104,12 +112,18 @@ def fetch_schedule_http(
     weeks_to_fetch = max_weeks if (max_weeks and max_weeks > 1) else 1
     for week_idx in range(1, weeks_to_fetch):
         if "btnTuanSau" not in page.html:
-            break
+            raise TDTUProtocolError(f"Cannot reach schedule week +{week_idx}; next-week control is missing")
         logger.debug("[tdtu.schedule] Navigating to week +%d via btnTuanSau", week_idx)
         page.postback(
             event_target="ThoiKhoaBieu1$btnTuanSau",
             extra={"ThoiKhoaBieu1$btnTuanSau": ">>"},
         )
+        actual_week_start = parse_week_start(page.html)
+        expected_next_week = first_week_start + dt.timedelta(weeks=week_idx)
+        if actual_week_start != expected_next_week:
+            raise TDTUProtocolError(
+                f"Schedule week +{week_idx} starts at {actual_week_start}, expected {expected_next_week}"
+            )
         w_entries = parse_weekly_grid_table(page.html, student_id=sid)
         if w_entries is None:
             raise TDTUProtocolError(f"Weekly schedule grid table missing or malformed on week +{week_idx} postback page")

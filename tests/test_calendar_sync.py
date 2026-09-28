@@ -23,19 +23,68 @@ class _Request:
 
 
 class _Events:
-    def __init__(self, events):
+    def __init__(self, events, page_size=None):
         self.events = events
+        self.page_size = page_size
         self.deleted = []
         self.inserted = []
+        self.patched = []
+        self.list_calls = []
 
-    def list(self, **_kwargs):
-        return _Request({"items": self.events})
+    def list(self, **kwargs):
+        self.list_calls.append(kwargs)
+        events = self.events
+        property_filter = kwargs.get("privateExtendedProperty")
+        if property_filter:
+            property_name, property_value = property_filter.split("=", 1)
+            events = [
+                event for event in events
+                if (event.get("extendedProperties") or {}).get("private", {}).get(property_name) == property_value
+            ]
+
+        def event_time(event, field):
+            value = (event.get(field) or {}).get("dateTime")
+            if value:
+                try:
+                    return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except ValueError:
+                    return None
+            value = (event.get(field) or {}).get("date")
+            if value:
+                try:
+                    return dt.datetime.combine(dt.date.fromisoformat(value), dt.time.min, dt.timezone.utc)
+                except ValueError:
+                    return None
+            return None
+
+        lower = dt.datetime.fromisoformat(kwargs["timeMin"]) if kwargs.get("timeMin") else None
+        upper = dt.datetime.fromisoformat(kwargs["timeMax"]) if kwargs.get("timeMax") else None
+
+        def in_time_range(event):
+            start = event_time(event, "start")
+            end = event_time(event, "end") or (start + dt.timedelta(hours=1) if start else None)
+            if lower is not None and end is not None and end <= lower:
+                return False
+            if upper is not None and start is not None and start >= upper:
+                return False
+            return True
+
+        events = [event for event in events if in_time_range(event)]
+
+        offset = int(kwargs.get("pageToken") or 0)
+        page_size = self.page_size or len(events) or 1
+        page = events[offset:offset + page_size]
+        result = {"items": page}
+        if offset + page_size < len(events):
+            result["nextPageToken"] = str(offset + page_size)
+        return _Request(result)
 
     def insert(self, **kwargs):
         self.inserted.append(kwargs["body"])
         return _Request({"id": "new-event"})
 
     def patch(self, **kwargs):
+        self.patched.append(kwargs)
         return _Request({"id": kwargs["eventId"]})
 
     def delete(self, **kwargs):
@@ -44,14 +93,156 @@ class _Events:
 
 
 class _Service:
-    def __init__(self, events):
-        self._events = _Events(events)
+    def __init__(self, events, page_size=None):
+        self._events = _Events(events, page_size=page_size)
 
     def events(self):
         return self._events
 
 
+def _event(event_id, source_type, start, source_key=None, source_hash="", source=calendar_sync.BOT_SOURCE_TAG):
+    return {
+        "id": event_id,
+        "start": {"dateTime": start.isoformat()},
+        "end": {"dateTime": (start + dt.timedelta(hours=1)).isoformat()},
+        "extendedProperties": {
+            "private": {
+                "source": source,
+                "source_type": source_type,
+                "source_key": source_key or f"{source_type}:{event_id}",
+                "source_hash": source_hash,
+            }
+        },
+    }
+
+
 class CalendarOnlySyncTests(unittest.TestCase):
+    def test_class_reconciliation_deletes_only_inside_schedule_window(self) -> None:
+        start = dt.datetime(2026, 9, 28, tzinfo=dt.timezone.utc)
+        end = dt.datetime(2026, 10, 19, tzinfo=dt.timezone.utc)
+        service = _Service([
+            _event("before", SYNC_SOURCE_CLASS_SESSION, start - dt.timedelta(minutes=30)),
+            _event("at-start", SYNC_SOURCE_CLASS_SESSION, start),
+            _event("inside", SYNC_SOURCE_CLASS_SESSION, start + dt.timedelta(days=7)),
+            _event("at-end", SYNC_SOURCE_CLASS_SESSION, end),
+            _event("future", SYNC_SOURCE_CLASS_SESSION, end + dt.timedelta(days=7)),
+            _event("appointment", "appointment", start + dt.timedelta(days=1)),
+            _event("exam", SYNC_SOURCE_EXAM, start + dt.timedelta(days=1)),
+            _event("deadline", SYNC_SOURCE_DEADLINE, start + dt.timedelta(days=1)),
+            _event("unowned", SYNC_SOURCE_CLASS_SESSION, start + dt.timedelta(days=1), source="someone-else"),
+        ])
+
+        _replace_bot_events_for_range(
+            service, "cal-id", [], None, {SYNC_SOURCE_CLASS_SESSION}, schedule_window=(start, end)
+        )
+
+        self.assertEqual(sorted(service._events.deleted), ["at-start", "inside"])
+        self.assertEqual(len(service._events.list_calls), 1)
+        self.assertEqual(service._events.list_calls[0]["timeMin"], start.isoformat())
+        self.assertEqual(service._events.list_calls[0]["timeMax"], end.isoformat())
+
+    def test_class_reconciliation_processes_all_bounded_pages(self) -> None:
+        start = dt.datetime(2026, 9, 28, tzinfo=dt.timezone.utc)
+        end = start + dt.timedelta(weeks=3)
+        service = _Service([
+            _event("first", SYNC_SOURCE_CLASS_SESSION, start + dt.timedelta(days=1)),
+            _event("second", SYNC_SOURCE_CLASS_SESSION, start + dt.timedelta(days=2)),
+        ], page_size=1)
+
+        _replace_bot_events_for_range(
+            service, "cal-id", [], None, {SYNC_SOURCE_CLASS_SESSION}, schedule_window=(start, end)
+        )
+
+        self.assertEqual(sorted(service._events.deleted), ["first", "second"])
+        self.assertEqual([call["pageToken"] for call in service._events.list_calls], [None, "1"])
+        self.assertTrue(all(call["timeMin"] == start.isoformat() and call["timeMax"] == end.isoformat()
+                            for call in service._events.list_calls))
+
+    def test_matching_class_is_kept_and_patched_only_when_hash_changes(self) -> None:
+        start = dt.datetime(2026, 9, 28, tzinfo=dt.timezone.utc)
+        end = start + dt.timedelta(weeks=3)
+        service = _Service([_event("same", SYNC_SOURCE_CLASS_SESSION, start, source_hash="old")])
+        item = {
+            "source_type": SYNC_SOURCE_CLASS_SESSION,
+            "source_key": "class_session:same",
+            "source_hash": "old",
+            "payload": {"summary": "Class"},
+        }
+
+        _replace_bot_events_for_range(
+            service, "cal-id", [item], None, {SYNC_SOURCE_CLASS_SESSION}, schedule_window=(start, end)
+        )
+        self.assertEqual(service._events.deleted, [])
+        self.assertEqual(service._events.patched, [])
+
+        item["source_hash"] = "new"
+        _replace_bot_events_for_range(
+            service, "cal-id", [item], None, {SYNC_SOURCE_CLASS_SESSION}, schedule_window=(start, end)
+        )
+        self.assertEqual([call["eventId"] for call in service._events.patched], ["same"])
+
+    def test_exam_lookup_patches_matching_owned_key_without_deleting_history(self) -> None:
+        old_date = dt.datetime(2025, 10, 1, tzinfo=dt.timezone.utc)
+        service = _Service([
+            _event("historical", SYNC_SOURCE_EXAM, old_date),
+            _event("current", SYNC_SOURCE_EXAM, old_date, source_hash="old"),
+            _event("other-owner", SYNC_SOURCE_EXAM, old_date, source_key="exam:current", source="other"),
+        ])
+        item = {
+            "source_type": SYNC_SOURCE_EXAM,
+            "source_key": "exam:current",
+            "source_hash": "new",
+            "payload": {"summary": "Updated exam"},
+        }
+
+        _replace_bot_events_for_range(service, "cal-id", [item], None, {SYNC_SOURCE_EXAM})
+
+        self.assertEqual(service._events.deleted, [])
+        self.assertEqual([call["eventId"] for call in service._events.patched], ["current"])
+        self.assertEqual(len(service._events.list_calls), 1)
+        self.assertEqual(service._events.list_calls[0]["privateExtendedProperty"], "source_key=exam:current")
+        self.assertNotIn("timeMin", service._events.list_calls[0])
+
+    def test_class_none_is_not_reconciled_during_deadline_sync(self) -> None:
+        start = dt.datetime(2026, 9, 28, tzinfo=dt.timezone.utc)
+        end = start + dt.timedelta(weeks=3)
+        service = _Service([_event("old-class", SYNC_SOURCE_CLASS_SESSION, start + dt.timedelta(days=1))])
+        with (
+            patch.dict(os.environ, {"GOOGLE_CALENDAR_ID": "cal-id", "GOOGLE_SERVICE_ACCOUNT_JSON": "{}"}, clear=False),
+            patch.object(calendar_sync, "_build_calendar_service", return_value=(service, "svc@example.com")),
+            patch.object(calendar_sync, "_validate_calendar_target"),
+        ):
+            calendar_sync.sync_crawled_data_to_google_calendar(
+                None, None, deadlines=[], deadline_window=(start, end)
+            )
+
+        self.assertEqual(service._events.deleted, [])
+        self.assertTrue(all(call["timeMin"] == start.isoformat() for call in service._events.list_calls))
+
+    def test_schedule_list_requires_valid_authoritative_window(self) -> None:
+        start = dt.datetime(2026, 9, 28, tzinfo=dt.timezone.utc)
+        end = start + dt.timedelta(weeks=3)
+        invalid_windows = [None, [start, end], (start,), ("2026-09-28", end),
+                           (start.replace(tzinfo=None), end), (start, start), (end, start)]
+        for window in invalid_windows:
+            with self.subTest(window=window), self.assertRaises(ValueError):
+                calendar_sync.sync_crawled_data_to_google_calendar([], None, schedule_window=window)
+
+        with self.assertRaises(ValueError):
+            calendar_sync.sync_crawled_data_to_google_calendar(None, None, schedule_window=(start, end))
+
+    def test_class_row_outside_window_fails_before_calendar_access(self) -> None:
+        start = dt.datetime(2026, 9, 28, tzinfo=dt.timezone.utc)
+        end = start + dt.timedelta(weeks=3)
+        with patch.object(calendar_sync, "_build_calendar_service") as build_service:
+            with self.assertRaises(ValueError):
+                calendar_sync.sync_crawled_data_to_google_calendar(
+                    [{"id": "outside", "session_date": "2026-10-19", "start_time": "08:00", "end_time": "09:00"}],
+                    None,
+                    schedule_window=(start, end),
+                )
+        build_service.assert_not_called()
+
     def test_total_crawl_failure_skips_calendar(self) -> None:
         with patch.object(calendar_sync, "_build_calendar_service") as build_service:
             _, did_sync = calendar_sync.sync_crawled_data_to_google_calendar(None, None)
@@ -109,7 +300,8 @@ class CalendarOnlySyncTests(unittest.TestCase):
         ])
         _replace_bot_events_for_range(service, "cal-id", [], None, {SYNC_SOURCE_EXAM})
 
-        self.assertEqual(service._events.deleted, ["exam-id"])
+        self.assertEqual(service._events.deleted, [])
+        self.assertEqual(service._events.list_calls, [])
 
 
     def test_deadlines_list_without_window_raises_error(self) -> None:
@@ -198,6 +390,8 @@ class CalendarOnlySyncTests(unittest.TestCase):
 
         # Only inside-id and at-start-id should be deleted. before-id and at-end-id are preserved.
         self.assertEqual(sorted(service._events.deleted), ["at-start-id", "inside-id"])
+        self.assertEqual(service._events.list_calls[0]["timeMin"], window_start.isoformat())
+        self.assertEqual(service._events.list_calls[0]["timeMax"], window_end.isoformat())
 
     def test_deadline_missing_start_is_preserved(self) -> None:
         tz = dt.timezone.utc
@@ -262,7 +456,7 @@ class CalendarOnlySyncTests(unittest.TestCase):
         ):
             # deadlines=None means crawl failed -> managed types will only be class_sessions / exams if provided
             calendar_sync.sync_crawled_data_to_google_calendar(
-                class_sessions=[], exams=[], student_id="test", deadlines=None, deadline_window=None
+                class_sessions=None, exams=[], student_id="test", deadlines=None, deadline_window=None
             )
         self.assertEqual(service._events.deleted, [])
 

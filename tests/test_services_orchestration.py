@@ -4,7 +4,9 @@ Tests weekly control missing, weekly parser None, valid empty weekly page,
 malformed exam tab, valid empty exam tab, and semester verification by label and value.
 """
 
+import datetime as dt
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from tdtu.exams.service import fetch_exam_schedule_http
@@ -59,6 +61,43 @@ class TestServicesOrchestration(unittest.TestCase):
         client, page = self._make_mock_client(html)
         entries = fetch_schedule_http(client)
         self.assertEqual(entries, [])
+
+    def test_schedule_missing_next_week_fails_instead_of_returning_partial_rows(self) -> None:
+        html = (Path(__file__).parent / "fixtures/tdtu/schedule_weekly_next.html").read_text()
+        client, page = self._make_mock_client(html)
+
+        with self.assertRaises(TDTUProtocolError):
+            fetch_schedule_http(client, max_weeks=2, expected_week_start=dt.date(2026, 9, 7))
+
+    def test_schedule_wrong_initial_week_fails_closed(self) -> None:
+        html = (Path(__file__).parent / "fixtures/tdtu/schedule_weekly_current.html").read_text()
+        client, page = self._make_mock_client(html)
+
+        with self.assertRaises(TDTUProtocolError):
+            fetch_schedule_http(client, max_weeks=1, expected_week_start=dt.date(2026, 9, 7))
+
+    def test_schedule_repeated_week_fails_closed(self) -> None:
+        html = (Path(__file__).parent / "fixtures/tdtu/schedule_weekly_current.html").read_text()
+        client, page = self._make_mock_client(html)
+
+        with self.assertRaises(TDTUProtocolError):
+            fetch_schedule_http(client, max_weeks=2, expected_week_start=dt.date(2026, 8, 31))
+
+    def test_schedule_complete_two_week_crawl_succeeds(self) -> None:
+        fixtures = Path(__file__).parent / "fixtures/tdtu"
+        current_html = (fixtures / "schedule_weekly_current.html").read_text()
+        next_html = (fixtures / "schedule_weekly_next.html").read_text()
+        client, page = self._make_mock_client(current_html)
+
+        def postback(*args, **kwargs):
+            if kwargs.get("event_target") == "ThoiKhoaBieu1$btnTuanSau":
+                page.html = next_html
+
+        page.postback.side_effect = postback
+
+        rows = fetch_schedule_http(client, max_weeks=2, expected_week_start=dt.date(2026, 8, 31))
+
+        self.assertEqual({row["session_date"] for row in rows}, {"2026-08-31", "2026-09-08"})
 
     def test_schedule_semester_verification_by_label_and_value(self) -> None:
         html_before = """

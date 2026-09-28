@@ -3,6 +3,7 @@ Pure HTML parsers for TDTU student timetable / schedule pages.
 Does NOT access network, environment variables, or external services.
 """
 
+import datetime as dt
 import logging
 import re
 import unicodedata
@@ -203,6 +204,36 @@ def parse_general_schedule_table(html: str, student_id: str = "") -> list[dict[s
     return _deduplicate_schedule(entries)
 
 
+def parse_week_range_label(label: str) -> tuple[dt.date, dt.date]:
+    matches = re.findall(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})", label)
+    if len(matches) < 2:
+        raise TDTUProtocolError("Could not resolve valid week range from portal week control")
+    try:
+        dates = []
+        for day, month, year in matches[:2]:
+            resolved_year = int(year)
+            if resolved_year < 100:
+                resolved_year += 2000
+            dates.append(dt.date(resolved_year, int(month), int(day)))
+    except ValueError as exc:
+        raise TDTUProtocolError(f"Invalid date format in week range control '{label}': {exc}") from exc
+    start, end = dates
+    if start.weekday() != 0 or end.weekday() != 6 or (end - start).days != 6:
+        raise TDTUProtocolError(f"Invalid weekly date range bounds: {label} ({start} to {end})")
+    return start, end
+
+
+def parse_week_start(html: str) -> dt.date:
+    soup = BeautifulSoup(html, "html.parser")
+    week_btn = (
+        soup.find("input", id=re.compile(r".*btnTuanHienTai.*", re.IGNORECASE))
+        or soup.find("input", attrs={"name": re.compile(r".*btnTuanHienTai.*", re.IGNORECASE)})
+    )
+    if week_btn is None:
+        raise TDTUProtocolError("Could not resolve valid week range from portal week control")
+    return parse_week_range_label(week_btn.get("value", ""))[0]
+
+
 def parse_weekly_grid_table(html: str, student_id: str = "") -> list[dict[str, Any]] | None:
     """
     Parse weekly grid timetable when weekly view is active.
@@ -242,29 +273,9 @@ def parse_weekly_grid_table(html: str, student_id: str = "") -> list[dict[str, A
 
     col_days = [_normalize_day(h) for h in headers]
 
-    # Parse and validate week range bounds
-    start_dt = None
-    end_dt = None
-    if week_btn:
-        btn_val = week_btn.get("value", "")
-        matches = re.findall(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})", btn_val)
-        if len(matches) >= 2:
-            try:
-                import datetime
-                d1, m1, y1 = int(matches[0][0]), int(matches[0][1]), int(matches[0][2])
-                d2, m2, y2 = int(matches[1][0]), int(matches[1][1]), int(matches[1][2])
-                if y1 < 100: y1 += 2000
-                if y2 < 100: y2 += 2000
-                start_dt = datetime.date(y1, m1, d1)
-                end_dt = datetime.date(y2, m2, d2)
-
-                if start_dt.weekday() != 0 or end_dt.weekday() != 6 or (end_dt - start_dt).days != 6:
-                    raise TDTUProtocolError(f"Invalid weekly date range bounds: {btn_val} ({start_dt} to {end_dt})")
-            except ValueError as exc:
-                raise TDTUProtocolError(f"Invalid date format in week range control '{btn_val}': {exc}") from exc
-
-    if not start_dt or not end_dt:
+    if not week_btn:
         raise TDTUProtocolError("Could not resolve valid week range from portal week control")
+    start_dt, end_dt = parse_week_range_label(week_btn.get("value", ""))
 
     # Derive column dates: header text FIRST, range context for year
     dates_map: dict[str, str] = {}

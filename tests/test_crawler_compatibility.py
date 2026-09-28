@@ -1,7 +1,9 @@
+import datetime as dt
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from crawler import fetch_exam_schedule, fetch_schedule
+from crawler import _fetch_schedule_playwright, fetch_exam_schedule, fetch_schedule
 from tdtu.snapshot import fetch_portal_snapshot
 
 
@@ -25,7 +27,9 @@ class TestCrawlerCompatibility(unittest.TestCase):
         mock_fetch_sched.return_value = [{"subject_name": "Math"}]
         mock_fetch_exams.return_value = [{"subject_name": "Math Exam"}]
 
-        snapshot = fetch_portal_snapshot("TEST_STUDENT_001", "TEST_PASSWORD_NOT_A_SECRET")
+        snapshot = fetch_portal_snapshot(
+            "TEST_STUDENT_001", "TEST_PASSWORD_NOT_A_SECRET", expected_week_start=dt.date(2026, 8, 31)
+        )
 
         self.assertTrue(snapshot.schedule.success)
         self.assertTrue(snapshot.exams.success)
@@ -37,7 +41,33 @@ class TestCrawlerCompatibility(unittest.TestCase):
         mock_client_cls.assert_called_once_with(student_id="TEST_STUDENT_001", password="TEST_PASSWORD_NOT_A_SECRET")
         mock_get_sem.assert_called_once()
         mock_fetch_sched.assert_called_once()
+        self.assertEqual(mock_fetch_sched.call_args.kwargs["expected_week_start"], dt.date(2026, 8, 31))
         mock_fetch_exams.assert_called_once()
+
+    @patch("crawler._get_selected_semester_text", return_value="HK1/2026-2027")
+    @patch("crawler._build_schedule_url", return_value="https://example.edu/schedule")
+    @patch("crawler._click_portal_control")
+    @patch("crawler._goto_next_week", return_value=False)
+    @patch("crawler._parse_schedule_table", return_value=[])
+    @patch("crawler._configure_schedule_filters")
+    @patch("crawler._launch_chromium")
+    @patch("crawler.sync_playwright")
+    def test_playwright_schedule_early_navigation_failure_is_not_authoritative(
+        self, mock_playwright, mock_browser, mock_filters, mock_parse, mock_next,
+        mock_click, mock_url, mock_semester,
+    ) -> None:
+        page = mock_browser.return_value.new_context.return_value.new_page.return_value
+        page.url = "https://example.edu/schedule"
+        page.locator.return_value.count.return_value = 0
+        page.content.return_value = (
+            Path(__file__).parent / "fixtures/tdtu/schedule_weekly_current.html"
+        ).read_text()
+
+        with self.assertRaises(RuntimeError):
+            _fetch_schedule_playwright(
+                "TEST_STUDENT_001", "TEST_PASSWORD_NOT_A_SECRET",
+                weeks_ahead=1, expected_week_start=dt.date(2026, 8, 31),
+            )
 
     @patch("crawler._fetch_schedule_playwright")
     @patch("crawler.fetch_schedule_http")

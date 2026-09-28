@@ -2,28 +2,36 @@
 run_hour.py – Hourly data collection and sync orchestrator.
 
 This script runs the data-collection pipeline:
+
     1. Crawl the TDTU portal for the latest timetable.
     2. Push raw crawler results directly to Google Calendar.
     3. Finish after Calendar reconciliation.
 
 Scheduled hourly by the GitHub Actions workflow.
+
 This does NOT send Telegram notifications; that's handled separately by main.py.
 """
 
+import datetime as dt
 import logging
 import os
 import sys
 import time
 
+import time_utils
+
+
 # -----------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s – %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     stream=sys.stdout,
 )
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,6 +39,7 @@ def _load_dotenv() -> None:
     """Load .env file into os.environ when running locally."""
     try:
         from dotenv import load_dotenv  # type: ignore[import]
+
         loaded = load_dotenv()
         if loaded:
             logger.info(".env file loaded successfully.")
@@ -41,13 +50,19 @@ def _load_dotenv() -> None:
 def _resolve_crawler_weeks_ahead() -> int:
     """Read multi-week crawl horizon from env with safe fallback."""
     raw = (os.environ.get("CRAWLER_WEEKS_AHEAD") or "2").strip()
+
     try:
         weeks = int(raw)
     except ValueError:
-        logger.warning("Invalid CRAWLER_WEEKS_AHEAD=%r; using 2.", raw)
+        logger.warning(
+            "Invalid CRAWLER_WEEKS_AHEAD=%r; using 2.",
+            raw,
+        )
         return 2
+
     if weeks < 0:
         return 0
+
     return min(weeks, 12)
 
 
@@ -58,17 +73,29 @@ def _handle_error(context: str, exc: Exception) -> None:
 
     try:
         from notifier import send_error_alert
+
         send_error_alert(error_msg)
     except Exception as alert_exc:
-        logger.error("Could not send error alert: %s", alert_exc)
+        logger.error(
+            "Could not send error alert: %s",
+            alert_exc,
+        )
 
     sys.exit(1)
 
 
-def _log_step_elapsed(step_name: str, started_at: float) -> None:
+def _log_step_elapsed(
+    step_name: str,
+    started_at: float,
+) -> None:
     """Log how long a step took in seconds."""
     elapsed = time.perf_counter() - started_at
-    logger.info("%s finished in %.2fs", step_name, elapsed)
+
+    logger.info(
+        "%s finished in %.2fs",
+        step_name,
+        elapsed,
+    )
 
 
 def run_hourly_sync() -> None:
@@ -78,112 +105,381 @@ def run_hourly_sync() -> None:
     student_id = os.environ.get("STUDENT_ID")
     password = os.environ.get("PASSWORD")
 
-    # -------- Pre-check & Step 1: Crawl using shared portal snapshot (1 login) --------
+    # -------------------------------------------------------------------
+    # Pre-check & Step 1:
+    # Crawl using shared portal snapshot (1 login)
+    # -------------------------------------------------------------------
+
     step_started = time.perf_counter()
-    logger.info("Step 1: Crawling schedule & exam data from TDTU portal")
+
+    logger.info(
+        "Step 1: Crawling schedule & exam data from TDTU portal"
+    )
+
     try:
         from tdtu import fetch_portal_snapshot
 
         weeks_ahead = _resolve_crawler_weeks_ahead()
-        logger.debug("Crawler will fetch current week + %d future week(s).", weeks_ahead)
+        today = time_utils.local_today()
+        week_start_date = today - dt.timedelta(days=today.weekday())
+        timezone = time_utils.local_now().tzinfo
+        window_start = dt.datetime.combine(week_start_date, dt.time.min, tzinfo=timezone)
+        schedule_window = (window_start, window_start + dt.timedelta(weeks=weeks_ahead + 1))
 
+        logger.debug(
+            "Crawler will fetch current week + %d future week(s).",
+            weeks_ahead,
+        )
+
+        # None has an important meaning here:
+        #
+        # None:
+        #   crawler could not reliably determine the current data.
+        #   Calendar must PRESERVE existing events for that source.
+        #
+        # []:
+        #   crawler completed successfully and confirmed that there
+        #   are currently zero rows.
+        #   Calendar may reconcile/delete stale events.
         schedule = None
         exams = None
-        http_required = os.environ.get("TDTU_HTTP_REQUIRED", "").lower() in ("true", "1", "yes")
 
+        http_required = (
+            os.environ
+            .get("TDTU_HTTP_REQUIRED", "")
+            .lower()
+            in ("true", "1", "yes")
+        )
+
+        # ---------------------------------------------------------------
         # Attempt shared single-login HTTP snapshot
-        snapshot = fetch_portal_snapshot(student_id, password, weeks_ahead=1 + weeks_ahead)
+        # ---------------------------------------------------------------
 
+        snapshot = fetch_portal_snapshot(
+            student_id,
+            password,
+            weeks_ahead=1 + weeks_ahead,
+            expected_week_start=week_start_date,
+        )
+
+        # ---------------------------------------------------------------
         # 1. Semester logging
+        # ---------------------------------------------------------------
+
         if snapshot.semester.success and snapshot.semester.data:
-            logger.info("Active semester on portal: %s", snapshot.semester.data)
+            logger.info(
+                "Active semester on portal: %s",
+                snapshot.semester.data,
+            )
+
         else:
             if http_required:
-                raise RuntimeError(f"Semester HTTP fetch failed while TDTU_HTTP_REQUIRED=true: {snapshot.semester.error}")
+                raise RuntimeError(
+                    "Semester HTTP fetch failed while "
+                    "TDTU_HTTP_REQUIRED=true: "
+                    f"{snapshot.semester.error}"
+                )
+
             try:
                 from crawler import _get_current_semester_playwright
-                sem = _get_current_semester_playwright(student_id, password)
-                logger.info("Active semester on portal (Playwright fallback): %s", sem)
-            except Exception as exc:
-                logger.warning("Could not determine active semester: %s", exc)
 
+                sem = _get_current_semester_playwright(
+                    student_id,
+                    password,
+                )
+
+                logger.info(
+                    "Active semester on portal "
+                    "(Playwright fallback): %s",
+                    sem,
+                )
+
+            except Exception as exc:
+                logger.warning(
+                    "Could not determine active semester: %s",
+                    exc,
+                )
+
+        # ---------------------------------------------------------------
         # 2. Schedule operation
+        # ---------------------------------------------------------------
+
         if snapshot.schedule.success:
             schedule = snapshot.schedule.data
-            logger.info("Schedule HTTP crawler returned %d row(s).", len(schedule) if schedule is not None else 0)
+
+            logger.info(
+                "Schedule HTTP crawler returned %d row(s).",
+                len(schedule)
+                if schedule is not None
+                else 0,
+            )
+
         else:
             if http_required:
-                raise RuntimeError(f"Schedule HTTP fetch failed while TDTU_HTTP_REQUIRED=true: {snapshot.schedule.error}")
-            logger.warning("Schedule HTTP crawler failed (%s); triggering Playwright fallback...", snapshot.schedule.error)
+                raise RuntimeError(
+                    "Schedule HTTP fetch failed while "
+                    "TDTU_HTTP_REQUIRED=true: "
+                    f"{snapshot.schedule.error}"
+                )
+
+            logger.warning(
+                "Schedule HTTP crawler failed (%s); "
+                "triggering Playwright fallback...",
+                snapshot.schedule.error,
+            )
+
             try:
                 from crawler import _fetch_schedule_playwright
-                schedule = _fetch_schedule_playwright(student_id, password, weeks_ahead=weeks_ahead)
-                logger.info("Schedule Playwright fallback returned %d row(s).", len(schedule))
+
+                schedule = _fetch_schedule_playwright(
+                    student_id,
+                    password,
+                    weeks_ahead=weeks_ahead,
+                    expected_week_start=week_start_date,
+                )
+
+                logger.info(
+                    "Schedule Playwright fallback "
+                    "returned %d row(s).",
+                    len(schedule),
+                )
+
             except Exception:
-                logger.exception("Schedule Playwright fallback failed; preserving existing schedule data.")
+                logger.exception(
+                    "Schedule Playwright fallback failed; "
+                    "preserving existing schedule data."
+                )
+
+                # IMPORTANT:
+                # None means Calendar must NOT delete existing
+                # schedule events.
                 schedule = None
 
+        # ---------------------------------------------------------------
         # 3. Exam operation
+        # ---------------------------------------------------------------
+
         if snapshot.exams.success:
             exams = snapshot.exams.data
-            logger.info("Exam HTTP crawler returned %d row(s).", len(exams) if exams is not None else 0)
+
+            logger.info(
+                "Exam HTTP crawler returned %d row(s).",
+                len(exams)
+                if exams is not None
+                else 0,
+            )
+
         else:
             if http_required:
-                raise RuntimeError(f"Exam HTTP fetch failed while TDTU_HTTP_REQUIRED=true: {snapshot.exams.error}")
-            logger.warning("Exam HTTP crawler failed (%s); triggering Playwright fallback...", snapshot.exams.error)
+                raise RuntimeError(
+                    "Exam HTTP fetch failed while "
+                    "TDTU_HTTP_REQUIRED=true: "
+                    f"{snapshot.exams.error}"
+                )
+
+            logger.warning(
+                "Exam HTTP crawler failed (%s); "
+                "triggering Playwright fallback...",
+                snapshot.exams.error,
+            )
+
             try:
-                from crawler import _fetch_exam_schedule_from_portal
-                exams = _fetch_exam_schedule_from_portal(student_id, password, weeks_ahead=weeks_ahead)
-                logger.info("Exam Playwright fallback returned %d row(s).", len(exams))
+                from crawler import (
+                    _fetch_exam_schedule_from_portal,
+                )
+
+                fallback_exams = (
+                    _fetch_exam_schedule_from_portal(
+                        student_id,
+                        password,
+                        weeks_ahead=weeks_ahead,
+                    )
+                )
+
+                if fallback_exams:
+                    # Playwright successfully found exam data.
+                    exams = fallback_exams
+
+                    logger.info(
+                        "Exam Playwright fallback "
+                        "returned %d row(s).",
+                        len(exams),
+                    )
+
+                else:
+                    # IMPORTANT:
+                    #
+                    # HTTP already failed.
+                    #
+                    # Therefore Playwright returning [] is not
+                    # trustworthy enough to conclude:
+                    #
+                    # "There are definitely no exams."
+                    #
+                    # It could simply be an error page / incomplete
+                    # page / upstream TDTU failure.
+                    #
+                    # Use None so calendar_sync does NOT manage the
+                    # exam source in this run and therefore preserves
+                    # existing exam events.
+                    exams = None
+
+                    logger.warning(
+                        "Exam Playwright fallback returned 0 rows "
+                        "after HTTP exam fetch failed; "
+                        "preserving existing exam data."
+                    )
+
             except Exception:
-                logger.exception("Exam Playwright fallback failed; preserving existing exam data.")
+                logger.exception(
+                    "Exam Playwright fallback failed; "
+                    "preserving existing exam data."
+                )
+
+                exams = None
+
+        # ---------------------------------------------------------------
+        # 4. eLearning deadline operation
+        # ---------------------------------------------------------------
+
         elearning_deadlines = None
         deadline_window = None
+
         try:
             from elearning import PlaywrightElearningCrawler
 
-            elearning_crawler = PlaywrightElearningCrawler()
-            crawl_res = elearning_crawler.crawl_deadlines(student_id, password)
+            elearning_crawler = (
+                PlaywrightElearningCrawler()
+            )
+
+            crawl_res = (
+                elearning_crawler.crawl_deadlines(
+                    student_id,
+                    password,
+                )
+            )
+
             elearning_deadlines = crawl_res.items
-            deadline_window = (crawl_res.window_start, crawl_res.window_end)
-            logger.info("eLearning deadline crawler returned %d row(s).", len(elearning_deadlines))
+
+            deadline_window = (
+                crawl_res.window_start,
+                crawl_res.window_end,
+            )
+
+            logger.info(
+                "eLearning deadline crawler "
+                "returned %d row(s).",
+                len(elearning_deadlines),
+            )
+
         except Exception:
-            logger.exception("eLearning deadline crawl failed; continuing without a deadline update.")
+            logger.exception(
+                "eLearning deadline crawl failed; "
+                "continuing without a deadline update."
+            )
+
+            # Same fail-safe principle:
+            #
+            # None means:
+            # "we do not know the current deadline state"
+            #
+            # Calendar must preserve existing deadline events.
             elearning_deadlines = None
             deadline_window = None
+
     except Exception as exc:
-        logger.exception("Step 1 failed after %.2fs", time.perf_counter() - step_started)
-        _handle_error("Crawler failed", exc)
-        return
-    _log_step_elapsed("Step 1", step_started)
-
-    # -------- Step 2: Direct Google Calendar sync --------
-    # Use raw crawler results so Calendar is updated immediately after crawling.
-    step_started = time.perf_counter()
-    logger.info("Step 2: Syncing raw crawler data directly to Google Calendar")
-    try:
-        from calendar_sync import sync_crawled_data_to_google_calendar
-
-        _, did_sync = sync_crawled_data_to_google_calendar(
-            schedule,
-            exams,
-            student_id=student_id,
-            deadlines=elearning_deadlines,
-            deadline_window=deadline_window,
+        logger.exception(
+            "Step 1 failed after %.2fs",
+            time.perf_counter() - step_started,
         )
-        if did_sync:
-            logger.info("Google Calendar sync complete.")
-        else:
-            logger.info(
-                "Google Calendar sync skipped (missing GOOGLE_CALENDAR_ID or Google service-account credentials)."
-            )
-    except Exception as exc:
-        logger.exception("Step 2 failed after %.2fs", time.perf_counter() - step_started)
-        _handle_error("Google Calendar sync failed", exc)
-        return
-    _log_step_elapsed("Step 2", step_started)
 
-    logger.info("=== Hourly data collection and sync complete. ===")
+        _handle_error(
+            "Crawler failed",
+            exc,
+        )
+
+        return
+
+    _log_step_elapsed(
+        "Step 1",
+        step_started,
+    )
+
+    # -------------------------------------------------------------------
+    # Step 2:
+    # Direct Google Calendar sync
+    # -------------------------------------------------------------------
+
+    # Use raw crawler results so Calendar is updated immediately
+    # after crawling.
+
+    step_started = time.perf_counter()
+
+    logger.info(
+        "Step 2: Syncing raw crawler data directly "
+        "to Google Calendar"
+    )
+
+    try:
+        from calendar_sync import (
+            sync_crawled_data_to_google_calendar,
+        )
+
+        if schedule is not None:
+            logger.info(
+                "Schedule reconciliation window: %s -> %s",
+                schedule_window[0].isoformat(),
+                schedule_window[1].isoformat(),
+            )
+
+        _, did_sync = (
+            sync_crawled_data_to_google_calendar(
+                schedule,
+                exams,
+                student_id=student_id,
+                deadlines=elearning_deadlines,
+                deadline_window=deadline_window,
+                schedule_window=schedule_window if schedule is not None else None,
+            )
+        )
+
+        if did_sync:
+            logger.info(
+                "Google Calendar sync complete."
+            )
+
+        else:
+            # did_sync=False can mean more than just missing
+            # credentials. For example, all crawler sources may
+            # have failed and therefore there is intentionally
+            # nothing safe to reconcile.
+            logger.info(
+                "Google Calendar sync skipped; "
+                "no eligible crawler data or "
+                "Calendar configuration was unavailable."
+            )
+
+    except Exception as exc:
+        logger.exception(
+            "Step 2 failed after %.2fs",
+            time.perf_counter() - step_started,
+        )
+
+        _handle_error(
+            "Google Calendar sync failed",
+            exc,
+        )
+
+        return
+
+    _log_step_elapsed(
+        "Step 2",
+        step_started,
+    )
+
+    logger.info(
+        "=== Hourly data collection and sync complete. ==="
+    )
 
 
 if __name__ == "__main__":

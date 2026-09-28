@@ -1,7 +1,7 @@
 import datetime as dt
 import os
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import calendar_sync
@@ -43,6 +43,7 @@ class RunHourlySyncTests(unittest.TestCase):
             student_id="TEST_STUDENT_001",
             deadlines=[],
             deadline_window=(NOW, WINDOW_END),
+            schedule_window=ANY,
         )
 
     @patch.dict(os.environ, {"STUDENT_ID": "TEST_STUDENT_001", "PASSWORD": "TEST_PASSWORD_NOT_A_SECRET"})
@@ -63,7 +64,11 @@ class RunHourlySyncTests(unittest.TestCase):
             exams=FetchResult(success=True, data=[]),
         )
 
-        run_hour.run_hourly_sync()
+        with (
+            patch.dict(os.environ, {"CRAWLER_WEEKS_AHEAD": "2"}),
+            patch("time_utils.local_today", return_value=dt.date(2026, 9, 28)),
+        ):
+            run_hour.run_hourly_sync()
 
         mock_sync.assert_called_once_with(
             [],
@@ -71,7 +76,13 @@ class RunHourlySyncTests(unittest.TestCase):
             student_id="TEST_STUDENT_001",
             deadlines=[],
             deadline_window=(NOW, WINDOW_END),
+            schedule_window=(
+                dt.datetime(2026, 9, 28, tzinfo=TZ),
+                dt.datetime(2026, 10, 19, tzinfo=TZ),
+            ),
         )
+        self.assertEqual(mock_snapshot.call_args.kwargs["weeks_ahead"], 3)
+        self.assertEqual(mock_snapshot.call_args.kwargs["expected_week_start"], dt.date(2026, 9, 28))
 
     @patch.dict(os.environ, {"STUDENT_ID": "TEST_STUDENT_001", "PASSWORD": "TEST_PASSWORD_NOT_A_SECRET"})
     @patch("crawler._fetch_schedule_playwright", return_value=[{"subject_name": "Fallback Class"}])
@@ -95,12 +106,14 @@ class RunHourlySyncTests(unittest.TestCase):
         run_hour.run_hourly_sync()
 
         mock_pw_sched.assert_called_once()
+        self.assertIn("expected_week_start", mock_pw_sched.call_args.kwargs)
         mock_sync.assert_called_once_with(
             [{"subject_name": "Fallback Class"}],
             [{"subject_name": "Exam CSDL"}],
             student_id="TEST_STUDENT_001",
             deadlines=[],
             deadline_window=(NOW, WINDOW_END),
+            schedule_window=ANY,
         )
 
     @patch.dict(os.environ, {"STUDENT_ID": "TEST_STUDENT_001", "PASSWORD": "TEST_PASSWORD_NOT_A_SECRET"})
@@ -131,7 +144,31 @@ class RunHourlySyncTests(unittest.TestCase):
             student_id="TEST_STUDENT_001",
             deadlines=[],
             deadline_window=(NOW, WINDOW_END),
+            schedule_window=ANY,
         )
+
+    @patch.dict(os.environ, {"STUDENT_ID": "TEST_STUDENT_001", "PASSWORD": "TEST_PASSWORD_NOT_A_SECRET"})
+    @patch("crawler._fetch_exam_schedule_from_portal", return_value=[])
+    @patch("tdtu.fetch_portal_snapshot")
+    @patch.object(calendar_sync, "sync_crawled_data_to_google_calendar", return_value=("", True))
+    @patch("elearning.PlaywrightElearningCrawler")
+    @patch.object(run_hour, "_load_dotenv")
+    def test_exam_http_failure_and_empty_fallback_preserves_existing_exams(
+        self, mock_dotenv: MagicMock, mock_crawler_cls: MagicMock, mock_sync: MagicMock,
+        mock_snapshot: MagicMock, mock_pw_exam: MagicMock,
+    ) -> None:
+        mock_crawler_cls.return_value.crawl_deadlines.return_value = MOCK_CRAWL_RESULT
+        mock_snapshot.return_value = PortalSnapshot(
+            semester=FetchResult(success=True, data="HK1/2026-2027"),
+            schedule=FetchResult(success=True, data=[]),
+            exams=FetchResult(success=False, data=None, error="HTTP unavailable"),
+        )
+
+        run_hour.run_hourly_sync()
+
+        mock_pw_exam.assert_called_once()
+        self.assertIsNone(mock_sync.call_args.args[1])
+        self.assertIsNotNone(mock_sync.call_args.kwargs["schedule_window"])
 
     @patch.dict(os.environ, {"STUDENT_ID": "TEST_STUDENT_001", "PASSWORD": "TEST_PASSWORD_NOT_A_SECRET"})
     @patch("crawler._fetch_schedule_playwright", side_effect=RuntimeError("Playwright failed"))
@@ -162,6 +199,7 @@ class RunHourlySyncTests(unittest.TestCase):
             student_id="TEST_STUDENT_001",
             deadlines=[],
             deadline_window=(NOW, WINDOW_END),
+            schedule_window=None,
         )
 
     @patch.dict(os.environ, {"STUDENT_ID": "TEST_STUDENT_001", "PASSWORD": "TEST_PASSWORD_NOT_A_SECRET"})
@@ -191,6 +229,7 @@ class RunHourlySyncTests(unittest.TestCase):
             student_id="TEST_STUDENT_001",
             deadlines=None,
             deadline_window=None,
+            schedule_window=ANY,
         )
 
     @patch.dict(os.environ, {"STUDENT_ID": "TEST_STUDENT_001", "PASSWORD": "TEST_PASSWORD_NOT_A_SECRET", "TDTU_HTTP_REQUIRED": "true"})

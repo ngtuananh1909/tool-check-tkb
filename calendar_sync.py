@@ -142,6 +142,7 @@ def sync_crawled_data_to_google_calendar(
     student_id: str | None = None,
     deadlines: list[dict] | None = None,
     deadline_window: tuple[dt.datetime, dt.datetime] | None = None,
+    schedule_window: tuple[dt.datetime, dt.datetime] | None = None,
 ) -> tuple[str, bool]:
     """Sync raw crawled data without deleting sources whose crawl failed.
 
@@ -150,23 +151,8 @@ def sync_crawled_data_to_google_calendar(
     collected source types are reconciled, protecting existing Calendar events
     during a partial crawler outage.
     """
-    if deadlines is not None:
-        if deadline_window is None:
-            raise ValueError(
-                "deadlines list provided without authoritative deadline_window; sync aborted to prevent global deletion"
-            )
-        if not isinstance(deadline_window, tuple) or len(deadline_window) != 2:
-            raise ValueError("deadline_window must be a 2-tuple of (start, end)")
-        w_start, w_end = deadline_window
-        if not isinstance(w_start, dt.datetime) or not isinstance(w_end, dt.datetime):
-            raise ValueError("deadline_window elements must be datetime instances")
-        if w_start.tzinfo is None or w_end.tzinfo is None:
-            raise ValueError("deadline_window elements must be timezone-aware")
-        if w_start >= w_end:
-            raise ValueError(f"deadline_window start ({w_start}) must be strictly before end ({w_end})")
-
-    if deadlines is None and deadline_window is not None:
-        raise ValueError("deadline_window provided while deadlines is None")
+    _validate_authoritative_window("schedule_window", class_sessions, schedule_window)
+    _validate_authoritative_window("deadline_window", deadlines, deadline_window)
 
     target_date = local_today()
 
@@ -176,6 +162,13 @@ def sync_crawled_data_to_google_calendar(
     sync_items = _build_sync_items_from_sessions(
         session_rows, exam_rows, target_date, deadlines=deadline_rows
     )
+    if schedule_window is not None:
+        for item in sync_items:
+            if item["source_type"] != SYNC_SOURCE_CLASS_SESSION:
+                continue
+            event_start = _parse_calendar_event_start(item["payload"])
+            if event_start is None or not (schedule_window[0] <= event_start < schedule_window[1]):
+                raise ValueError("class session falls outside authoritative schedule_window")
     managed: set[str] = set()
     if class_sessions is not None:
         managed.add(SYNC_SOURCE_CLASS_SESSION)
@@ -210,7 +203,10 @@ def sync_crawled_data_to_google_calendar(
 
     service, service_account_email = _build_calendar_service(service_account_json, service_account_file)
     _validate_calendar_target(service, calendar_id, service_account_email)
-    _replace_bot_events_for_range(service, calendar_id, sync_items, student_id, managed, deadline_window=deadline_window)
+    _replace_bot_events_for_range(
+        service, calendar_id, sync_items, student_id, managed,
+        deadline_window=deadline_window, schedule_window=schedule_window,
+    )
 
     logger.info(
         "Synced %d event(s) to Google Calendar '%s' directly from crawler (managed=%s).",
@@ -219,6 +215,28 @@ def sync_crawled_data_to_google_calendar(
         sorted(managed),
     )
     return "", True
+
+
+def _validate_authoritative_window(
+    name: str,
+    rows: list[dict] | None,
+    window: tuple[dt.datetime, dt.datetime] | None,
+) -> None:
+    if rows is None:
+        if window is not None:
+            raise ValueError(f"{name} provided while source data is None")
+        return
+    if window is None:
+        raise ValueError(f"source list provided without authoritative {name}")
+    if not isinstance(window, tuple) or len(window) != 2:
+        raise ValueError(f"{name} must be a 2-tuple of (start, end)")
+    start, end = window
+    if not isinstance(start, dt.datetime) or not isinstance(end, dt.datetime):
+        raise ValueError(f"{name} elements must be datetime instances")
+    if start.tzinfo is None or end.tzinfo is None or start.utcoffset() is None or end.utcoffset() is None:
+        raise ValueError(f"{name} elements must be timezone-aware")
+    if start >= end:
+        raise ValueError(f"{name} start ({start}) must be strictly before end ({end})")
 
 
 def insert_calendar_event(
@@ -901,6 +919,7 @@ def _replace_bot_events_for_range(
     student_id: str | None,
     managed_source_types: frozenset[str] | set[str],
     deadline_window: tuple[dt.datetime, dt.datetime] | None = None,
+    schedule_window: tuple[dt.datetime, dt.datetime] | None = None,
 ) -> None:
     """Reconcile bot-owned events with the desired ``sync_items``.
 
@@ -908,10 +927,43 @@ def _replace_bot_events_for_range(
     ``managed_source_types`` are eligible for deletion. This guarantees that
     one sync entry (e.g. the crawler sync) never purges events owned by
     another entry (e.g. appointments created by Telegram ``/add``).
+    Exams are updated by exact source key and are not deleted without an
+    authoritative exam window.
     """
-    existing_by_key, legacy_events = _list_bot_events(service, calendar_id)
-    current_keys = {item["source_key"] for item in sync_items}
     managed = frozenset(managed_source_types)
+    if SYNC_SOURCE_CLASS_SESSION in managed:
+        _validate_authoritative_window("schedule_window", [], schedule_window)
+
+    existing_by_key: dict[str, dict] = {}
+    legacy_events: list[dict] = []
+    for source_type, window in (
+        (SYNC_SOURCE_CLASS_SESSION, schedule_window),
+        (SYNC_SOURCE_DEADLINE, deadline_window),
+    ):
+        if source_type not in managed or window is None:
+            continue
+        source_events, source_legacy = _list_bot_events(service, calendar_id, window=window)
+        legacy_events.extend(source_legacy)
+        in_window_count = 0
+        for source_key, event in source_events.items():
+            event_start = _parse_calendar_event_start(event)
+            if _event_source_type(event) == source_type and event_start is not None and window[0] <= event_start < window[1]:
+                existing_by_key[source_key] = event
+                in_window_count += 1
+        logger.info(
+            "%s reconciliation queried %d existing event(s) inside authoritative window.",
+            source_type, in_window_count,
+        )
+
+    if SYNC_SOURCE_EXAM in managed:
+        for source_key in {item["source_key"] for item in sync_items if item["source_type"] == SYNC_SOURCE_EXAM}:
+            source_events, source_legacy = _list_bot_events(service, calendar_id, source_key=source_key)
+            legacy_events.extend(source_legacy)
+            event = source_events.get(source_key)
+            if event is not None and _event_source_type(event) == SYNC_SOURCE_EXAM:
+                existing_by_key[source_key] = event
+
+    current_keys = {item["source_key"] for item in sync_items}
 
     sid = student_id or os.environ.get("STUDENT_ID", "")
     now_utc = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -947,37 +999,25 @@ def _replace_bot_events_for_range(
             len(legacy_events),
         )
 
-    deleted_count = 0
-    skipped_other_owner: list[str] = []
+    deleted_by_source = {SYNC_SOURCE_CLASS_SESSION: 0, SYNC_SOURCE_DEADLINE: 0}
     for source_key, event in existing_by_key.items():
         if source_key in current_keys:
             continue
         event_source_type = _event_source_type(event)
         if event_source_type not in managed:
-            skipped_other_owner.append(source_key)
+            continue
+        if event_source_type == SYNC_SOURCE_EXAM:
             continue
 
-        # Window safety guard for deadlines: PRESERVE deadlines outside [window_start, window_end)
-        if event_source_type == SYNC_SOURCE_DEADLINE:
-            if deadline_window is None:
-                logger.warning("Skipping deadline deletion because deadline_window is missing.")
-                continue
-            window_start, window_end = deadline_window
-            event_start_dt = _parse_calendar_event_start(event)
-            if event_start_dt is None:
-                logger.warning(
-                    "Preserving deadline event because its start time could not be parsed: %s",
-                    source_key,
-                )
-                continue
-            if not (window_start <= event_start_dt < window_end):
-                logger.debug("Preserving Google deadline event outside sync window: %s", source_key)
-                continue
+        window = schedule_window if event_source_type == SYNC_SOURCE_CLASS_SESSION else deadline_window
+        event_start_dt = _parse_calendar_event_start(event)
+        if window is None or event_start_dt is None or not (window[0] <= event_start_dt < window[1]):
+            continue
 
         event_id = str(event.get("id") or "").strip()
         if event_id:
             _safe_delete_calendar_event(service, calendar_id, event_id)
-            deleted_count += 1
+            deleted_by_source[event_source_type] += 1
         state_rows.append(
             {
                 "student_id": sid,
@@ -991,18 +1031,9 @@ def _replace_bot_events_for_range(
             }
         )
 
-    if skipped_other_owner:
-        logger.warning(
-            "Sync (managed=%s) skipped %d event(s) owned by other source types.",
-            sorted(managed),
-            len(skipped_other_owner),
-        )
-    if deleted_count:
-        logger.info(
-            "Sync (managed=%s) deleted %d stale event(s).",
-            sorted(managed),
-            deleted_count,
-        )
+    for source_type, count in deleted_by_source.items():
+        if count:
+            logger.info("Deleted %d stale %s event(s) inside authoritative window.", count, source_type)
 
     # Note: Bypassing DB, so we do not call upsert_calendar_sync_state here.
 
@@ -1020,30 +1051,46 @@ def _safe_delete_calendar_event(service: Resource, calendar_id: str, event_id: s
         logger.warning("Calendar event %s was already deleted; continuing.", event_id)
 
 
-def _list_bot_events(service: Resource, calendar_id: str) -> tuple[dict[str, dict], list[dict]]:
+def _list_bot_events(
+    service: Resource,
+    calendar_id: str,
+    *,
+    window: tuple[dt.datetime, dt.datetime] | None = None,
+    source_key: str | None = None,
+) -> tuple[dict[str, dict], list[dict]]:
+    if (window is None) == (source_key is None):
+        raise ValueError("Calendar event listing requires exactly one window or source_key")
     existing_by_key: dict[str, dict] = {}
     legacy_events: list[dict] = []
     page_token: str | None = None
+    list_kwargs = {
+        "calendarId": calendar_id,
+        "singleEvents": False,
+        "privateExtendedProperty": (
+            f"source={BOT_SOURCE_TAG}" if window is not None else f"source_key={source_key}"
+        ),
+        "maxResults": 2500,
+    }
+    if window is not None:
+        list_kwargs["timeMin"] = window[0].isoformat()
+        list_kwargs["timeMax"] = window[1].isoformat()
 
     while True:
         response = _execute_calendar_request(
             "calendar list bot events",
             lambda pt=page_token: (
                 service.events()
-                .list(
-                    calendarId=calendar_id,
-                    singleEvents=False,
-                    privateExtendedProperty=f"source={BOT_SOURCE_TAG}",
-                    maxResults=2500,
-                    pageToken=pt,
-                )
+                .list(**list_kwargs, pageToken=pt)
                 .execute()
             ),
         )
         for event in response.get("items", []):
-            source_key = _event_source_key(event)
-            if source_key:
-                existing_by_key[source_key] = event
+            props = (event.get("extendedProperties") or {}).get("private") or {}
+            if props.get("source") != BOT_SOURCE_TAG:
+                continue
+            event_source_key = _event_source_key(event)
+            if event_source_key:
+                existing_by_key[event_source_key] = event
             else:
                 legacy_events.append(event)
 

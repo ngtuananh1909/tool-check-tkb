@@ -3,6 +3,7 @@ Portal Snapshot Service for shared single-login portal sync cycles.
 Ensures one authentication session per hourly sync with per-operation FetchResult models.
 """
 
+import datetime as dt
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
@@ -41,6 +42,7 @@ def fetch_portal_snapshot(
     password: str,
     weeks_ahead: int | None = None,
     selected_semester: str | None = None,
+    expected_week_start: dt.date | None = None,
 ) -> PortalSnapshot:
     """
     Perform a complete hourly portal sync using ONE login session.
@@ -66,6 +68,7 @@ def fetch_portal_snapshot(
                     client,
                     selected_semester=selected_semester,
                     max_weeks=weeks_ahead,
+                    expected_week_start=expected_week_start,
                 )
                 snapshot.schedule = FetchResult(success=True, data=sched, source="http")
             except Exception as exc:

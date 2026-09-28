@@ -30,6 +30,7 @@ from tdtu import (
     fetch_schedule_http,
     get_current_semester_http,
 )
+from tdtu.schedule.parser import parse_week_start
 from time_utils import local_today
 
 logger = logging.getLogger(__name__)
@@ -321,7 +322,12 @@ def fetch_schedule(
     return _fetch_schedule_playwright(sid, pwd, weeks_ahead=weeks_ahead)
 
 
-def _fetch_schedule_playwright(sid: str, pwd: str, weeks_ahead: int | None = None) -> list[dict]:
+def _fetch_schedule_playwright(
+    sid: str,
+    pwd: str,
+    weeks_ahead: int | None = None,
+    expected_week_start: datetime.date | None = None,
+) -> list[dict]:
     """Execute Playwright schedule crawl strictly (no HTTP attempt)."""
     schedule: list[dict] = []
     extra_weeks = _resolve_weeks_ahead(weeks_ahead)
@@ -471,8 +477,21 @@ def _fetch_schedule_playwright(sid: str, pwd: str, weeks_ahead: int | None = Non
                 extra_weeks,
             )
             all_rows: list[dict] = []
+            first_week_start = None
             for index in range(total_weeks):
                 logger.info("Parsing week %d/%d.", index + 1, total_weeks)
+                actual_week_start = parse_week_start(page.content())
+                if first_week_start is None:
+                    first_week_start = actual_week_start
+                    if expected_week_start is not None and first_week_start != expected_week_start:
+                        raise RuntimeError(
+                            f"Schedule starts at {first_week_start}, expected {expected_week_start}"
+                        )
+                expected_crawled_week = first_week_start + datetime.timedelta(weeks=index)
+                if actual_week_start != expected_crawled_week:
+                    raise RuntimeError(
+                        f"Schedule week +{index} starts at {actual_week_start}, expected {expected_crawled_week}"
+                    )
                 week_rows = _parse_schedule_table(page, sid)
                 if week_rows:
                     all_rows.extend(week_rows)
@@ -484,11 +503,7 @@ def _fetch_schedule_playwright(sid: str, pwd: str, weeks_ahead: int | None = Non
                     break
 
                 if not _goto_next_week(page):
-                    logger.warning(
-                        "Could not navigate to next week after week %d. Keeping partial multi-week data.",
-                        index + 1,
-                    )
-                    break
+                    raise RuntimeError(f"Could not navigate to schedule week +{index + 1}")
 
             schedule = _deduplicate_schedule_rows(all_rows)
 
