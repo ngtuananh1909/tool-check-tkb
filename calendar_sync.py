@@ -28,13 +28,6 @@ SYNC_SOURCE_EXAM = "exam"
 SYNC_SOURCE_DEADLINE = "deadline"
 
 
-def _managed_source_types_for_crawler_sync() -> frozenset[str]:
-    """Source types owned by ``sync_crawled_data_to_google_calendar``.
-
-    Crawler sync only manages ``class_sessions``, ``exams``, and ``deadlines``. It must never
-    delete events created by Telegram ``/add`` or Smart Paste (``source_type=appointment``).
-    """
-    return frozenset({SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM, SYNC_SOURCE_DEADLINE})
 CALENDAR_API_MAX_ATTEMPTS = 4
 CALENDAR_API_RETRY_STATUSES = {429, 500, 502, 503, 504}
 
@@ -578,17 +571,6 @@ def _validate_calendar_target(service: Resource, calendar_id: str, service_accou
                 f"Service account {service_account_email} cannot access calendar '{calendar_id}'. "
                 "Share this calendar with that service account and grant 'Make changes to events'."
             ) from exc
-DEFAULT_SYNC_WEEKS = 16
-
-
-def _calendar_sync_weeks() -> int:
-    try:
-        weeks = int(os.environ.get("GOOGLE_CALENDAR_SYNC_WEEKS", str(DEFAULT_SYNC_WEEKS)))
-    except ValueError:
-        weeks = DEFAULT_SYNC_WEEKS
-    return max(1, weeks)
-
-
 
 
 def _class_session_status_description(session: dict) -> str:

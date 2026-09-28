@@ -99,7 +99,6 @@ _WEBHOOK_SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 _ADD_FORM_STATES: dict[str, dict[str, object]] = {}
 _SMART_PASTE_STATES = SmartPasteStateStore()
 
-ADD_ONLY_GUIDANCE_TEXT = "Bạn có thể dán lịch tự nhiên để xem trước, hoặc dùng /add để nhập từng mục thủ công."
 START_HELP_TEXT = (
     "Bot hiện hỗ trợ các lệnh sau:\n"
     "/today - Xem lịch hẹn hôm nay\n"

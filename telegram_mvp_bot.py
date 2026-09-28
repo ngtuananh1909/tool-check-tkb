@@ -4,11 +4,7 @@ telegram_mvp_bot.py - MVP Telegram listener for creating appointments.
 Appointments are created through the /add form flow when using long polling.
 The production webhook additionally supports Smart Paste with confirmation.
 
-Time parsing rules (MVP):
-    - YYYY-MM-DD HHhMM
-    - DD/MM/YYYY HHhMM
-    - DD/MM HHhMM      (uses current year)
-    - HHhMM            (uses today)
+The /add form accepts YYYY-MM-DD or DD/MM dates and HHhMM times.
 
 The script uses Telegram getUpdates long polling. The production webhook adds
 strict private-chat ownership and Smart Paste confirmation.
@@ -32,9 +28,7 @@ from calendar_sync import (
     find_tagged_calendar_event,
     insert_calendar_event,
 )
-from gemini_parser import generate_conversational_reply_with_gemini
-from smart_paste import normalize_smart_paste_event
-from time_utils import local_now, local_today
+from time_utils import local_today
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -57,7 +51,6 @@ HELP_TEXT = (
 ADD_ONLY_GUIDANCE_TEXT = "De them lich, ban dung /add. Bot se hoi lan luot tung muc de ban nhap nhanh hon nhe."
 
 CONFIRM_PREFIX = "Xong roi ne, minh da ghi lich cho ban:"
-CREATE_ERROR_PREFIX = "Minh chua tao duoc lich hen luc nay"
 ADD_FORM_DONE_CALLBACK = "addform:done"
 ADD_FORM_CANCEL_CALLBACK = "addform:cancel"
 ADD_FORM_SKIP_WHERE_CALLBACK = "addform:skip_where"
@@ -178,128 +171,6 @@ def _parse_schedule_day_arg(arg: str | None, today: dt.date | None = None) -> dt
     raise ValueError("Không đọc được ngày. Dùng: hôm nay, mai, thứ 2..CN, DD/MM hoặc YYYY-MM-DD.")
 
 
-def _parse_add_fields(text: str) -> dict[str, str | None]:
-    fields = {"date": None, "time": None, "job": None, "where": None}
-    labels = {
-        "ngày": "date", "ngay": "date", "date": "date",
-        "thời gian": "time", "thoi gian": "time", "time": "time",
-        "giờ": "time", "gio": "time",
-        "job": "job", "việc": "job", "viec": "job", "làm gì": "job", "lam gi": "job",
-        "where": "where", "địa điểm": "where", "dia diem": "where", "location": "where", "ở đâu": "where", "o dau": "where",
-    }
-    for line in str(text or "").splitlines():
-        if ":" not in line:
-            continue
-        label, raw_value = line.split(":", 1)
-        key = labels.get(label.strip().lower())
-        if key:
-            value = raw_value.strip()
-            fields[key] = value or None
-    if not fields["date"]:
-        raise ValueError("Thiếu mục 'Ngày'.")
-    if not fields["time"]:
-        raise ValueError("Thiếu mục 'Giờ'.")
-    if not fields["job"]:
-        raise ValueError("Thiếu mục 'Làm gì'.")
-    return fields
-
-
-def _parse_input(text: str) -> tuple[str, dt.date, str, str | None]:
-    """
-    Parse 'title-time-location(optional)'.
-
-    Returns:
-        (title, appointment_date, start_time_hhmmss, location)
-    """
-    if "-" not in text:
-        raise ValueError("Thiếu dữ liệu. Dùng format: tieude-thoigian-diadiem(optional)")
-
-    title, rest = text.split("-", 1)
-    title = title.strip()
-    rest = rest.strip()
-
-    if not title:
-        raise ValueError("Tiêu đề không được rỗng.")
-    if not rest:
-        raise ValueError("Thiếu phần thời gian.")
-
-    # Try parsing full remainder as time first.
-    try:
-        appt_date, hhmm = _parse_time_field(rest)
-        return title, appt_date, f"{hhmm}:00", None
-    except ValueError:
-        pass
-
-    # If failed, split from right to support optional location.
-    dash_positions = [i for i, ch in enumerate(rest) if ch == "-"]
-    for pos in reversed(dash_positions):
-        time_candidate = rest[:pos].strip()
-        location_candidate = rest[pos + 1 :].strip()
-        if not time_candidate or not location_candidate:
-            continue
-        try:
-            appt_date, hhmm = _parse_time_field(time_candidate)
-            return title, appt_date, f"{hhmm}:00", location_candidate
-        except ValueError:
-            continue
-
-    raise ValueError(
-        "Không đọc được thời gian. Dùng format: "
-        "tieude-thoigian-diadiem(optional)."
-    )
-
-
-def _looks_like_appointment_message(text: str) -> bool:
-    lower = text.lower()
-    has_time = re.search(r"\b\d{1,2}h\d{2}\b", text) is not None
-    has_short_date = re.search(r"\b\d{1,2}/\d{1,2}(?:/\d{4})?\b", text) is not None
-    has_iso_date = re.search(r"\b\d{4}-\d{2}-\d{2}\b", text) is not None
-
-    if "-" in text:
-        parts = text.split("-", 1)
-        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
-            rest = parts[1]
-            if re.search(r"\b\d{1,2}h\d{2}\b", rest) or re.search(r"\b\d{1,2}/\d{1,2}(?:/\d{4})?\b", rest) or re.search(
-                r"\b\d{4}-\d{2}-\d{2}\b", rest
-            ):
-                return True
-
-    if has_time or has_short_date or has_iso_date:
-        return True
-
-    keywords = ("hẹn", "hen", "họp", "hop", "lịch", "lich", "meeting", "deadline")
-    return any(word in lower for word in keywords)
-
-
-def _normalize_gemini_payload(payload: dict) -> tuple[str, dt.date, str | None, str | None, str | None, str | None, float | None]:
-    """Convert Gemini JSON payload into DB-ready fields."""
-    title = str(payload.get("title") or "").strip()
-    if not title:
-        raise ValueError("Gemini không trả về tiêu đề hợp lệ.")
-
-    appointment_date_raw = str(payload.get("appointment_date") or "").strip()
-    if not appointment_date_raw:
-        raise ValueError("Gemini không trả về ngày hợp lệ.")
-    try:
-        appointment_date = dt.date.fromisoformat(appointment_date_raw)
-    except ValueError as exc:
-        raise ValueError(f"Ngày Gemini trả về không hợp lệ: {appointment_date_raw}") from exc
-
-    start_time = _normalize_time_value(payload.get("start_time"))
-    end_time = _normalize_time_value(payload.get("end_time"))
-    location = _normalize_optional_text(payload.get("location"))
-    note = _normalize_optional_text(payload.get("note"))
-    confidence = payload.get("confidence")
-
-    if confidence is not None:
-        try:
-            confidence = float(confidence)
-        except (TypeError, ValueError):
-            confidence = None
-
-    return title, appointment_date, start_time, end_time, location, note, confidence
-
-
 def _normalize_optional_text(value: object) -> str | None:
     if value is None:
         return None
@@ -307,32 +178,6 @@ def _normalize_optional_text(value: object) -> str | None:
     if not text or text.lower() == "null":
         return None
     return text
-
-
-def _normalize_time_value(value: object) -> str | None:
-    text = _normalize_optional_text(value)
-    if not text:
-        return None
-    m = re.fullmatch(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", text)
-    if m:
-        h, mi, s = m.groups()
-        hour, minute, sec = int(h), int(mi), int(s or 0)
-        if 0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= sec <= 59:
-            return f"{hour:02d}:{minute:02d}:{sec:02d}"
-    raise ValueError("Thời gian không hợp lệ.")
-
-
-def _normalize_smart_paste_event(payload: dict) -> dict:
-    event = normalize_smart_paste_event(payload)
-
-    return {
-        "title": event.title,
-        "appointment_date": event.appointment_date,
-        "start_time": event.start_time,
-        "end_time": event.end_time,
-        "location": event.location,
-        "note": event.note,
-    }
 
 
 def _build_smart_paste_preview_text(events: list[dict]) -> str:
@@ -401,38 +246,6 @@ def _build_smart_paste_retry_keyboard(batch_id: str) -> dict[str, list[list[dict
             ]
         ]
     }
-
-
-
-def _parse_time_field(raw: str) -> tuple[dt.date, str]:
-    """Return (date, HH:MM) from accepted HHhMM input patterns."""
-    value = raw.strip()
-    now = local_now()
-
-    m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2})h(\d{2})", value)
-    if m:
-        y, mo, d, h, mi = map(int, m.groups())
-        return dt.date(y, mo, d), _validate_hhmm(h, mi)
-
-    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2})h(\d{2})", value)
-    if m:
-        d, mo, y, h, mi = map(int, m.groups())
-        return dt.date(y, mo, d), _validate_hhmm(h, mi)
-
-    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})\s+(\d{1,2})h(\d{2})", value)
-    if m:
-        d, mo, h, mi = map(int, m.groups())
-        return dt.date(now.year, mo, d), _validate_hhmm(h, mi)
-
-    m = re.fullmatch(r"(\d{1,2})h(\d{2})", value)
-    if m:
-        h, mi = map(int, m.groups())
-        return now.date(), _validate_hhmm(h, mi)
-
-    raise ValueError(
-        "Không đọc được thời gian. Dùng một trong các format: "
-        "YYYY-MM-DD HHhMM | DD/MM/YYYY HHhMM | DD/MM HHhMM | HHhMM"
-    )
 
 
 def _validate_hhmm(hour: int, minute: int) -> str:
@@ -637,15 +450,6 @@ def _build_exam_list_text(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _parse_add_appointment_payload(text: str) -> tuple[str, dt.date, str | None, str | None]:
-    fields = _parse_add_fields(text)
-    job = fields["job"] or "Lịch cá nhân"
-    where = fields["where"]
-    appointment_date = _parse_date_field(fields["date"] or "")
-    start_time = _parse_clock_field(fields["time"] or "")
-    return job, appointment_date, start_time, where
-
-
 def _new_add_form_state() -> dict[str, object]:
     return {
         "step": "date",
@@ -826,27 +630,6 @@ def _build_today_appointments_text(rows: list[dict]) -> str:
         else:
             lines.append(f"{idx}. {t} - {title}")
     return "\n".join(lines)
-
-
-def _fallback_conversational_reply(user_text: str) -> str:
-    lower = user_text.lower()
-    if any(word in lower for word in ("chào", "hello", "hi")):
-        return "Chào bạn, mình đây nè. Bạn muốn mình nhắc lịch hay trò chuyện một chút?"
-    if "cảm ơn" in lower:
-        return "Không có gì đâu, mình luôn sẵn sàng hỗ trợ bạn nè."
-    if "buồn" in lower or "mệt" in lower:
-        return "Ôm tinh thần bạn một cái nhẹ nha, nghỉ một chút rồi mình cùng sắp xếp lại lịch cho dễ thở hơn."
-    return (
-        "Mình vẫn ở đây để nghe bạn nè. "
-        "Nếu cần tạo lịch hẹn, bạn cứ nhắn kiểu: họp nhóm-15/04 14h00-B402."
-    )
-
-
-def _build_conversational_reply(user_text: str) -> str:
-    reply = generate_conversational_reply_with_gemini(user_text)
-    if reply:
-        return reply
-    return _fallback_conversational_reply(user_text)
 
 
 def run() -> None:

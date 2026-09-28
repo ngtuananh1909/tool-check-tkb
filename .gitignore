@@ -4,7 +4,10 @@
 !.env.example
 *.pem
 *.key
+*.p12
+*.pfx
 *service-account*.json
+credentials*.json
 amazing-smile-441004-j1-58a596defc04.json
 
 # Personal contact data
@@ -19,6 +22,8 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .coverage
 
 # Build outputs

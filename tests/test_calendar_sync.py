@@ -9,7 +9,6 @@ from calendar_sync import (
     SYNC_SOURCE_DEADLINE,
     SYNC_SOURCE_EXAM,
     _build_sync_items_from_sessions,
-    _managed_source_types_for_crawler_sync,
     _replace_bot_events_for_range,
     fetch_tagged_calendar_events,
 )
@@ -112,8 +111,6 @@ class CalendarOnlySyncTests(unittest.TestCase):
 
         self.assertEqual(service._events.deleted, ["exam-id"])
 
-    def test_crawler_owns_only_crawled_source_types(self) -> None:
-        self.assertEqual(_managed_source_types_for_crawler_sync(), {SYNC_SOURCE_CLASS_SESSION, SYNC_SOURCE_EXAM, SYNC_SOURCE_DEADLINE})
 
     def test_deadlines_list_without_window_raises_error(self) -> None:
         with self.assertRaises(ValueError):
@@ -333,4 +330,3 @@ class CalendarOnlySyncTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

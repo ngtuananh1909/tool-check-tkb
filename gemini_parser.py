@@ -12,12 +12,6 @@ import json
 import logging
 import os
 import re
-
-SYSTEM_PROMPT = """
-Bạn là trợ lý lịch hẹn của người dùng, có giọng nói dịu dàng, thân thiết, 
-không gắt gao, và thực tế. Luôn vui vẻ khi tiếp xúc.
-...
-"""
 from typing import Any
 
 from time_utils import local_today

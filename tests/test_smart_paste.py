@@ -10,8 +10,6 @@ from telegram_mvp_bot import (
     SMART_PASTE_CANCEL_CALLBACK,
     _build_smart_paste_keyboard,
     _build_smart_paste_preview_text,
-    _normalize_smart_paste_event,
-    _normalize_time_value,
 )
 from webhook_app import (
     _ADD_FORM_STATES,
@@ -212,31 +210,7 @@ class GeminiParserTests(unittest.TestCase):
 
 
 class SmartPasteHelperTests(unittest.TestCase):
-    def test_normalize_time_value(self) -> None:
-        self.assertEqual(_normalize_time_value("14:00"), "14:00:00")
-        self.assertEqual(_normalize_time_value("14:00:00"), "14:00:00")
-        self.assertEqual(_normalize_time_value("9:30"), "09:30:00")
-        with self.assertRaises(ValueError):
-            _normalize_time_value("25:00")
-        self.assertIsNone(_normalize_time_value(None))
-        self.assertIsNone(_normalize_time_value("null"))
 
-    def test_normalize_smart_paste_event(self) -> None:
-        raw = {
-            "title": "Họp nhóm",
-            "appointment_date": "2026-09-15",
-            "start_time": "14:00",
-            "end_time": "16:00",
-            "location": "B402",
-            "note": "Mang laptop",
-        }
-        ev = _normalize_smart_paste_event(raw)
-        self.assertEqual(ev["title"], "Họp nhóm")
-        self.assertEqual(ev["appointment_date"], dt.date(2026, 9, 15))
-        self.assertEqual(ev["start_time"], "14:00:00")
-        self.assertEqual(ev["end_time"], "16:00:00")
-        self.assertEqual(ev["location"], "B402")
-        self.assertEqual(ev["note"], "Mang laptop")
 
     def test_build_smart_paste_preview_text(self) -> None:
         events = [
