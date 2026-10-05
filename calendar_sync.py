@@ -72,6 +72,24 @@ PERIOD_START: dict[int, str] = {
     15: "19:45",
 }
 
+PERIOD_END: dict[int, str] = {
+    1: "07:40",
+    2: "08:30",
+    3: "09:20",
+    4: "10:20",
+    5: "11:10",
+    6: "12:00",
+    7: "13:35",
+    8: "14:25",
+    9: "15:15",
+    10: "16:15",
+    11: "17:05",
+    12: "17:55",
+    13: "18:55",
+    14: "19:45",
+    15: "20:35",
+}
+
 
 # ---------------------------------------------------------------------------
 # Contact loading – reads contact.txt for timetable/class-session attendee auto-add
@@ -630,12 +648,16 @@ def _build_sync_items_from_sessions(
         )
         end_time = _display_time(session.get("end_time"))
         if not end_time:
-            end_base = PERIOD_START.get(
-                _to_int(session.get("end_period")),
-                _fallback_period_time(_to_int(session.get("end_period"))),
-            )
-            end_dt = _to_datetime(session_date, end_base, timezone) + dt.timedelta(minutes=50)
-            end_time = end_dt.strftime("%H:%M")
+            end_period_val = _to_int(session.get("end_period"))
+            if end_period_val in PERIOD_END:
+                end_time = PERIOD_END[end_period_val]
+            else:
+                end_base = PERIOD_START.get(
+                    end_period_val,
+                    _fallback_period_time(end_period_val),
+                )
+                end_dt = _to_datetime(session_date, end_base, timezone) + dt.timedelta(minutes=50)
+                end_time = end_dt.strftime("%H:%M")
 
         start_dt = _to_datetime(session_date, start_time, timezone)
         end_dt = _to_datetime(session_date, end_time, timezone)
@@ -1190,8 +1212,17 @@ def _class_session_source_key(session: dict) -> str:
     subject = _normalize_value(session.get("subject_name"))
     session_date = _parse_date(session.get("session_date"), local_today()).isoformat()
     start_time = _display_time(session.get("start_time"))
+    if not start_time:
+        start_p = _to_int(session.get("start_period"))
+        if start_p in PERIOD_START:
+            start_time = PERIOD_START[start_p]
     end_time = _display_time(session.get("end_time"))
-    return f"{SYNC_SOURCE_CLASS_SESSION}:{session_date}:{start_time}:{end_time}:{subject}"
+    if not end_time:
+        end_p = _to_int(session.get("end_period"))
+        if end_p in PERIOD_END:
+            end_time = PERIOD_END[end_p]
+    status = _normalize_value(session.get("status") or "scheduled")
+    return f"{SYNC_SOURCE_CLASS_SESSION}:{session_date}:{start_time}:{end_time}:{subject}:{status}"
 
 
 def _appointment_source_key(appointment: dict) -> str:

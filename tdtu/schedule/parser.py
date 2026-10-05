@@ -9,7 +9,7 @@ import re
 import unicodedata
 from typing import Any
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from tdtu.exceptions import TDTUProtocolError
 
@@ -234,6 +234,69 @@ def parse_week_start(html: str) -> dt.date:
     return parse_week_range_label(week_btn.get("value", ""))[0]
 
 
+def _is_status_text(text: str) -> bool:
+    return detect_status(text) != "scheduled"
+
+
+def _extract_cell_sub_entries(cell: Tag) -> list[str]:
+    """
+    Extract one or more sub-entry text blocks from a schedule table cell.
+    Handles:
+    1. Nested table with inner <td> cells (e.g. overlapping regular + makeup classes).
+    2. Multiple <span> blocks if present.
+    3. Direct children split by non-status <b> tags.
+    4. Single-entry cell fallback.
+    """
+    inner_table = cell.find("table")
+    if inner_table:
+        inner_tds = inner_table.find_all("td")
+        if inner_tds:
+            td_texts = [td.get_text("\n").strip() for td in inner_tds if td.get_text().strip()]
+            if td_texts:
+                return td_texts
+
+    spans = cell.find_all("span", recursive=False)
+    if len(spans) > 1:
+        span_texts = [s.get_text("\n").strip() for s in spans if s.get_text().strip()]
+        if span_texts:
+            return span_texts
+
+    bold_tags = cell.find_all("b")
+    subject_bolds = [b for b in bold_tags if b.get_text().strip() and not _is_status_text(b.get_text())]
+    if len(subject_bolds) > 1:
+        groups: list[list[Any]] = []
+        current: list[Any] = []
+        for child in cell.children:
+            text = child.get_text().strip() if hasattr(child, "get_text") else str(child).strip()
+            is_subj_bold = (
+                getattr(child, "name", None) == "b"
+                and text
+                and not _is_status_text(text)
+            )
+            if is_subj_bold and current:
+                groups.append(current)
+                current = [child]
+            else:
+                current.append(child)
+        if current:
+            groups.append(current)
+
+        if len(groups) > 1:
+            results = []
+            for group in groups:
+                t = "\n".join(
+                    c.get_text("\n").strip() if hasattr(c, "get_text") else str(c).strip()
+                    for c in group
+                ).strip()
+                if t:
+                    results.append(t)
+            if results:
+                return results
+
+    full_text = cell.get_text("\n").strip()
+    return [full_text] if full_text else []
+
+
 def parse_weekly_grid_table(html: str, student_id: str = "") -> list[dict[str, Any]] | None:
     """
     Parse weekly grid timetable when weekly view is active.
@@ -335,60 +398,86 @@ def parse_weekly_grid_table(html: str, student_id: str = "") -> list[dict[str, A
 
     col_dates = [dates_map.get(d, "") for d in col_days]
 
+    col_carry = [0] * len(col_days)
     entries: list[dict[str, Any]] = []
 
-    for row in table.find_all("tr"):
-        if "Headerrow" in row.get("class", []):
+    # Only inspect rows that directly belong to this table, avoiding nested table rows
+    rows = [tr for tr in table.find_all("tr") if tr.find_parent("table") == table]
+
+    for row in rows:
+        if row == header_tr or "Headerrow" in row.get("class", []):
             continue
 
         cells = row.find_all(["td", "th"], recursive=False)
-        if len(cells) < 2:
+        if not cells:
             continue
 
         p_match = re.search(r"\d+", cells[0].get_text().strip())
         row_period = int(p_match.group(0)) if p_match else 0
 
-        for col_idx, cell in enumerate(cells[1:], start=1):
-            if col_idx >= len(col_days):
+        logical_col = 1
+        for cell in cells[1:]:
+            while logical_col < len(col_days) and col_carry[logical_col] > 0:
+                logical_col += 1
+            if logical_col >= len(col_days):
                 break
-            day_of_week = col_days[col_idx]
-            session_date = col_dates[col_idx] if col_idx < len(col_dates) else ""
-            if not day_of_week:
-                continue
+
+            rowspan = 1
+            raw_rowspan = cell.get("rowspan")
+            if raw_rowspan:
+                try:
+                    rowspan = max(int(raw_rowspan), 1)
+                except (ValueError, TypeError):
+                    rowspan = 1
+
+            colspan = 1
+            raw_colspan = cell.get("colspan")
+            if raw_colspan:
+                try:
+                    colspan = max(int(raw_colspan), 1)
+                except (ValueError, TypeError):
+                    colspan = 1
+
+            day_of_week = col_days[logical_col]
+            session_date = col_dates[logical_col] if logical_col < len(col_dates) else ""
 
             text = cell.get_text("\n").strip()
-            if not text or text in ("-", "x", "trống", "rong"):
-                continue
-
-            spans = cell.find_all("span") or [cell]
-            for span in spans:
-                cell_text = span.get_text("\n").strip()
-                if not cell_text:
-                    continue
-
-                entry = _parse_schedule_cell_text(cell_text, day_of_week, student_id)
-                if entry:
-                    if not session_date:
-                        raise TDTUProtocolError(
-                            f"Weekly schedule entry '{entry['subject_name']}' is missing concrete session_date"
-                        )
-                    try:
-                        dt = datetime.date.fromisoformat(session_date)
-                        if dt.weekday() != day_indices.get(day_of_week, -1):
+            if day_of_week and text and text not in ("-", "x", "trống", "rong"):
+                sub_texts = _extract_cell_sub_entries(cell)
+                for sub_text in sub_texts:
+                    entry = _parse_schedule_cell_text(sub_text, day_of_week, student_id)
+                    if entry:
+                        if not session_date:
                             raise TDTUProtocolError(
-                                f"Session date {session_date} weekday ({dt.strftime('%A')}) does not match {day_of_week}"
+                                f"Weekly schedule entry '{entry['subject_name']}' is missing concrete session_date"
                             )
-                    except ValueError as exc:
-                        raise TDTUProtocolError(f"Invalid session_date '{session_date}': {exc}") from exc
+                        try:
+                            dt = datetime.date.fromisoformat(session_date)
+                            if dt.weekday() != day_indices.get(day_of_week, -1):
+                                raise TDTUProtocolError(
+                                    f"Session date {session_date} weekday ({dt.strftime('%A')}) does not match {day_of_week}"
+                                )
+                        except ValueError as exc:
+                            raise TDTUProtocolError(f"Invalid session_date '{session_date}': {exc}") from exc
 
-                    entry["session_date"] = session_date
-                    if entry["start_period"] == 0 and 1 <= row_period <= 16:
-                        entry["start_period"] = row_period
-                        entry["end_period"] = min(row_period + 2, 16)
-                    elif entry["start_period"] == 0:
-                        raise TDTUProtocolError(f"Weekly schedule entry '{entry['subject_name']}' is missing valid period")
+                        entry["session_date"] = session_date
+                        if entry["start_period"] == 0 and 1 <= row_period <= 16:
+                            entry["start_period"] = row_period
+                            entry["end_period"] = min(row_period + rowspan - 1, 16)
+                        elif entry["start_period"] == 0:
+                            raise TDTUProtocolError(f"Weekly schedule entry '{entry['subject_name']}' is missing valid period")
 
-                    entries.append(entry)
+                        entries.append(entry)
+
+            if rowspan > 1:
+                for c in range(logical_col, min(logical_col + colspan, len(col_days))):
+                    col_carry[c] = max(col_carry[c], rowspan)
+
+            logical_col += colspan
+
+        for c in range(len(col_carry)):
+            if col_carry[c] > 0:
+                col_carry[c] -= 1
 
     return _deduplicate_schedule(entries)
 

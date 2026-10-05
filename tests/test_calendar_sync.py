@@ -521,6 +521,62 @@ class CalendarOnlySyncTests(unittest.TestCase):
         self.assertEqual(props["end_period"], "3")
         self.assertEqual(props["class_status"], "scheduled")
 
+    def test_build_sync_items_periods_2_to_6_time_calculation(self) -> None:
+        target = dt.date(2026, 10, 6)
+        items = _build_sync_items_from_sessions(
+            [
+                {
+                    "subject_name": "Những kỹ năng thiết yếu",
+                    "room": "C411-A",
+                    "session_date": target.isoformat(),
+                    "start_period": 2,
+                    "end_period": 6,
+                    "status": "scheduled",
+                }
+            ],
+            [],
+            target,
+        )
+        self.assertEqual(len(items), 1)
+        payload = items[0]["payload"]
+        self.assertTrue(payload["start"]["dateTime"].endswith("07:40:00+07:00"))
+        self.assertTrue(payload["end"]["dateTime"].endswith("12:00:00+07:00"))
+
+    def test_build_sync_items_overlapping_sessions_distinct_source_keys(self) -> None:
+        target = dt.date(2026, 10, 5)
+        sessions = [
+            {
+                "subject_name": "GDTC 1 - Taekwondo",
+                "room": "TRET-NTD-4",
+                "session_date": target.isoformat(),
+                "start_period": 1,
+                "end_period": 3,
+                "status": "scheduled",
+            },
+            {
+                "subject_name": "Kinh tế chính trị Mác-Lênin",
+                "room": "D0301-A",
+                "session_date": target.isoformat(),
+                "start_period": 1,
+                "end_period": 3,
+                "status": "makeup",
+            },
+        ]
+        items = _build_sync_items_from_sessions(sessions, [], target)
+        self.assertEqual(len(items), 2)
+        # Verify both start and end at 06:50 - 09:20
+        for item in items:
+            self.assertTrue(item["payload"]["start"]["dateTime"].endswith("06:50:00+07:00"))
+            self.assertTrue(item["payload"]["end"]["dateTime"].endswith("09:20:00+07:00"))
+
+        # Verify distinct source keys
+        keys = [item["source_key"] for item in items]
+        self.assertEqual(len(set(keys)), 2)
+
+        # Verify makeup colorId is "7"
+        makeup_item = next(i for i in items if "kinh tế chính trị" in i["payload"]["summary"].lower())
+        self.assertEqual(makeup_item["payload"].get("colorId"), "7")
+
 
 if __name__ == "__main__":
     unittest.main()

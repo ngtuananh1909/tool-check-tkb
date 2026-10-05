@@ -276,6 +276,148 @@ class TestScheduleParser(unittest.TestCase):
         entries = parse_weekly_grid_table(html)
         self.assertEqual(entries, [])
 
+    def test_parse_weekly_grid_table_rowspan_period_range(self) -> None:
+        from tdtu.schedule.parser import parse_weekly_grid_table
+        # Snippet 2: starts at period 2 with rowspan=5 -> periods 2..6
+        html = """
+        <input type="submit" name="ThoiKhoaBieu1$btnTuanHienTai" value="Tuần: 05/10/2026 - 11/10/2026" />
+        <table id="ThoiKhoaBieu1_Table1">
+            <tr class="Headerrow">
+                <td>Tiết</td>
+                <td>Thứ 2 (05/10)</td><td>Thứ 3 (06/10)</td><td>Thứ 4 (07/10)</td>
+                <td>Thứ 5 (08/10)</td><td>Thứ 6 (09/10)</td><td>Thứ 7 (10/10)</td><td>Chủ nhật (11/10)</td>
+            </tr>
+            <tr>
+                <td>Tiết 2</td>
+                <td class="cell" style="color:White;background-color:#828F43;" rowspan="5">
+                    <table width="100%" cellpadding="0" cellspacing="0"><tbody><tr><td>
+                        <b>Những kỹ năng thiết yếu cho sự phát triển bền vững - Thái độ sống 1<br>
+                        <label class="lbl-lang" style="color:white;padding-left:0px;">|Essential Skills for Sustainable Development - Life Attitude 1</label></b><br>
+                        (L00019 - Nhóm<label class="lbl-lang" style="color:white;padding-left:0px;">|Groups: </label>1)<br>
+                        Phòng<label class="lbl-lang" style="color:white;padding-left:0px;">|Room: </label>C411-A
+                    </td></tr></tbody></table>
+                </td>
+                <td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
+            </tr>
+        </table>
+        """
+        entries = parse_weekly_grid_table(html, student_id="TEST_STUDENT_001")
+        self.assertIsNotNone(entries)
+        assert entries is not None
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["subject_name"], "Những kỹ năng thiết yếu cho sự phát triển bền vững - Thái độ sống 1")
+        self.assertEqual(entries[0]["room"], "C411-A")
+        self.assertEqual(entries[0]["day_of_week"], "Monday")
+        self.assertEqual(entries[0]["session_date"], "2026-10-05")
+        self.assertEqual(entries[0]["start_period"], 2)
+        self.assertEqual(entries[0]["end_period"], 6)
+        self.assertEqual(entries[0]["status"], "scheduled")
+
+    def test_parse_weekly_grid_table_nested_table_overlapping_classes(self) -> None:
+        from tdtu.schedule.parser import parse_weekly_grid_table
+        # Snippet 1: nested table with 2 inner td cells (GDTC 1 + makeup Kinh te chinh tri)
+        html = """
+        <input type="submit" name="ThoiKhoaBieu1$btnTuanHienTai" value="Tuần: 05/10/2026 - 11/10/2026" />
+        <table id="ThoiKhoaBieu1_Table1">
+            <tr class="Headerrow">
+                <td>Tiết</td>
+                <td>Thứ 2 (05/10)</td><td>Thứ 3 (06/10)</td><td>Thứ 4 (07/10)</td>
+                <td>Thứ 5 (08/10)</td><td>Thứ 6 (09/10)</td><td>Thứ 7 (10/10)</td><td>Chủ nhật (11/10)</td>
+            </tr>
+            <tr>
+                <td>Tiết 1</td>
+                <td class="cell" rowspan="3" style="color:White;background-color:#ff3b3b;">
+                    <table width="100%" cellpadding="0" cellspacing="0"><tbody><tr>
+                        <td style="border-right-width: 1px;border-right-style: dotted;">
+                            <b>GDTC 1 - Taekwondo<br>
+                            <label class="lbl-lang" style="color:white;padding-left:0px;">|Physical Education 1 - Taekwondo</label></b><br>
+                            (D01102 - Nhóm<label class="lbl-lang" style="color:white;padding-left:0px;">|Groups: </label>6)<br>
+                            Phòng<label class="lbl-lang" style="color:white;padding-left:0px;">|Room: </label>TRET-NTD-4
+                        </td>
+                        <td>
+                            <b>Kinh tế chính trị Mác-Lênin<br>
+                            <label class="lbl-lang" style="color:white;padding-left:0px;">|Political Economics of Marxism and Leninism</label></b><br>
+                            (306103 - Nhóm<label class="lbl-lang" style="color:white;padding-left:0px;">|Groups: </label>13)<br>
+                            Phòng<label class="lbl-lang" style="color:white;padding-left:0px;">|Room: </label>D0301-A<br>
+                            <b style="color:yellow;"> GV dạy bù</b>
+                        </td>
+                    </tr></tbody></table>
+                </td>
+                <td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
+            </tr>
+        </table>
+        """
+        entries = parse_weekly_grid_table(html, student_id="TEST_STUDENT_001")
+        self.assertIsNotNone(entries)
+        assert entries is not None
+        self.assertEqual(len(entries), 2)
+
+        gdtc = next(e for e in entries if "GDTC 1" in e["subject_name"])
+        self.assertEqual(gdtc["room"], "TRET-NTD-4")
+        self.assertEqual(gdtc["day_of_week"], "Monday")
+        self.assertEqual(gdtc["session_date"], "2026-10-05")
+        self.assertEqual(gdtc["start_period"], 1)
+        self.assertEqual(gdtc["end_period"], 3)
+        self.assertEqual(gdtc["status"], "scheduled")
+
+        ktct = next(e for e in entries if "Kinh tế chính trị" in e["subject_name"])
+        self.assertEqual(ktct["room"], "D0301-A")
+        self.assertEqual(ktct["day_of_week"], "Monday")
+        self.assertEqual(ktct["session_date"], "2026-10-05")
+        self.assertEqual(ktct["start_period"], 1)
+        self.assertEqual(ktct["end_period"], 3)
+        self.assertEqual(ktct["status"], "makeup")
+
+    def test_parse_weekly_grid_table_rowspan_carry_prevents_day_shift(self) -> None:
+        from tdtu.schedule.parser import parse_weekly_grid_table
+        # Monday has rowspan=3 in period 1.
+        # Tuesday has class at period 2.
+        # Wednesday has class at period 3.
+        # Verifies Tuesday and Wednesday DO NOT shift days!
+        html = """
+        <input type="submit" name="ThoiKhoaBieu1$btnTuanHienTai" value="Tuần: 05/10/2026 - 11/10/2026" />
+        <table id="ThoiKhoaBieu1_Table1">
+            <tr class="Headerrow">
+                <td>Tiết</td>
+                <td>Thứ 2 (05/10)</td><td>Thứ 3 (06/10)</td><td>Thứ 4 (07/10)</td>
+                <td>Thứ 5 (08/10)</td><td>Thứ 6 (09/10)</td><td>Thứ 7 (10/10)</td><td>Chủ nhật (11/10)</td>
+            </tr>
+            <tr>
+                <td>Tiết 1</td>
+                <td class="cell" rowspan="3"><span>Lập trình Java<br/>Phòng: A101<br/>Tiết: 123</span></td>
+                <td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
+            </tr>
+            <tr>
+                <td>Tiết 2</td>
+                <!-- Monday column is omitted in HTML due to rowspan=3 from row 1 -->
+                <td class="cell" rowspan="2"><span>Cơ sở dữ liệu<br/>Phòng: B202<br/>Tiết: 23</span></td>
+                <td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
+            </tr>
+            <tr>
+                <td>Tiết 3</td>
+                <!-- Monday and Tuesday columns are omitted in HTML -->
+                <td class="cell"><span>Mạng máy tính<br/>Phòng: C303<br/>Tiết: 3</span></td>
+                <td>-</td><td>-</td><td>-</td><td>-</td>
+            </tr>
+        </table>
+        """
+        entries = parse_weekly_grid_table(html, student_id="TEST_STUDENT_001")
+        self.assertIsNotNone(entries)
+        assert entries is not None
+        self.assertEqual(len(entries), 3)
+
+        java = next(e for e in entries if e["subject_name"] == "Lập trình Java")
+        self.assertEqual(java["day_of_week"], "Monday")
+        self.assertEqual(java["session_date"], "2026-10-05")
+
+        csdl = next(e for e in entries if e["subject_name"] == "Cơ sở dữ liệu")
+        self.assertEqual(csdl["day_of_week"], "Tuesday")
+        self.assertEqual(csdl["session_date"], "2026-10-06")
+
+        mmt = next(e for e in entries if e["subject_name"] == "Mạng máy tính")
+        self.assertEqual(mmt["day_of_week"], "Wednesday")
+        self.assertEqual(mmt["session_date"], "2026-10-07")
+
 
 if __name__ == "__main__":
     unittest.main()
