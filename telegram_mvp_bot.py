@@ -646,15 +646,12 @@ def _advance_add_form_state(state: dict[str, object], user_text: str) -> str:
         return _build_add_form_review_text(state)
 
     if step == "time":
-        from natural_regex_parser import _add_minutes_to_time, _extract_time_and_duration
-        st, et, dur, _ = _extract_time_and_duration(value)
-        if not st:
-            hour, minute = _parse_clock_parts(value)
-            st = _format_clock_for_add_form(hour, minute)
-            dur = int(state.get("duration_minutes") or 60)
-            et = _add_minutes_to_time(st, dur)
+        hour, minute = _parse_clock_parts(value)
+        st = _format_clock_for_add_form(hour, minute)
+        dur = int(state.get("duration_minutes") or 60)
+        from natural_regex_parser import _add_minutes_to_time
         state["time"] = st
-        state["end_time"] = et
+        state["end_time"] = _add_minutes_to_time(f"{hour:02d}:{minute:02d}", dur)
         state["duration_minutes"] = dur
         if not state.get("job"):
             state["step"] = "job"
