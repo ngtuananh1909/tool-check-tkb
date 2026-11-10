@@ -45,10 +45,20 @@ class QuickAddResult:
         return bool(self.title and self.appointment_date and self.start_time)
 
 
+def _parse_time_str_parts(time_str: str) -> tuple[int, int]:
+    clean = str(time_str or "").strip()
+    if ":" in clean:
+        parts = clean.split(":")
+        return int(parts[0]), int(parts[1])
+    if "h" in clean.lower():
+        parts = clean.lower().split("h")
+        return int(parts[0]), int(parts[1]) if parts[1] else 0
+    return int(clean), 0
+
+
 def _add_minutes_to_time(time_str: str, minutes: int) -> str:
-    """Add minutes to HH:MM time string, wrapping at 23:59."""
-    parts = time_str.split(":")
-    hour, minute = int(parts[0]), int(parts[1])
+    """Add minutes to HH:MM or HHhMM time string, wrapping at 23:59."""
+    hour, minute = _parse_time_str_parts(time_str)
     total_minutes = (hour * 60 + minute + minutes) % (24 * 60)
     new_hour = total_minutes // 60
     new_minute = total_minutes % 60
@@ -56,9 +66,9 @@ def _add_minutes_to_time(time_str: str, minutes: int) -> str:
 
 
 def _time_diff_minutes(start_str: str, end_str: str) -> int:
-    """Calculate positive minute difference from start to end HH:MM."""
-    sh, sm = map(int, start_str.split(":"))
-    eh, em = map(int, end_str.split(":"))
+    """Calculate positive minute difference from start to end HH:MM or HHhMM."""
+    sh, sm = _parse_time_str_parts(start_str)
+    eh, em = _parse_time_str_parts(end_str)
     start_total = sh * 60 + sm
     end_total = eh * 60 + em
     diff = end_total - start_total
