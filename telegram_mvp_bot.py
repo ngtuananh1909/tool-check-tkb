@@ -54,6 +54,12 @@ CONFIRM_PREFIX = "Xong roi ne, minh da ghi lich cho ban:"
 ADD_FORM_DONE_CALLBACK = "addform:done"
 ADD_FORM_CANCEL_CALLBACK = "addform:cancel"
 ADD_FORM_SKIP_WHERE_CALLBACK = "addform:skip_where"
+ADD_FORM_EDIT_DATE_CALLBACK = "addform:edit:date"
+ADD_FORM_EDIT_TIME_CALLBACK = "addform:edit:time"
+ADD_FORM_EDIT_JOB_CALLBACK = "addform:edit:job"
+ADD_FORM_EDIT_WHERE_CALLBACK = "addform:edit:where"
+ADD_FORM_TOGGLE_DURATION_CALLBACK = "addform:toggle:duration"
+ADD_FORM_TOGGLE_REMINDER_CALLBACK = "addform:toggle:reminder"
 SMART_PASTE_ADD_ALL_CALLBACK = "smartpaste:add_all"
 SMART_PASTE_CANCEL_CALLBACK = "smartpaste:cancel"
 SMART_PASTE_ADD_PREFIX = "smartpaste:add:"
@@ -271,7 +277,15 @@ def _parse_date_field(raw: str, *, reference_date: dt.date | None = None) -> dt.
         day, month, year = m.groups()
         return dt.date(int(year or base.year), int(month), int(day))
 
-    raise ValueError("Không đọc được ngày. Dùng YYYY-MM-DD hoặc DD/MM hoặc DD/MM/YYYY.")
+    try:
+        from natural_regex_parser import _extract_date
+        parsed_natural, _ = _extract_date(value, base)
+        if parsed_natural:
+            return parsed_natural
+    except Exception:
+        pass
+
+    raise ValueError("Không đọc được ngày. Dùng YYYY-MM-DD hoặc DD/MM hoặc DD/MM/YYYY, hoặc mai/mốt/thứ.")
 
 
 def _parse_clock_parts(raw: str) -> tuple[int, int]:
@@ -455,8 +469,12 @@ def _new_add_form_state() -> dict[str, object]:
         "step": "date",
         "date": None,
         "time": None,
+        "end_time": None,
+        "duration_minutes": 60,
         "job": None,
         "where": None,
+        "reminder_minutes": 60,
+        "edit_target": None,
         "appointment_id": uuid.uuid4().hex,
     }
 
@@ -465,12 +483,33 @@ def _is_add_form_complete(state: dict[str, object]) -> bool:
     return bool(state.get("date") and state.get("time") and state.get("job") and state.get("step") == "confirm")
 
 
+def _format_minutes_label(minutes: int) -> str:
+    mins = int(minutes or 60)
+    if mins % 60 == 0:
+        return f"{mins // 60} tiếng"
+    hours = mins // 60
+    rem = mins % 60
+    return f"{hours}h{rem:02d}p" if hours else f"{rem} phút"
+
+
+def _format_time_range_review(start_time: object, end_time: object, duration: object) -> str:
+    st = str(start_time or "").strip()
+    if not st:
+        return "(bỏ trống)"
+    et = str(end_time or "").strip()
+    dur = int(duration) if duration else 60
+    dur_label = _format_minutes_label(dur)
+    if et:
+        return f"{st} - {et} ({dur_label})"
+    return f"{st} ({dur_label})"
+
+
 def _build_add_form_prompt(state: dict[str, object]) -> str:
     step = str(state.get("step") or "date")
     if step == "date":
-        return "Nhập ngày cho lịch hẹn.\nVí dụ: 16/5 hoặc 2026-05-16\nGõ /cancel để hủy."
+        return "Nhập ngày cho lịch hẹn.\nVí dụ: 16/5, mai, thứ 6 hoặc 2026-05-16\nGõ /cancel để hủy."
     if step == "time":
-        return "Nhập giờ bắt đầu.\nVí dụ: 9h00 hoặc 09h00\nGõ /cancel để hủy."
+        return "Nhập giờ bắt đầu (hoặc khung giờ).\nVí dụ: 9h00, 9h-11h hoặc 14h30\nGõ /cancel để hủy."
     if step == "job":
         return "Nhập nội dung công việc.\nVí dụ: Họp nhóm\nGõ /cancel để hủy."
     if step == "where":
@@ -481,8 +520,8 @@ def _build_add_form_prompt(state: dict[str, object]) -> str:
 def _build_add_form_input_markup(state: dict[str, object]) -> dict[str, object]:
     step = str(state.get("step") or "date")
     placeholders = {
-        "date": "Ví dụ: 16/5 hoặc 2026-05-16",
-        "time": "Ví dụ: 9h00 hoặc 09h00",
+        "date": "Ví dụ: 16/5, mai, thứ 6 hoặc 2026-05-16",
+        "time": "Ví dụ: 9h00, 9h-11h hoặc 14h30",
         "job": "Ví dụ: Họp nhóm",
         "where": "Ví dụ: B402",
     }
@@ -498,24 +537,52 @@ def _format_add_form_value(value: object) -> str:
 
 
 def _build_add_form_review_text(state: dict[str, object]) -> str:
+    date_val = _format_add_form_value(state.get("date"))
+    time_val = _format_time_range_review(state.get("time"), state.get("end_time"), state.get("duration_minutes"))
+    job_val = _format_add_form_value(state.get("job"))
+    where_val = _format_add_form_value(state.get("where"))
+    reminder = int(state.get("reminder_minutes") or 60)
+    reminder_val = f"Báo trước {_format_minutes_label(reminder)}"
+
     return (
-        "Mình đã nhận form:\n"
-        f"- Ngày: {_format_add_form_value(state.get('date'))}\n"
-        f"- Giờ: {_format_add_form_value(state.get('time'))}\n"
-        f"- Làm gì: {_format_add_form_value(state.get('job'))}\n"
-        f"- Ở đâu: {_format_add_form_value(state.get('where'))}\n\n"
-        "Nếu ổn thì bấm Done (hoặc gửi /done) để lưu.\n"
-        "Muốn bỏ thì bấm Cancel (hoặc gửi /cancel)."
+        "📋 XÁC NHẬN LỊCH HẸN\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📅 Ngày: {date_val}\n"
+        f"⏰ Giờ: {time_val}\n"
+        f"📝 Việc: {job_val}\n"
+        f"📍 Nơi: {where_val}\n"
+        f"🔔 Nhắc nhở: {reminder_val}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Bấm Done (hoặc gửi /done) để lưu.\n"
+        "Bấm các nút bên dưới nếu bạn muốn sửa thông tin:"
     )
 
 
-def _build_add_form_keyboard() -> dict[str, list[list[dict[str, str]]]]:
+def _build_add_form_keyboard(state: dict[str, object] | None = None) -> dict[str, list[list[dict[str, str]]]]:
+    st = state or {}
+    duration = int(st.get("duration_minutes") or 60)
+    reminder = int(st.get("reminder_minutes") or 60)
+    dur_label = _format_minutes_label(duration)
+    rem_label = _format_minutes_label(reminder)
+
     return {
         "inline_keyboard": [
             [
                 {"text": "✅ Done", "callback_data": ADD_FORM_DONE_CALLBACK},
                 {"text": "❌ Cancel", "callback_data": ADD_FORM_CANCEL_CALLBACK},
-            ]
+            ],
+            [
+                {"text": "📅 Sửa Ngày", "callback_data": ADD_FORM_EDIT_DATE_CALLBACK},
+                {"text": "⏰ Sửa Giờ", "callback_data": ADD_FORM_EDIT_TIME_CALLBACK},
+            ],
+            [
+                {"text": "📝 Sửa Việc", "callback_data": ADD_FORM_EDIT_JOB_CALLBACK},
+                {"text": "📍 Sửa Nơi", "callback_data": ADD_FORM_EDIT_WHERE_CALLBACK},
+            ],
+            [
+                {"text": f"⏱ Thời lượng: {dur_label}", "callback_data": ADD_FORM_TOGGLE_DURATION_CALLBACK},
+                {"text": f"🔔 Nhắc: {rem_label}", "callback_data": ADD_FORM_TOGGLE_REMINDER_CALLBACK},
+            ],
         ]
     }
 
@@ -532,28 +599,87 @@ def _build_add_form_step_keyboard(state: dict[str, object]) -> dict[str, list[li
 
 
 def _advance_add_form_state(state: dict[str, object], user_text: str) -> str:
-    step = str(state.get("step") or "date")
+    edit_target = state.get("edit_target")
     value = str(user_text or "").strip()
+
+    if edit_target:
+        if edit_target == "date":
+            _parse_date_field(value)
+            state["date"] = value
+            state["edit_target"] = None
+            return _build_add_form_review_text(state)
+        if edit_target == "time":
+            from natural_regex_parser import _add_minutes_to_time, _extract_time_and_duration
+            st, et, dur, _ = _extract_time_and_duration(value)
+            if not st:
+                h, m = _parse_clock_parts(value)
+                st = _format_clock_for_add_form(h, m)
+                dur = int(state.get("duration_minutes") or 60)
+                et = _add_minutes_to_time(st, dur)
+            state["time"] = st
+            state["end_time"] = et
+            state["duration_minutes"] = dur
+            state["edit_target"] = None
+            return _build_add_form_review_text(state)
+        if edit_target == "job":
+            if not value:
+                raise ValueError("Mục 'Làm gì' không được để trống.")
+            state["job"] = value
+            state["edit_target"] = None
+            return _build_add_form_review_text(state)
+        if edit_target == "where":
+            state["where"] = value or None
+            state["edit_target"] = None
+            return _build_add_form_review_text(state)
+
+    step = str(state.get("step") or "date")
     if step == "date":
         _parse_date_field(value)
         state["date"] = value
-        state["step"] = "time"
-        return _build_add_form_prompt(state)
+        if not state.get("time"):
+            state["step"] = "time"
+            return _build_add_form_prompt(state)
+        if not state.get("job"):
+            state["step"] = "job"
+            return _build_add_form_prompt(state)
+        state["step"] = "confirm"
+        return _build_add_form_review_text(state)
+
     if step == "time":
-        hour, minute = _parse_clock_parts(value)
-        state["time"] = _format_clock_for_add_form(hour, minute)
-        state["step"] = "job"
-        return _build_add_form_prompt(state)
+        from natural_regex_parser import _add_minutes_to_time, _extract_time_and_duration
+        st, et, dur, _ = _extract_time_and_duration(value)
+        if not st:
+            hour, minute = _parse_clock_parts(value)
+            st = _format_clock_for_add_form(hour, minute)
+            dur = int(state.get("duration_minutes") or 60)
+            et = _add_minutes_to_time(st, dur)
+        state["time"] = st
+        state["end_time"] = et
+        state["duration_minutes"] = dur
+        if not state.get("job"):
+            state["step"] = "job"
+            return _build_add_form_prompt(state)
+        state["step"] = "confirm"
+        return _build_add_form_review_text(state)
+
     if step == "job":
         if not value:
             raise ValueError("Mục 'Làm gì' không được để trống.")
         state["job"] = value
+        if not state.get("date"):
+            state["step"] = "date"
+            return _build_add_form_prompt(state)
+        if not state.get("time"):
+            state["step"] = "time"
+            return _build_add_form_prompt(state)
         state["step"] = "where"
         return _build_add_form_prompt(state)
+
     if step == "where":
         state["where"] = value or None
         state["step"] = "confirm"
         return _build_add_form_review_text(state)
+
     raise ValueError("Form thêm lịch đang ở trạng thái không hợp lệ.")
 
 

@@ -28,7 +28,7 @@ on:
 jobs:
   sync:
     name: Crawl & Sync TDTU Schedule
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     # Restrict GITHUB_TOKEN to the minimum required permissions.
     permissions:
