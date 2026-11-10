@@ -23,7 +23,7 @@ on:
 jobs:
   notify:
     name: Fetch & Send Schedule
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     # Restrict GITHUB_TOKEN to the minimum required permissions.
     # This workflow only reads repository contents (checkout) and does not

@@ -51,7 +51,13 @@ from smart_paste import (
 from telegram_mvp_bot import (
     ADD_FORM_CANCEL_CALLBACK,
     ADD_FORM_DONE_CALLBACK,
+    ADD_FORM_EDIT_DATE_CALLBACK,
+    ADD_FORM_EDIT_JOB_CALLBACK,
+    ADD_FORM_EDIT_TIME_CALLBACK,
+    ADD_FORM_EDIT_WHERE_CALLBACK,
     ADD_FORM_SKIP_WHERE_CALLBACK,
+    ADD_FORM_TOGGLE_DURATION_CALLBACK,
+    ADD_FORM_TOGGLE_REMINDER_CALLBACK,
     SMART_PASTE_ADD_ALL_CALLBACK,
     SMART_PASTE_ADD_PREFIX,
     SMART_PASTE_CANCEL_CALLBACK,
@@ -62,6 +68,7 @@ from telegram_mvp_bot import (
     _build_add_appointment_from_form,
     _build_add_form_keyboard,
     _build_add_form_raw_input,
+    _build_add_form_review_text,
     _build_appointment_confirmation,
     _build_deadline_detail_text,
     _build_deadline_keyboard,
@@ -405,6 +412,32 @@ def _clear_inline_keyboard(token: str, chat_id: str, message_id: str | None) -> 
         logger.debug("Could not clear Smart Paste keyboard: %s", type(exc).__name__)
 
 
+def _edit_or_send_add_form_review(
+    token: str,
+    chat_id: str,
+    state: dict[str, object],
+    message_id: str | int | None = None,
+) -> None:
+    text = _build_add_form_review_text(state)
+    keyboard = _build_add_form_keyboard(state)
+    if message_id:
+        try:
+            _telegram_post(
+                token,
+                "editMessageText",
+                {
+                    "chat_id": chat_id,
+                    "message_id": int(message_id),
+                    "text": text,
+                    "reply_markup": keyboard,
+                },
+            )
+            return
+        except (TelegramDeliveryError, ValueError) as exc:
+            logger.debug("editMessageText failed, falling back to send: %s", type(exc).__name__)
+    _send_text_with_keyboard(token, chat_id, text, keyboard)
+
+
 def _parse_smart_paste_callback(data: str, chat_id: str) -> tuple[str, str | None]:
     if data == SMART_PASTE_ADD_ALL_CALLBACK:
         batch = _SMART_PASTE_STATES.active_batch_for_chat(chat_id)
@@ -464,7 +497,54 @@ def telegram_webhook(
             _answer_callback(token, callback_query)
             if data == ADD_FORM_CANCEL_CALLBACK:
                 _ADD_FORM_STATES.pop(chat_id, None)
+                callback_message_id = _callback_message_id(callback_query)
+                _clear_inline_keyboard(token, chat_id, callback_message_id)
                 _send_text(token, chat_id, "Đã hủy form thêm lịch.")
+                return {"ok": True}
+
+            if data == ADD_FORM_TOGGLE_DURATION_CALLBACK:
+                state = _ADD_FORM_STATES.get(chat_id)
+                if not state:
+                    _send_text(token, chat_id, "Form đã hết hạn. Bạn dùng /add để tạo lại nhé.")
+                    return {"ok": True}
+                durations = [30, 60, 90, 120, 180]
+                current_dur = int(state.get("duration_minutes") or 60)
+                next_dur = durations[(durations.index(current_dur) + 1) % len(durations)] if current_dur in durations else 60
+                state["duration_minutes"] = next_dur
+                if state.get("time"):
+                    from natural_regex_parser import _add_minutes_to_time
+                    state["end_time"] = _add_minutes_to_time(str(state["time"]), next_dur)
+                callback_message_id = _callback_message_id(callback_query)
+                _edit_or_send_add_form_review(token, chat_id, state, callback_message_id)
+                return {"ok": True}
+
+            if data == ADD_FORM_TOGGLE_REMINDER_CALLBACK:
+                state = _ADD_FORM_STATES.get(chat_id)
+                if not state:
+                    _send_text(token, chat_id, "Form đã hết hạn. Bạn dùng /add để tạo lại nhé.")
+                    return {"ok": True}
+                reminders = [15, 30, 60, 120, 180]
+                current_rem = int(state.get("reminder_minutes") or 60)
+                next_rem = reminders[(reminders.index(current_rem) + 1) % len(reminders)] if current_rem in reminders else 60
+                state["reminder_minutes"] = next_rem
+                callback_message_id = _callback_message_id(callback_query)
+                _edit_or_send_add_form_review(token, chat_id, state, callback_message_id)
+                return {"ok": True}
+
+            if data in {ADD_FORM_EDIT_DATE_CALLBACK, ADD_FORM_EDIT_TIME_CALLBACK, ADD_FORM_EDIT_JOB_CALLBACK, ADD_FORM_EDIT_WHERE_CALLBACK}:
+                state = _ADD_FORM_STATES.get(chat_id)
+                if not state:
+                    _send_text(token, chat_id, "Form đã hết hạn. Bạn dùng /add để tạo lại nhé.")
+                    return {"ok": True}
+                target = data.split(":")[-1]
+                state["edit_target"] = target
+                prompts = {
+                    "date": "Nhập ngày mới cho lịch hẹn (Ví dụ: mai, thứ 6, 16/5 hoặc 2026-05-16):",
+                    "time": "Nhập giờ mới cho lịch hẹn (Ví dụ: 9h00, 9h-11h hoặc 14h30):",
+                    "job": "Nhập nội dung công việc mới:",
+                    "where": "Nhập địa điểm mới:",
+                }
+                _send_text(token, chat_id, prompts.get(target, "Nhập thông tin mới:"))
                 return {"ok": True}
 
             if data in {ADD_FORM_DONE_CALLBACK, ADD_FORM_SKIP_WHERE_CALLBACK}:
@@ -478,23 +558,28 @@ def telegram_webhook(
                     except ValueError as exc:
                         _send_text(token, chat_id, str(exc))
                         return {"ok": True}
-                    _send_text_with_keyboard(token, chat_id, reply, _build_add_form_keyboard())
+                    _send_text_with_keyboard(token, chat_id, reply, _build_add_form_keyboard(state))
                     return {"ok": True}
                 if not _is_add_form_complete(state):
                     _send_add_form_step(token, chat_id, state, prefix="Bạn chưa điền xong form.")
                     return {"ok": True}
                 title, appt_date, start_time, location = _build_add_appointment_from_form(state)
                 appointment_id = str(state.setdefault("appointment_id", uuid.uuid4().hex))
+                end_time = str(state.get("end_time") or "").strip() or None
+                reminder_minutes = int(state.get("reminder_minutes") or 60)
                 insert_calendar_event(
                     title=title,
                     appointment_date=appt_date,
                     start_time=start_time,
-                    end_time=None,
+                    end_time=end_time,
                     location=location,
                     note=_build_add_form_raw_input(state),
                     appointment_id=appointment_id,
+                    reminder_minutes=reminder_minutes,
                 )
                 _ADD_FORM_STATES.pop(chat_id, None)
+                callback_message_id = _callback_message_id(callback_query)
+                _clear_inline_keyboard(token, chat_id, callback_message_id)
                 _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
                 return {"ok": True}
 
@@ -686,14 +771,17 @@ def telegram_webhook(
                 return {"ok": True}
             title, appt_date, start_time, location = _build_add_appointment_from_form(form_state)
             appointment_id = str(form_state.setdefault("appointment_id", uuid.uuid4().hex))
+            end_time = str(form_state.get("end_time") or "").strip() or None
+            reminder_minutes = int(form_state.get("reminder_minutes") or 60)
             insert_calendar_event(
                 title=title,
                 appointment_date=appt_date,
                 start_time=start_time,
-                end_time=None,
+                end_time=end_time,
                 location=location,
                 note=_build_add_form_raw_input(form_state),
                 appointment_id=appointment_id,
+                reminder_minutes=reminder_minutes,
             )
             _ADD_FORM_STATES.pop(chat_id, None)
             _send_text(token, chat_id, _build_appointment_confirmation(title, appt_date, start_time, location))
@@ -706,7 +794,7 @@ def telegram_webhook(
                 _send_add_form_step(token, chat_id, form_state, prefix=str(exc))
                 return {"ok": True}
             if _is_add_form_complete(form_state):
-                _send_text_with_keyboard(token, chat_id, reply, _build_add_form_keyboard())
+                _send_text_with_keyboard(token, chat_id, reply, _build_add_form_keyboard(form_state))
             else:
                 _send_add_form_step(token, chat_id, form_state)
             return {"ok": True}
@@ -740,13 +828,54 @@ def telegram_webhook(
             rows, _, _ = fetch_events_from_calendar(target_date)
             _send_text(token, chat_id, _build_schedule_text(rows, target_date))
             return {"ok": True}
-        if command == "/add" and lowered == command_token:
+        if command == "/add":
             active = _SMART_PASTE_STATES.active_batch_for_chat(chat_id)
             if active:
                 _SMART_PASTE_STATES.cancel(chat_id, active.batch_id)
+
+            arg_text = text[len(command_token):].strip()
+            if not arg_text:
+                state = _new_add_form_state()
+                _ADD_FORM_STATES[chat_id] = state
+                _send_add_form_step(token, chat_id, state, prefix="Bắt đầu form thêm lịch.")
+                return {"ok": True}
+
+            from natural_regex_parser import parse_quick_add
+            res = parse_quick_add(arg_text, reference_date=local_today())
             state = _new_add_form_state()
+            if res.appointment_date:
+                state["date"] = res.appointment_date.strftime("%d/%m/%Y")
+            if res.start_time:
+                state["time"] = res.start_time
+            if res.end_time:
+                state["end_time"] = res.end_time
+            if res.duration_minutes:
+                state["duration_minutes"] = res.duration_minutes
+            if res.location:
+                state["where"] = res.location
+            if res.reminder_minutes:
+                state["reminder_minutes"] = res.reminder_minutes
+            if res.title:
+                state["job"] = res.title
+
             _ADD_FORM_STATES[chat_id] = state
-            _send_add_form_step(token, chat_id, state, prefix="Bắt đầu form thêm lịch.")
+            if res.is_complete:
+                state["step"] = "confirm"
+                _send_text_with_keyboard(
+                    token,
+                    chat_id,
+                    _build_add_form_review_text(state),
+                    _build_add_form_keyboard(state),
+                )
+            else:
+                first_missing = res.missing_fields[0] if res.missing_fields else "date"
+                state["step"] = first_missing
+                _send_add_form_step(
+                    token,
+                    chat_id,
+                    state,
+                    prefix="Mình đã nhận diện một phần thông tin, bạn bổ sung tiếp nhé:",
+                )
             return {"ok": True}
         if lowered.startswith("/"):
             _send_text(token, chat_id, START_HELP_TEXT)

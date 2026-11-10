@@ -266,6 +266,7 @@ def insert_calendar_event(
     note: str | None,
     *,
     appointment_id: str | None = None,
+    reminder_minutes: int | None = None,
 ) -> str:
     """Insert one appointment and return a verified Calendar event ID.
 
@@ -318,7 +319,10 @@ def insert_calendar_event(
             "start": {"dateTime": start_dt.isoformat(), "timeZone": timezone},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": timezone},
         }
-        _apply_default_reminder(payload)
+        if reminder_minutes is not None:
+            _apply_default_reminder(payload, minutes=reminder_minutes)
+        else:
+            _apply_default_reminder(payload)
     else:
         payload = {
             "id": calendar_event_id,
