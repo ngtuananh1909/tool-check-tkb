@@ -563,7 +563,11 @@ def telegram_webhook(
                 if not _is_add_form_complete(state):
                     _send_add_form_step(token, chat_id, state, prefix="Bạn chưa điền xong form.")
                     return {"ok": True}
-                title, appt_date, start_time, location = _build_add_appointment_from_form(state)
+                try:
+                    title, appt_date, start_time, location = _build_add_appointment_from_form(state)
+                except ValueError as exc:
+                    _send_text(token, chat_id, f"⚠️ Thông tin chưa hợp lệ: {exc}")
+                    return {"ok": True}
                 appointment_id = str(state.setdefault("appointment_id", uuid.uuid4().hex))
                 end_time = str(state.get("end_time") or "").strip() or None
                 reminder_minutes = int(state.get("reminder_minutes") or 60)
@@ -769,7 +773,11 @@ def telegram_webhook(
             if not _is_add_form_complete(form_state):
                 _send_add_form_step(token, chat_id, form_state, prefix="Bạn chưa điền xong form.")
                 return {"ok": True}
-            title, appt_date, start_time, location = _build_add_appointment_from_form(form_state)
+            try:
+                title, appt_date, start_time, location = _build_add_appointment_from_form(form_state)
+            except ValueError as exc:
+                _send_text(token, chat_id, f"⚠️ Thông tin chưa hợp lệ: {exc}")
+                return {"ok": True}
             appointment_id = str(form_state.setdefault("appointment_id", uuid.uuid4().hex))
             end_time = str(form_state.get("end_time") or "").strip() or None
             reminder_minutes = int(form_state.get("reminder_minutes") or 60)
@@ -941,6 +949,14 @@ def telegram_webhook(
     except TelegramDeliveryError as exc:
         logger.warning("Telegram delivery failed while processing webhook: %s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Telegram delivery temporarily failed") from exc
+    except (CalendarConfigurationError, CalendarPersistenceError) as exc:
+        logger.warning("Calendar operation failed: %s", exc)
+        if chat_id:
+            try:
+                _send_text(token, chat_id, f"⚠️ Lỗi Google Calendar: {exc}")
+            except TelegramDeliveryError:
+                raise HTTPException(status_code=503, detail="Telegram delivery temporarily failed")
+        return {"ok": True}
     except Exception:
         logger.exception("Webhook processing failed")
         if chat_id:

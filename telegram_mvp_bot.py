@@ -304,6 +304,22 @@ def _format_clock_for_add_form(hour: int, minute: int) -> str:
 
 
 def _parse_clock_field(raw: str) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        raise ValueError("Không đọc được giờ. Dùng HHhMM, ví dụ 9h00 hoặc 09h00.")
+
+    m_colon = re.fullmatch(r"(\d{1,2}):(\d{2})(?::\d{2})?", value)
+    if m_colon:
+        h, m = map(int, m_colon.groups()[:2])
+        return f"{_validate_hhmm(h, m)}:00"
+
+    m_h = re.fullmatch(r"(\d{1,2})[hH](\d{2})?", value)
+    if m_h:
+        h_str, m_str = m_h.groups()
+        h = int(h_str)
+        m = int(m_str) if m_str is not None else 0
+        return f"{_validate_hhmm(h, m)}:00"
+
     hour, minute = _parse_clock_parts(raw)
     return f"{_validate_hhmm(hour, minute)}:00"
 
