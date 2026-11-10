@@ -164,6 +164,30 @@ class BotHelperTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _advance_add_form_state(state, "9:00")
 
+    def test_parse_clock_field_accepts_colon_and_h_formats(self) -> None:
+        from telegram_mvp_bot import _parse_clock_field
+
+        self.assertEqual(_parse_clock_field("09:00"), "09:00:00")
+        self.assertEqual(_parse_clock_field("9:00"), "09:00:00")
+        self.assertEqual(_parse_clock_field("14:30"), "14:30:00")
+        self.assertEqual(_parse_clock_field("09:00:00"), "09:00:00")
+        self.assertEqual(_parse_clock_field("9h00"), "09:00:00")
+        self.assertEqual(_parse_clock_field("9h"), "09:00:00")
+        self.assertEqual(_parse_clock_field("15h30"), "15:30:00")
+
+    def test_build_add_appointment_from_form_accepts_colon_time(self) -> None:
+        state = {
+            "date": "16/5",
+            "time": "09:00",
+            "job": "Họp nhóm",
+            "where": "B402",
+        }
+        title, appt_date, start_time, location = _build_add_appointment_from_form(state)
+        self.assertEqual(title, "Họp nhóm")
+        self.assertEqual(start_time, "09:00:00")
+        self.assertEqual(location, "B402")
+
 
 if __name__ == "__main__":
     unittest.main()
+

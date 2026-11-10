@@ -297,7 +297,7 @@ def insert_calendar_event(
     except ZoneInfoNotFoundError as exc:
         raise CalendarConfigurationError(f"Invalid APP_TIMEZONE configuration: {timezone}") from exc
 
-    if start_time and end_time and end_time <= start_time:
+    if start_time and end_time and end_time[:5] <= start_time[:5]:
         raise CalendarPersistenceError("Calendar event end time must be after start time.")
 
     stable_appointment_id = str(appointment_id or uuid.uuid4().hex).strip()
