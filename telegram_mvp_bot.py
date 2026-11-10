@@ -313,7 +313,7 @@ def _parse_clock_field(raw: str) -> str:
         h, m = map(int, m_colon.groups()[:2])
         return f"{_validate_hhmm(h, m)}:00"
 
-    m_h = re.fullmatch(r"(\d{1,2})h(\d{2})?", value)
+    m_h = re.fullmatch(r"(\d{1,2})[hH](\d{2})?", value)
     if m_h:
         h_str, m_str = m_h.groups()
         h = int(h_str)
