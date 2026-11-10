@@ -941,6 +941,14 @@ def telegram_webhook(
     except TelegramDeliveryError as exc:
         logger.warning("Telegram delivery failed while processing webhook: %s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Telegram delivery temporarily failed") from exc
+    except (CalendarConfigurationError, CalendarPersistenceError) as exc:
+        logger.warning("Calendar operation failed: %s", exc)
+        if chat_id:
+            try:
+                _send_text(token, chat_id, f"⚠️ Lỗi Google Calendar: {exc}")
+            except TelegramDeliveryError:
+                raise HTTPException(status_code=503, detail="Telegram delivery temporarily failed")
+        return {"ok": True}
     except Exception:
         logger.exception("Webhook processing failed")
         if chat_id:
