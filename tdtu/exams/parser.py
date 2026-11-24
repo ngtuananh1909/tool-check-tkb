@@ -8,7 +8,7 @@ import logging
 import re
 from typing import Any
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from tdtu.exceptions import TDTUParsingError
 from time_utils import local_today
@@ -72,6 +72,46 @@ def parse_time_str(text: str) -> str:
     if not m:
         return ""
     return f"{int(m.group(1)):02d}:{m.group(2)}"
+
+
+def _is_exam_card_header(node: Any) -> bool:
+    """An exam card starts with a direct child element that holds the subject <p>."""
+    if not isinstance(node, Tag):
+        return False
+    return node.name == "p" or node.find("p") is not None
+
+
+def split_exam_cell_cards(cell: Any) -> list[Any]:
+    """
+    Split a calendar grid cell into one fragment per exam card.
+
+    The portal renders every exam on the same weekday inside a single <td>,
+    each card starting with a coloured <span> that wraps the subject <p>.
+    Cells with fewer than two card headers are returned unchanged.
+    """
+    if not isinstance(cell, Tag):
+        return [cell]
+
+    children = list(cell.children)
+    if sum(1 for child in children if _is_exam_card_header(child)) < 2:
+        return [cell]
+
+    groups: list[list[Any]] = [[]]
+    seen_header = False
+    for child in children:
+        if _is_exam_card_header(child):
+            if seen_header:
+                groups.append([])
+            seen_header = True
+        groups[-1].append(child)
+
+    cards: list[Any] = []
+    for group in groups:
+        markup = "".join(str(node) for node in group)
+        fragment = BeautifulSoup(f"<{cell.name}>{markup}</{cell.name}>", "html.parser").find(cell.name)
+        if fragment is not None:
+            cards.append(fragment)
+    return cards
 
 
 def parse_exam_cell(
@@ -293,14 +333,15 @@ def parse_exam_html(
                     "notes": "Crawled from exam schedule",
                 })
         else:
-            # Layout B: Calendar Grid table (columns are weekdays, each cell is an exam card)
+            # Layout B: Calendar Grid table (columns are weekdays; a cell holds one or more exam cards)
             for tr in trs[1:]:
                 if "Headerrow" in tr.get("class", []):
                     continue
                 for td in tr.find_all("td"):
-                    exam_record = parse_exam_cell(td, default_exam_type=default_exam_type, semester_hint=semester_hint)
-                    if exam_record:
-                        rows.append(exam_record)
+                    for card in split_exam_cell_cards(td):
+                        exam_record = parse_exam_cell(card, default_exam_type=default_exam_type, semester_hint=semester_hint)
+                        if exam_record:
+                            rows.append(exam_record)
 
     # Distinguish valid empty table from parser failure on non-empty data rows
     if target_table_ids and non_header_data_rows_found > 0 and len(rows) == 0:

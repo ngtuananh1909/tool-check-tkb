@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -285,6 +286,23 @@ class CrawlerParserTests(unittest.TestCase):
         self.assertEqual(rows[1]["exam_date"], "2026-05-28")
         self.assertEqual(rows[1]["start_time"], "07:30")
         self.assertEqual(rows[1]["exam_room"], "A504")
+
+    def test_parse_exam_grid_cell_with_multiple_exam_cards(self) -> None:
+        """Regression for issue #31: two exams on the same weekday share one <td>."""
+        fixture_path = Path(__file__).parent / "fixtures" / "tdtu" / "exams_final_grid_shared_cell.html"
+        self.page.set_content(f"<html><body>{fixture_path.read_text(encoding='utf-8')}</body></html>")
+
+        rows = _parse_exam_table(self.page)
+        by_subject = {row["subject_name"]: row for row in rows}
+
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(by_subject["Kinh tế chính trị Mác-Lênin"]["exam_date"], "2026-10-22")
+        self.assertEqual(by_subject["Kinh tế chính trị Mác-Lênin"]["exam_room"], "A608")
+        dsa = by_subject["Cấu trúc dữ liệu và giải thuật"]
+        self.assertEqual(dsa["exam_date"], "2026-12-10")
+        self.assertEqual(dsa["start_time"], "09:30")
+        self.assertEqual(dsa["end_time"], "11:00")
+        self.assertEqual(dsa["exam_room"], "B310")
 
     def test_parse_weekly_grid_table_extracts_status(self) -> None:
         self.page.set_content(

@@ -203,6 +203,38 @@ class TestExamParser(unittest.TestCase):
         self.assertEqual(ex3["exam_room"], "A603")
         self.assertEqual(ex3["exam_type"], "Giữa kỳ")
 
+    def test_parse_calendar_grid_cell_with_multiple_exam_cards(self) -> None:
+        """Regression for issue #31: two exams on the same weekday share one <td>."""
+        fixture_path = FIXTURES_DIR / "exams_final_grid_shared_cell.html"
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            html = f.read()
+
+        exams = parse_exam_html(html, default_exam_type="Cuối kỳ", semester_hint="HK1/2026-2027", tab_arg="1")
+        by_subject = {exam["subject_name"]: exam for exam in exams}
+
+        self.assertEqual(len(exams), 3)
+        self.assertEqual(
+            set(by_subject),
+            {"Hệ cơ sở dữ liệu", "Kinh tế chính trị Mác-Lênin", "Cấu trúc dữ liệu và giải thuật"},
+        )
+
+        ktct = by_subject["Kinh tế chính trị Mác-Lênin"]
+        self.assertEqual(ktct["exam_date"], "2026-10-22")
+        self.assertEqual(ktct["start_time"], "19:15")
+        self.assertEqual(ktct["end_time"], "20:15")
+        self.assertEqual(ktct["exam_room"], "A608")
+        self.assertIn("Mã MH: 306103", ktct["notes"])
+
+        dsa = by_subject["Cấu trúc dữ liệu và giải thuật"]
+        self.assertEqual(dsa["exam_date"], "2026-12-10")
+        self.assertEqual(dsa["start_time"], "09:30")
+        self.assertEqual(dsa["end_time"], "11:00")
+        self.assertEqual(dsa["exam_room"], "B310")
+        self.assertEqual(dsa["exam_type"], "Cuối kỳ")
+        self.assertIn("Mã MH: 504008", dsa["notes"])
+        self.assertIn("Nhóm: 01", dsa["notes"])
+        self.assertIn("Tổ: 001", dsa["notes"])
+
     def test_parse_calendar_grid_empty_tab_returns_empty(self) -> None:
         empty_grid_html = """
         <table id="LichThi1_CuoiKyTable">

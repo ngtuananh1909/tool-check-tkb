@@ -1023,10 +1023,38 @@ def _parse_exam_grid_cells(page) -> list[dict]:
                 return `${String(parseInt(m[1], 10)).padStart(2, "0")}:${m[2]}`;
             };
 
+            const isCardHeader = (node) => node.nodeType === 1
+                && (node.tagName === "P" || node.querySelector("p") !== null);
+            const nodeText = (node) => {
+                if (node.nodeType === 3) return node.textContent || "";
+                if (node.nodeType !== 1) return "";
+                if (node.tagName === "BR") return "\n";
+                return node.innerText || "";
+            };
+            // The portal renders every exam on the same weekday inside one <td>;
+            // each card starts with a coloured <span> that wraps the subject <p>.
+            const splitCards = (cell) => {
+                const children = Array.from(cell.childNodes);
+                if (children.filter(isCardHeader).length < 2) {
+                    return [{ root: cell, text: (cell.innerText || "").trim() }];
+                }
+                const cards = [{ root: null, parts: [] }];
+                for (const child of children) {
+                    if (isCardHeader(child)) {
+                        if (cards[cards.length - 1].root !== null) {
+                            cards.push({ root: null, parts: [] });
+                        }
+                        cards[cards.length - 1].root = child;
+                    }
+                    cards[cards.length - 1].parts.push(nodeText(child));
+                }
+                return cards.map((card) => ({ root: card.root, text: card.parts.join("").trim() }));
+            };
+
             for (const doc of contexts) {
                 const cells = Array.from(doc.querySelectorAll("td, div"));
-                for (const cell of cells) {
-                    const text = (cell.innerText || "").trim();
+                for (const card of cells.flatMap(splitCards)) {
+                    const text = card.text;
                     if (!text) continue;
 
                     const lowered = text.toLowerCase();
@@ -1034,7 +1062,7 @@ def _parse_exam_grid_cells(page) -> list[dict]:
                     if (!/(giờ\s*thi|gio\s*thi|time)/i.test(lowered)) continue;
 
                     let subject = "";
-                    const pOrB = cell.querySelector("p, b");
+                    const pOrB = card.root.matches("p") ? card.root : card.root.querySelector("p, b");
                     if (pOrB) {
                         const clone = pOrB.cloneNode(true);
                         clone.querySelectorAll(".lbl-lang").forEach((el) => el.remove());
